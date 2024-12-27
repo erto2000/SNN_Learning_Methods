@@ -28,7 +28,7 @@ class Trainer:
                     model.train()
                     spk_rec = model(data)
 
-                    self.optimize_fns[i](model, spk_rec, targets)
+                    self.optimize_fns[i](spk_rec, targets)
 
                     # Evaluate test accuracy periodically
                     if counter % test_interval == 0:
