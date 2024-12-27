@@ -21,8 +21,8 @@ device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cp
 train_loader, test_loader, input_dim = get_loaders(batch_size)
 
 
-# Define alternative models and training configurations
-def build_model1():
+# Backpropagation model
+def backprop_model():
     model = SNN(input_dim, time_steps, beta, surrogate.fast_sigmoid(slope=25))
     loss_fn = SF.ce_rate_loss()
     optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.999))
@@ -40,19 +40,62 @@ def build_model1():
     }
 
 
-def build_model2():
-    model = SNN(input_dim, time_steps, beta, surrogate.atan())
-    loss_fn = SF.mse_count_loss()
-    optimizer = torch.optim.SGD(model.parameters(), momentum=0.9)
+# Perturbation learning model
+def perturbation_model():
+    model = SNN(input_dim, time_steps, beta, surrogate.fast_sigmoid(slope=25))
+    loss_fn = SF.ce_rate_loss()
+
+    perturbation_scale = 0.01
+
+    def optimize_fn(model, spk_rec, targets):
+        with torch.no_grad():
+            baseline_loss = loss_fn(spk_rec, targets)
+
+            perturbations = []
+            for param in model.parameters():
+                perturbation = torch.randn_like(param) * perturbation_scale
+                param.add_(perturbation)
+                perturbations.append(perturbation)
+
+            perturbed_loss = loss_fn(spk_rec, targets)
+            delta_loss = perturbed_loss - baseline_loss
+
+            for param, perturbation in zip(model.parameters(), perturbations):
+                param.add_(-perturbation * delta_loss / perturbation_scale * 0.1)  # Apply update manually
+
+    return {
+        'name': 'Model_Perturbation',
+        'model': model,
+        'optimize_fn': optimize_fn,
+    }
+
+
+# Random feedback model
+def random_feedback_model():
+    model = SNN(input_dim, time_steps, beta, surrogate.fast_sigmoid(slope=25))
+    loss_fn = SF.ce_rate_loss()
+    optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.999))
+
+    # Generate random feedback weights
+    feedback_weights = []
+    for param in model.parameters():
+        feedback_weights.append(torch.randn_like(param).to(device))
 
     def optimize_fn(model, spk_rec, targets):
         loss_val = loss_fn(spk_rec, targets)
         optimizer.zero_grad()
+
+        # Compute gradients using random feedback weights
         loss_val.backward()
+        with torch.no_grad():
+            for param, feedback in zip(model.parameters(), feedback_weights):
+                if param.grad is not None:
+                    param.grad = feedback * param.grad  # Apply random feedback weights
+
         optimizer.step()
 
     return {
-        'name': 'Model_Atan',
+        'name': 'Model_RF_Backprop',
         'model': model,
         'optimize_fn': optimize_fn,
     }
@@ -60,8 +103,9 @@ def build_model2():
 
 # Build configurations
 configs = [
-    build_model1(),
-    build_model2(),
+    backprop_model(),
+    perturbation_model(),
+    random_feedback_model(),
 ]
 
 # Train multiple models in parallel
