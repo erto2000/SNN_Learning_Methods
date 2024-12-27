@@ -4,7 +4,7 @@ from core import SNN
 
 
 # Perturbation learning model
-def perturbation_model(input_dim, time_steps, beta, spike_grad):
+def model_perturbation(input_dim, time_steps, beta, spike_grad):
     model = SNN(input_dim, time_steps, beta, spike_grad)
     loss_fn = SF.ce_rate_loss()
 

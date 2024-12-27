@@ -4,7 +4,7 @@ from core import SNN
 
 
 # Random feedback model
-def random_feedback_model(input_dim, time_steps, beta, spike_grad, device):
+def model_random_feedback(input_dim, time_steps, beta, spike_grad, device):
     model = SNN(input_dim, time_steps, beta, spike_grad)
     loss_fn = SF.ce_rate_loss()
     optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.999))

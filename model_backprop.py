@@ -4,7 +4,7 @@ from core import SNN
 
 
 # Backpropagation model
-def backprop_model(input_dim, time_steps, beta, spike_grad):
+def model_backprop(input_dim, time_steps, beta, spike_grad):
     model = SNN(input_dim, time_steps, beta, spike_grad)
     loss_fn = SF.ce_rate_loss()
     optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.999))
