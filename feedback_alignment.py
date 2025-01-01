@@ -4,34 +4,19 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import matplotlib.pyplot as plt
+from FeedbackLinear import FeedbackLinear
 
 # Set random seed for reproducibility
 torch.manual_seed(0)
-
-
-# Define the neural network
-class FeedbackAlignmentNet(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
-        super(FeedbackAlignmentNet, self).__init__()
-        self.hidden = nn.Linear(input_size, hidden_size)
-        self.output = nn.Linear(hidden_size, output_size)
-
-        # Random feedback weights for feedback alignment
-        self.B = torch.randn(hidden_size, output_size, device=device)  # Random fixed weights
-
-    def forward(self, x):
-        x = torch.relu(self.hidden(x))
-        x = self.output(x)
-        return x
-
 
 # Hyperparameters
 input_size = 28 * 28  # MNIST image size (28x28 pixels)
 hidden_size = 128  # Number of hidden neurons
 output_size = 10  # Number of output classes (digits 0-9)
-learning_rate = 0.001
+learning_rate = 0.01
 batch_size = 128
 epochs = 5
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load MNIST dataset
 transform = transforms.Compose([
@@ -42,74 +27,65 @@ test_dataset = datasets.MNIST(root="./data", train=False, transform=transform, d
 train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
 test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False)
 
-# Initialize model, loss function, and optimizer
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = FeedbackAlignmentNet(input_size, hidden_size, output_size).to(device)
+
+# Define Feedback Alignment Network
+feedback_model = nn.Sequential(
+    FeedbackLinear(input_size, hidden_size),
+    nn.ReLU(),
+    FeedbackLinear(hidden_size, output_size)
+).to(device)
+
+
+# Define loss and optimizer
+optimizer = optim.Adam(feedback_model.parameters(), lr=learning_rate)
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)  # Changed to Adam optimizer
 
 # Lists for storing metrics
 iterations = []
 losses = []
 accuracies = []
 
-# Training loop with Feedback Alignment
+# Training
 for epoch in range(epochs):
     total = 0
     correct = 0
     for i, (images, labels) in enumerate(train_loader):
-        # Flatten images and move to device
+        # Prepare input
         images = images.view(-1, input_size).to(device)
         labels = labels.to(device)
 
         # Forward pass
-        outputs = model(images)
+        outputs = feedback_model(images)
         loss = criterion(outputs, labels)
 
-        # Compute error signal
-        labels_one_hot = torch.zeros_like(outputs).scatter_(1, labels.unsqueeze(1), 1.0)
-        error = labels_one_hot - outputs
-
-        # Feedback Alignment: Compute hidden layer updates
-        hidden_activations = torch.relu(model.hidden(images))
-        delta_hidden = error @ model.B.T  # Random feedback weights applied
-
-        # Update weights
+        # Backward pass (no manual gradients)
         optimizer.zero_grad()
-        model.output.weight.grad = -torch.matmul(error.T, hidden_activations) / batch_size
-        model.hidden.weight.grad = -torch.matmul(delta_hidden.T, images) / batch_size
-
+        loss.backward()
         optimizer.step()
 
-        # Calculate accuracy every 50 iterations
+        # Calculate accuracy
         _, predicted = torch.max(outputs, 1)
         total += labels.size(0)
         correct += (predicted == labels).sum().item()
 
-        if (i + 1) % 50 == 0:  # Print accuracy every 50 iterations
+        # Log metrics
+        if (i + 1) % 50 == 0:
             accuracy = 100 * correct / total
-            print(f"Epoch [{epoch + 1}/{epochs}], Iteration [{i + 1}/{len(train_loader)}], "
-                  f"Loss: {loss.item():.4f}, Accuracy: {accuracy:.2f}%")
-
-            # Store metrics
+            print(f"Epoch [{epoch + 1}/{epochs}], Step [{i + 1}/{len(train_loader)}], Loss: {loss.item():.4f}, Accuracy: {accuracy:.2f}%")
             iterations.append(epoch * len(train_loader) + i + 1)
             losses.append(loss.item())
             accuracies.append(accuracy)
 
-    # Print epoch-level progress
     print(f"Epoch [{epoch + 1}/{epochs}] completed.")
-
-# Save the model
-torch.save(model.state_dict(), "feedback_alignment_mnist.pth")
 
 # Final Test Accuracy
 correct = 0
 total = 0
 with torch.no_grad():
-    for images, labels in train_loader:
+    for images, labels in test_loader:  # Use test_loader for final evaluation
         images = images.view(-1, input_size).to(device)
         labels = labels.to(device)
-        outputs = model(images)
+        outputs = feedback_model(images)
         _, predicted = torch.max(outputs, 1)
         total += labels.size(0)
         correct += (predicted == labels).sum().item()
@@ -117,22 +93,28 @@ with torch.no_grad():
 accuracy = 100 * correct / total
 print(f"Final Accuracy: {accuracy:.2f}%")
 
-# Plot Loss
-plt.figure(figsize=(10, 5))
+
+# Plot Loss and Accuracy in the same window
+plt.figure(figsize=(12, 6))  # Set figure size
+
+# Subplot 1 - Loss
+plt.subplot(1, 2, 1)  # 1 row, 2 columns, 1st plot
 plt.plot(iterations, losses, marker='o', label='Loss')
 plt.xlabel('Iteration')
 plt.ylabel('Loss')
 plt.title('Loss over Iterations')
 plt.grid(True)
 plt.legend()
-plt.show()
 
-# Plot Accuracy
-plt.figure(figsize=(10, 5))
+# Subplot 2 - Accuracy
+plt.subplot(1, 2, 2)  # 1 row, 2 columns, 2nd plot
 plt.plot(iterations, accuracies, marker='o', color='green', label='Accuracy')
 plt.xlabel('Iteration')
 plt.ylabel('Accuracy (%)')
 plt.title('Accuracy over Iterations')
 plt.grid(True)
 plt.legend()
+
+# Display both plots
+plt.tight_layout()  # Adjust layout to prevent overlap
 plt.show()
