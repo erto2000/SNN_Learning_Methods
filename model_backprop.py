@@ -16,7 +16,7 @@ def model_backprop(input_dim, time_steps, beta, spike_grad):
         optimizer.step()
 
     return {
-        'name': 'Model_Fast_Sigmoid',
+        'name': 'Backprop',
         'model': model,
         'optimize_fn': optimize_fn,
     }

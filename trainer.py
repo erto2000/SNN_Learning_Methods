@@ -17,8 +17,8 @@ class Trainer:
             self.test_acc_hist.append([])
 
     def train(self, train_loader, test_loader, num_epochs, test_interval=50):
-        counter = 0
         for epoch in range(num_epochs):
+            counter = 0
             for data, targets in iter(train_loader):
                 data = data.to(self.device)
                 targets = targets.to(self.device)
@@ -35,6 +35,6 @@ class Trainer:
                         with torch.no_grad():
                             model.eval()
                             test_acc = batch_accuracy(test_loader, self.device, model)
-                            print(f"Model {self.names[i]}, Iteration {counter}/{len(train_loader)}, Test Acc: {test_acc * 100:.2f}%\n")
+                            print(f"Model {self.names[i]}, Iteration E{epoch}-{counter}/{len(train_loader)}, Test Acc: {test_acc * 100:.2f}%")
                             self.test_acc_hist[i].append(test_acc.item())
                 counter += 1

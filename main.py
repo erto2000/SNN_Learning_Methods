@@ -25,7 +25,7 @@ train_loader, test_loader, input_dim = get_loaders(batch_size)
 # Configurations
 configs = [
     model_backprop(input_dim, time_steps, beta, spike_grad),
-    model_perturbation(input_dim, time_steps, beta, spike_grad),
+    # model_perturbation(input_dim, time_steps, beta, spike_grad),
     model_random_feedback(input_dim, time_steps, beta, spike_grad, device),
 ]
 

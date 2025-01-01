@@ -27,7 +27,7 @@ def model_perturbation(input_dim, time_steps, beta, spike_grad):
                 param.add_(-perturbation * delta_loss / perturbation_scale * 0.1)  # Apply update manually
 
     return {
-        'name': 'Model_Perturbation',
+        'name': 'Perturbation',
         'model': model,
         'optimize_fn': optimize_fn,
     }

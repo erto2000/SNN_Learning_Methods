@@ -25,14 +25,14 @@ def get_loaders(batch_size):
 
 #  Network architecture
 class SNN(torch.nn.Module):
-    def __init__(self, input_dim, time_steps, beta, spike_grad):
+    def __init__(self, input_dim, time_steps, beta, spike_grad, linear_layer=nn.Linear):
         super().__init__()
 
         self.time_steps = time_steps
         self.net = nn.Sequential(
-                        nn.Linear(input_dim, 128),
+                        linear_layer(input_dim, 128),
                         snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True),
-                        nn.Linear(128, 10),
+                        linear_layer(128, 10),
                         snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True),
                     )
 
