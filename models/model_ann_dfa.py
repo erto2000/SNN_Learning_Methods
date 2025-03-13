@@ -1,15 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from ANN import ANN, get_ann_accuracy_function
+from models.ANN import ANN, get_ann_accuracy_function
 
 
 # Direct Feedback Alignment (DFA) model for ANN
-def model_ann_dfa(input_dim, hidden_dim, output_dim):
-    model = ANN(input_dim, hidden_dim, output_dim)
+def model_ann_dfa(name, structure):
+    model = ANN(structure)
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), betas=(0.9, 0.999))
-    projection_matrix = torch.randn(output_dim, hidden_dim)
+    projection_matrix = torch.randn(structure[-1], structure[1])
 
     def optimize_fn(data, targets):
         B = projection_matrix.to(data.device)
@@ -43,7 +43,7 @@ def model_ann_dfa(input_dim, hidden_dim, output_dim):
         return loss_fn(outputs, targets).item()
 
     return {
-        'name': 'ANN_DFA',
+        'name': name,
         'model': model,
         'optimize_fn': optimize_fn,
         'test_fn': get_ann_accuracy_function(model)

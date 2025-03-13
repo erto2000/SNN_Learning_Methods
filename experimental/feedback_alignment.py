@@ -4,7 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import matplotlib.pyplot as plt
-from FeedbackLinear import FeedbackLinear  # Ensure this module is correctly implemented
+from models.FeedbackLinear import FeedbackLinear  # Ensure this module is correctly implemented
 
 
 # Hyperparameters
