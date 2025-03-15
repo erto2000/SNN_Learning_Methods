@@ -1,6 +1,6 @@
 from snntorch import functional as SF
 import torch
-from SNN import SNN, get_snn_accuracy_function
+from models.SNN import SNN, get_snn_accuracy_function
 
 
 # Backpropagation model

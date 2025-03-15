@@ -1,7 +1,7 @@
 from snntorch import functional as SF
 import torch
-from FeedbackLinear import FeedbackLinear
-from SNN import SNN, get_snn_accuracy_function
+from models.FeedbackLinear import FeedbackLinear
+from models.SNN import SNN, get_snn_accuracy_function
 
 
 # Random feedback model
