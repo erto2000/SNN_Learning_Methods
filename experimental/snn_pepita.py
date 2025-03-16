@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torchvision
 import torchvision.transforms as transforms
+from snntorch.spikegen import rate
 
 # Parameters
 num_epochs = 10
@@ -12,8 +13,8 @@ beta = 0.9
 time_steps = 50
 spike_grad = surrogate.fast_sigmoid(slope=25)
 data_percentage = 0.1  # Load a fraction of the dataset
-lr = 0.00001
-f_factor = 0.0005
+lr = 0.1
+f_factor = 0.05
 
 # Device
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -49,22 +50,25 @@ class SNN(nn.Module):
         self.fc1 = nn.Linear(input_dim, hidden_dim)
         self.lif1 = snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True)
         self.fc2 = nn.Linear(hidden_dim, output_dim)
-        self.lif2 = snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True)
         self.time_steps = time_steps
 
-    def forward_pass(self, x):
+    def forward_pass(self, x, use_first_dim_as_time=False):
         # Reset hidden states for the Leaky neurons
         utils.reset(self.lif1)
-        utils.reset(self.lif2)
 
         # Accumulators for hidden and output spikes
         h_sum = 0
         out_sum = 0
-        for _ in range(self.time_steps):
-            h = self.lif1(self.fc1(x))
-            out = self.lif2(self.fc2(h))
+
+        # Repeat for a number of time steps
+        time_steps  = x.shape[0] if use_first_dim_as_time else self.time_steps
+        for t in range(time_steps):
+            input = x[t] if use_first_dim_as_time else x
+            h = self.lif1(self.fc1(input))
+            out = self.fc2(h)
             h_sum += h  # accumulate hidden-layer spikes
             out_sum += out  # accumulate output spikes
+
         return h_sum, out_sum
 
 
@@ -91,7 +95,8 @@ for epoch in range(num_epochs):
 
         # === First Pass (Normal Pass) ===
         # Get hidden activity and output spike counts from normal input
-        h_normal, out_normal = model.forward_pass(images)
+        # images_spike = rate(images, time_steps)
+        h_normal, out_normal = model.forward_pass(images, use_first_dim_as_time=False)
         # Compute probabilities from output spike counts
         p = torch.softmax(out_normal, dim=1)
         # Create one-hot targets
@@ -107,17 +112,19 @@ for epoch in range(num_epochs):
 
         # === Second Pass (Modulated Pass) ===
         # Run the modulated input through the network to get hidden activity
-        h_modulated, _ = model.forward_pass(modulated_input)
+        # modulated_input_spike = rate(modulated_input, time_steps)
+        # modulated_input_spike_count = torch.sum(modulated_input_spike, dim=0) / time_steps
+        h_modulated, _ = model.forward_pass(modulated_input, use_first_dim_as_time=False)
 
         # === Compute Weight Updates Manually ===
         # For the first layer, use the difference between the hidden activations
-        delta_w1 = (h_normal - h_modulated).transpose(0, 1) @ modulated_input  # shape: (hidden_dim, input_dim)
+        delta_w1 = -((h_normal - h_modulated) / time_steps).transpose(0, 1) @ modulated_input / images.shape[0] # shape: (hidden_dim, input_dim)
         # For the second layer, project the error onto the hidden activation from the modulated pass
-        delta_w2 = e.transpose(0, 1) @ h_modulated  # shape: (output_dim, hidden_dim)
+        delta_w2 = -e.transpose(0, 1) @ (h_modulated / time_steps) / images.shape[0] # shape: (output_dim, hidden_dim)
 
         # Manual weight update (note: biases are not updated here)
-        model.fc1.weight.data -= lr * delta_w1
-        model.fc2.weight.data -= lr * delta_w2
+        model.fc1.weight.data += lr * delta_w1
+        model.fc2.weight.data += lr * delta_w2
 
         # Optionally, compute training accuracy using the probabilities from the normal pass
         pred = torch.argmax(p, dim=1)

@@ -45,7 +45,7 @@ def init_model_weights(model, init_method="default"):
                 raise ValueError("Unknown initialization method: " + init_method)
 
 
-def initialize_F_proj(device, shape, init_method="default"):
+def initialize_F_proj(device, shape, init_method="default", factor=0.05):
     """
     Initialize the random projection matrix F_proj.
     For 'default', F_proj is initialized as before.
@@ -54,26 +54,25 @@ def initialize_F_proj(device, shape, init_method="default"):
     if init_method == "he_uniform":
         F_proj = torch.empty(*shape, device=device)
         nn.init.kaiming_uniform_(F_proj, nonlinearity='relu')
-        F_proj = F_proj * 0.005
+        F_proj = F_proj * factor
     elif init_method == "default":
-        # Keep same behavior as original: Gaussian with scaling 0.005
-        F_proj = torch.randn(*shape, device=device) * 0.005
+        F_proj = torch.randn(*shape, device=device) * factor
     else:
         raise ValueError("Unknown initialization method: " + init_method)
     return F_proj
 
 
-def train_mnist_two_forward_passes(epochs=5, batch_size=64, lr=0.01, init_method="default"):
+def train_mnist_two_forward_passes(epochs=5, batch_size=64, lr=0.01, init_method="default", factor=0.05):
     # ------------------------------------------------
     # 2. Prepare MNIST with [0,1] normalization only
     # ------------------------------------------------
     transform = transforms.ToTensor()  # ToTensor() already scales pixels to [0,1]
 
     train_dataset = torchvision.datasets.MNIST(
-        root="./data", train=True, download=True, transform=transform
+        root="../data", train=True, download=True, transform=transform
     )
     test_dataset = torchvision.datasets.MNIST(
-        root="./data", train=False, download=True, transform=transform
+        root="../data", train=False, download=True, transform=transform
     )
 
     train_loader = torch.utils.data.DataLoader(
@@ -94,7 +93,7 @@ def train_mnist_two_forward_passes(epochs=5, batch_size=64, lr=0.01, init_method
 
     # Initialize the random projection matrix F_proj based on init_method.
     # F_proj should be of shape [10, 784]
-    F_proj = initialize_F_proj(device, (10, 784), init_method=init_method)
+    F_proj = initialize_F_proj(device, (10, 784), init_method=init_method, factor=factor)
 
     # ------------------------------------------------
     # 4. Training Loop
@@ -131,12 +130,12 @@ def train_mnist_two_forward_passes(epochs=5, batch_size=64, lr=0.01, init_method
                 # -----------------------------
                 # MANUAL WEIGHT UPDATES using @
                 # -----------------------------
-                delta_w1 = (h - h_err).T @ modulated_input  # [hidden_size, 784]
-                delta_w2 = e.T @ h_err  # [10, hidden_size]
+                delta_w1 = -(h - h_err).T @ modulated_input / data.shape[0] # [hidden_size, 784]
+                delta_w2 = -e.T @ h_err / data.shape[0] # [10, hidden_size]
 
                 # Apply updates with the chosen learning rate
-                model.fc1.weight -= lr * delta_w1
-                model.fc2.weight -= lr * delta_w2
+                model.fc1.weight += lr * delta_w1
+                model.fc2.weight += lr * delta_w2
 
         # -----------------------------
         # Compute Training & Test Accuracy
@@ -168,4 +167,4 @@ def evaluate_accuracy(model, loader, device):
 
 if __name__ == "__main__":
     # You can change init_method to "he_uniform" to use Kaiming He uniform initialization.
-    train_mnist_two_forward_passes(epochs=10, batch_size=64, lr=0.01, init_method="he_uniform")
+    train_mnist_two_forward_passes(epochs=10, batch_size=64, lr=0.1, init_method="he_uniform", factor=0.05)
