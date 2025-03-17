@@ -1,6 +1,6 @@
 import torch.nn as nn
 import torch.optim as optim
-from models.ANN import ANN, get_ann_accuracy_function
+from models.ANN import ANN, get_ann_test_fn, accuracy_fn
 
 
 # Backpropagation model for ANN
@@ -15,11 +15,11 @@ def model_ann_backprop(name, structure):
         optimizer.zero_grad()
         loss_val.backward()
         optimizer.step()
-        return loss_val.item()
+        return loss_val.item(), accuracy_fn(outputs, targets)
 
     return {
         'name': name,
         'model': model,
         'optimize_fn': optimize_fn,
-        'test_fn': get_ann_accuracy_function(model)
+        'test_fn': get_ann_test_fn(model)
     }

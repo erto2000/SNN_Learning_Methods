@@ -1,4 +1,4 @@
-from models.ANN import ANN, get_ann_accuracy_function
+from models.ANN import ANN, get_ann_test_fn, accuracy_fn
 from utility import init_model_weights, initialize_F_proj
 import torch
 import torch.nn.functional as F
@@ -45,11 +45,11 @@ def model_ann_pepita(name, structure, lr=0.01):
                 # Update for next iteration
                 prev_activation = h
 
-            return torch.norm(e).item()
+            return torch.norm(e).item(), accuracy_fn(outputs, targets)
 
     return {
         'name': name,
         'model': model,
         'optimize_fn': optimize_fn,
-        'test_fn': get_ann_accuracy_function(model)
+        'test_fn': get_ann_test_fn(model)
     }

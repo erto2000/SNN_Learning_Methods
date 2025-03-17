@@ -1,6 +1,6 @@
 from snntorch import functional as SF
 import torch
-from models.SNN import SNN, get_snn_accuracy_function
+from models.SNN import SNN, get_snn_test_fn, accuracy_fn
 
 
 # Backpropagation model
@@ -15,11 +15,11 @@ def model_snn_backprop(name, input_dim, time_steps, beta, spike_grad):
         optimizer.zero_grad()
         loss_val.backward()
         optimizer.step()
-        return loss_val.item()
+        return loss_val.item(), accuracy_fn(spk_rec, targets)
 
     return {
         'name': name,
         'model': model,
         'optimize_fn': optimize_fn,
-        'test_fn': get_snn_accuracy_function(model)
+        'test_fn': get_snn_test_fn(model)
     }

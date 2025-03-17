@@ -1,7 +1,7 @@
 import torch
 from snntorch import functional as SF
 import copy
-from models.SNN import SNN, get_snn_accuracy_function
+from models.SNN import SNN, get_snn_test_fn, accuracy_fn
 
 
 # Perturbation learning model
@@ -23,10 +23,10 @@ def model_snn_perturbation(name, input_dim, time_steps, beta, spike_grad, pertur
             model.load_state_dict(state)
             with torch.no_grad():
                 output = model(data)
-                return loss_fn(output, targets).item()
+                return output, loss_fn(output, targets).item()
 
         # Compute original loss
-        loss_orig = compute_loss(original_state)
+        output, loss_orig = compute_loss(original_state)
 
         # Create perturbed state_dicts
         perturbed_pos = copy.deepcopy(original_state)
@@ -37,8 +37,8 @@ def model_snn_perturbation(name, input_dim, time_steps, beta, spike_grad, pertur
             perturbed_neg[name] -= perturb
 
         # Compute losses for perturbed states
-        loss_pos = compute_loss(perturbed_pos)
-        loss_neg = compute_loss(perturbed_neg)
+        _, loss_pos = compute_loss(perturbed_pos)
+        _, loss_neg = compute_loss(perturbed_neg)
 
         # Determine the best perturbation
         if loss_pos < loss_neg and loss_pos < loss_orig:
@@ -51,11 +51,11 @@ def model_snn_perturbation(name, input_dim, time_steps, beta, spike_grad, pertur
         # Update the model with the best state
         model.load_state_dict(best_state)
 
-        return loss_orig
+        return loss_orig, accuracy_fn(output, targets)
 
     return {
         'name': name,
         'model': model,
         'optimize_fn': optimize_fn,
-        'test_fn': get_snn_accuracy_function(model)
+        'test_fn': get_snn_test_fn(model)
     }

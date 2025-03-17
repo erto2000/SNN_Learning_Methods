@@ -20,7 +20,8 @@ class Trainer:
             self.metrics[config['name']] = {
                 'iterations': [],
                 'losses': [],
-                'accuracies': [],
+                'train_accuracies': [],  # Track training accuracy
+                'test_accuracies': [],
                 'times': []  # Store cumulative time
             }
             self.accumulated_times[config['name']] = 0.0  # Initialize time accumulator
@@ -34,24 +35,26 @@ class Trainer:
                 data = data.to(self.device)
                 targets = targets.to(self.device)
 
-                # Store losses per model for this iteration.
                 losses = []
+                train_accuracies = []
+
                 for m, model in enumerate(self.models):
                     model.train()
                     start_time = time.time()
-                    loss = self.optimize_fns[m](data, targets)
-                    losses.append(loss)
+                    loss, train_accuracy = self.optimize_fns[m](data, targets)  # Now returns loss & accuracy
                     elapsed_time = time.time() - start_time
+                    losses.append(loss)
+                    train_accuracies.append(train_accuracy)
                     self.accumulated_times[self.names[m]] += elapsed_time
 
                 # Run test evaluation if it's the correct iteration.
                 if self.iteration % test_interval == 0:
-                    self.test(test_loader, self.iteration, epoch, losses)
+                    self.test(test_loader, self.iteration, epoch, losses, train_accuracies)
 
                 self.iteration += 1  # Increase the global iteration counter
 
-    def test(self, test_loader, iteration, epoch, losses):
-        header = f"{'Model':<15}{'Epoch':<8}{'Iter':<8}{'Loss':<10}{'Acc (%)':<10}{'Time (s)':<10}"
+    def test(self, test_loader, iteration, epoch, losses, train_accuracies):
+        header = f"{'Model':<25}{'Epoch':<8}{'Iter':<8}{'Loss':<10}{'Train Acc (%)':<15}{'Test Acc (%)':<15}{'Time (s)':<10}"
         print(header)
         print("-" * len(header))
 
@@ -74,12 +77,13 @@ class Trainer:
         for m, name in enumerate(self.names):
             total_correct = test_results[name]["correct"]
             total_samples = test_results[name]["total"]
-            accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+            test_accuracy = total_correct / total_samples if total_samples > 0 else 0.0
 
             self.metrics[name]['iterations'].append(iteration)
             self.metrics[name]['losses'].append(losses[m])
-            self.metrics[name]['accuracies'].append(accuracy)
+            self.metrics[name]['train_accuracies'].append(train_accuracies[m])  # Save train accuracy
+            self.metrics[name]['test_accuracies'].append(test_accuracy)  # Save test accuracy
             self.metrics[name]['times'].append(self.accumulated_times[name])
 
-            print(f"{name:<15}{epoch + 1:<8}{iteration:<8}{losses[m]:<10.4f}{accuracy * 100:<10.2f}{self.accumulated_times[name]:<10.4f}")
+            print(f"{name:<25}{epoch + 1:<8}{iteration:<8}{losses[m]:<10.4f}{train_accuracies[m] * 100:<15.2f}{test_accuracy * 100:<15.2f}{self.accumulated_times[name]:<10.4f}")
         print("\n")

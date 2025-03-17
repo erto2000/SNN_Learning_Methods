@@ -54,11 +54,16 @@ class ANN(nn.Module):
         return x
 
 
-def get_ann_accuracy_function(model):
+def accuracy_fn(predictions, targets):
+    with torch.no_grad():
+        predictions = predictions.argmax(dim=1)  # Get the predicted class
+        return (predictions == targets).float().mean().item()  # Compute accuracy
+
+
+def get_ann_test_fn(model):
     def test_fn(data, targets):
         with torch.no_grad():
             outputs = model(data)  # Forward pass
-            predictions = outputs.argmax(dim=1)  # Get the predicted class
-            return (predictions == targets).float().mean().item()  # Compute accuracy
+            return accuracy_fn(outputs, targets)
 
     return test_fn

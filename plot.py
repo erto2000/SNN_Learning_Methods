@@ -2,10 +2,10 @@ import matplotlib.pyplot as plt
 
 
 def plot_results(trainer):
-    plt.figure(figsize=(21, 6))  # Increase figure size to accommodate 3 plots
+    plt.figure(figsize=(14, 10))  # Adjust figure size for better readability
 
     # Plot Loss
-    plt.subplot(1, 3, 1)  # Create subplot (1 row, 3 columns, first plot)
+    plt.subplot(2, 2, 1)  # First plot (Row 1, Column 1)
     for name in trainer.names:
         metrics = trainer.metrics[name]
         plt.plot(metrics['iterations'], metrics['losses'], marker='o', label=f'{name} Loss')
@@ -15,25 +15,36 @@ def plot_results(trainer):
     plt.legend()
     plt.grid(True)
 
-    # Plot Accuracy
-    plt.subplot(1, 3, 2)  # Create subplot (1 row, 3 columns, second plot)
+    # Plot Training Accuracy
+    plt.subplot(2, 2, 2)  # Second plot (Row 1, Column 2)
     for name in trainer.names:
         metrics = trainer.metrics[name]
-        plt.plot(metrics['iterations'], metrics['accuracies'], marker='o', label=f'{name} Accuracy')
+        plt.plot(metrics['iterations'], metrics['train_accuracies'], marker='o', label=f'{name} Train Accuracy')
     plt.xlabel('Iteration')
-    plt.ylabel('Accuracy (%)')
-    plt.title('Accuracy for All Methods')
+    plt.ylabel('Training Accuracy (%)')
+    plt.title('Training Accuracy for All Methods')
     plt.legend()
     plt.grid(True)
 
-    # Plot Time vs. Accuracy
-    plt.subplot(1, 3, 3)  # Create subplot (1 row, 3 columns, third plot)
+    # Plot Test Accuracy
+    plt.subplot(2, 2, 3)  # Third plot (Row 2, Column 1)
     for name in trainer.names:
         metrics = trainer.metrics[name]
-        plt.plot(metrics['times'], metrics['accuracies'], marker='o', label=f'{name} Time vs Accuracy')
+        plt.plot(metrics['iterations'], metrics['test_accuracies'], marker='o', label=f'{name} Test Accuracy')
+    plt.xlabel('Iteration')
+    plt.ylabel('Test Accuracy (%)')
+    plt.title('Test Accuracy for All Methods')
+    plt.legend()
+    plt.grid(True)
+
+    # Plot Time vs. Test Accuracy
+    plt.subplot(2, 2, 4)  # Fourth plot (Row 2, Column 2)
+    for name in trainer.names:
+        metrics = trainer.metrics[name]
+        plt.plot(metrics['times'], metrics['test_accuracies'], marker='o', label=f'{name} Time vs Test Acc')
     plt.xlabel('Accumulated Time (s)')
-    plt.ylabel('Accuracy (%)')
-    plt.title('Time vs. Accuracy')
+    plt.ylabel('Test Accuracy (%)')
+    plt.title('Time vs. Test Accuracy')
     plt.legend()
     plt.grid(True)
 
