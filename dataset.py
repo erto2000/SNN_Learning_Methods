@@ -3,7 +3,7 @@ from torchvision import datasets, transforms
 import numpy as np
 
 
-def get_datasets(data_percentage=1.0):
+def get_mnist(data_percentage=1.0):
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Lambda(lambda x: x.view(-1))

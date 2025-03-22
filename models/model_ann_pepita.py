@@ -5,10 +5,10 @@ import torch.nn.functional as F
 import torch.nn as nn
 
 
-def get_model(name, structure, lr=0.01):
+def get_model(name, structure, lr=0.01, init_method='default', multiplier=0.005):
     model = ANN(structure, output_activation=nn.Softmax(dim=1))
-    init_model_weights(model, init_method='default')
-    f_proj = initialize_F_proj((structure[-1], structure[0]), init_method='default')
+    init_model_weights(model, init_method=init_method)
+    f_proj = initialize_F_proj((structure[-1], structure[0]), init_method=init_method, multiplier=multiplier)
 
     def optimize_fn(data, targets):
         with torch.no_grad():
@@ -53,3 +53,22 @@ def get_model(name, structure, lr=0.01):
         'optimize_fn': optimize_fn,
         'test_fn': get_ann_test_fn(model)
     }
+
+
+def get_trial_generator(input_dim, output_dim):
+    def trial_generator(trial):
+        init_method = trial.suggest_categorical("init_method", ["default", "he_uniform"])
+        lr = trial.suggest_float("lr", 1e-5, 1e-1, log=True)
+        multiplier = trial.suggest_float("multiplier", 1e-5, 1, log=True)
+        hidden_layers = trial.suggest_int("hidden_layers", 1, 3)
+        hidden_size = trial.suggest_int("hidden_size", 32, 1024)
+
+        structure = [input_dim]
+        for _ in range(hidden_layers):
+            structure.append(hidden_size)
+        structure.append(output_dim)
+
+        return get_model('ANN_Pepita', structure, lr=lr, init_method=init_method, multiplier=multiplier)
+
+    return trial_generator
+
