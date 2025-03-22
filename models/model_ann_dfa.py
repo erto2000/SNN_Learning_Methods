@@ -5,7 +5,7 @@ from models.ANN import ANN, get_ann_test_fn, accuracy_fn
 
 
 # Direct Feedback Alignment (DFA) model for ANN
-def model_ann_dfa(name, structure):
+def get_model(name, structure):
     model = ANN(structure)
     loss_fn = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), betas=(0.9, 0.999))

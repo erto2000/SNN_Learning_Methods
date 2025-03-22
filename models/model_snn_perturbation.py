@@ -5,7 +5,7 @@ from models.SNN import SNN, get_snn_test_fn, accuracy_fn
 
 
 # Perturbation learning model
-def model_snn_perturbation(name, input_dim, time_steps, beta, spike_grad, perturbation_scale=0.01):
+def get_model(name, input_dim, time_steps, beta, spike_grad, perturbation_scale=0.01):
     model = SNN(input_dim, time_steps, beta, spike_grad)
     loss_fn = SF.ce_rate_loss()
 

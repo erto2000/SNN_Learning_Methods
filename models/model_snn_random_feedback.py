@@ -5,7 +5,7 @@ from models.SNN import SNN, get_snn_test_fn, accuracy_fn
 
 
 # Random feedback model
-def model_snn_random_feedback(name, input_dim, time_steps, beta, spike_grad):
+def get_model(name, input_dim, time_steps, beta, spike_grad):
     model = SNN(input_dim, time_steps, beta, spike_grad, linear_layer=FeedbackLinear)
     loss_fn = SF.ce_rate_loss()
     optimizer = torch.optim.Adam(model.parameters(), betas=(0.9, 0.999))

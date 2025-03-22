@@ -7,7 +7,7 @@ f_factor = 0.05
 
 
 # Backpropagation model
-def model_snn_pepita(name, input_dim, time_steps, beta, spike_grad):
+def get_model(name, input_dim, time_steps, beta, spike_grad):
     model = SNNPepita(input_dim=input_dim, hidden_dim=128, output_dim=10, time_steps=time_steps, beta=beta,
                 spike_grad=spike_grad)
     f_proj = (torch.rand(10, input_dim) * f_factor)

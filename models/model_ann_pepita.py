@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 
 
-def model_ann_pepita(name, structure, lr=0.01):
+def get_model(name, structure, lr=0.01):
     model = ANN(structure, output_activation=nn.Softmax(dim=1))
     init_model_weights(model, init_method='default')
     f_proj = initialize_F_proj((structure[-1], structure[0]), init_method='default')

@@ -1,46 +1,84 @@
+# Libraries
 import torch
+import optuna
+import os
 from snntorch import surrogate
-from core import get_loaders
+
+# General imports
+from core import get_datasets, get_loaders, get_loaders_getter
 from trainer import Trainer
 from plot import plot_results
-from models.model_snn_backprop import model_snn_backprop
-from models.model_snn_random_feedback import model_snn_random_feedback
-from models.model_snn_perturbation import model_snn_perturbation
-from models.model_snn_pepita import model_snn_pepita
-from models.model_ann_backprop import model_ann_backprop
-from models.model_ann_pepita import model_ann_pepita
-from models.model_ann_dfa import model_ann_dfa
+from objective import create_objective
+
+# Model imports
+import models.model_ann_backprop
+import models.model_ann_dfa
+import models.model_ann_pepita
+import models.model_snn_backprop
+import models.model_snn_pepita
+import models.model_snn_perturbation
+import models.model_snn_random_feedback
 
 
-# neuron and simulation parameters
+# Training parameters
 dataset_fraction = 1
-num_epochs = 10
+num_epochs = 1
+test_interval = 50
 batch_size = 128
 beta = 0.9
 time_steps = 50
 spike_grad = surrogate.fast_sigmoid(slope=25)
 
+# Optuna parameters
+optuna_study_name = 'optimization_test'
+optuna_trials = 1
+
 # Device
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-# Load data
-train_loader, test_loader, input_dim = get_loaders(batch_size, dataset_fraction)
+# Dataset
+train_dataset, test_dataset, input_dim = get_datasets(dataset_fraction)
+train_loader, test_loader = get_loaders(train_dataset, test_dataset, batch_size)
 
-# Configurations
+# Training models
 configs = [
-    model_snn_backprop('SNN_Backprop', input_dim, time_steps, beta, spike_grad),
-    model_snn_perturbation('SNN_Perturbation', input_dim, time_steps, beta, spike_grad),
-    model_snn_random_feedback('SNN_Random_Feedback', input_dim, time_steps, beta, spike_grad),
-    model_snn_pepita('SNN_PEPITA', input_dim, time_steps, beta, spike_grad),
+    models.model_snn_backprop.get_model('SNN_Backprop', input_dim, time_steps, beta, spike_grad),
+    models.model_snn_perturbation.get_model('SNN_Perturbation', input_dim, time_steps, beta, spike_grad),
+    models.model_snn_random_feedback.get_model('SNN_Random_Feedback', input_dim, time_steps, beta, spike_grad),
+    models.model_snn_pepita.get_model('SNN_PEPITA', input_dim, time_steps, beta, spike_grad),
 
-    model_ann_backprop('ANN_Backprop', [input_dim, 128, 10]),
-    model_ann_dfa('ANN_DFA', [input_dim, 128, 10]),
-    model_ann_pepita('ANN_PEPITA', [input_dim, 128, 10], lr=0.01),
+    models.model_ann_backprop.get_model('ANN_Backprop', [input_dim, 128, 10]),
+    models.model_ann_dfa.get_model('ANN_DFA', [input_dim, 128, 10]),
+    models.model_ann_pepita.get_model('ANN_PEPITA', [input_dim, 128, 10], lr=0.01),
 ]
 
-# Train multiple models in parallel
-trainer = Trainer(configs, device)
-trainer.train(train_loader, test_loader, num_epochs, test_interval=50)
 
-# Plot results
-plot_results(trainer)
+# Training function
+def training():
+    trainer = Trainer(configs, device)
+    trainer.train(train_loader, test_loader, num_epochs, test_interval=test_interval)
+    plot_results(trainer)
+
+
+# Optuna function
+def optuna_run(trail_generator):
+    study = optuna.create_study(study_name=optuna_study_name, direction='maximize')
+    loaders_getter = get_loaders_getter(train_dataset, test_dataset, batch_size)
+    objective = create_objective(trail_generator, loaders_getter, num_epochs, device)
+    study.optimize(objective, n_trials=optuna_trials)
+
+    print("Best Trial:")
+    print(f"  Accuracy: {study.best_value:.4f}")
+    for k, v in study.best_trial.params.items():
+        print(f"  {k}: {v}")
+
+    os.makedirs('optuna_results', exist_ok=True)
+    optuna.visualization.plot_optimization_history(study).write_html(f'optuna_results/{optuna_study_name}.html')
+
+
+# Training run
+training()
+
+# Optuna run
+# trail_generator = models.model_ann_backprop.get_trial_generator([input_dim, 128, 10])
+# optuna_run(trail_generator)
