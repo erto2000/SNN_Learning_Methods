@@ -5,7 +5,7 @@ import os
 from snntorch import surrogate
 
 # General imports
-from dataset import get_mnist, get_loaders, get_loaders_getter
+from dataset import get_dataset, get_loaders, get_loaders_getter
 from trainer import Trainer
 from plot import plot_results
 from objective import create_objective
@@ -42,7 +42,7 @@ optuna_trials = 50
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 # Dataset
-train_dataset, test_dataset, input_dim = get_mnist(dataset_fraction)
+train_dataset, test_dataset, input_dim = get_dataset("MNIST", dataset_fraction, flatten=True)
 train_loader, test_loader = get_loaders(train_dataset, test_dataset, batch_size)
 
 # Training models
@@ -50,7 +50,7 @@ configs = [
     models.model_snn_backprop.get_model('SNN_Backprop', input_dim, time_steps, beta, spike_grad),
     models.model_snn_perturbation.get_model('SNN_Perturbation', input_dim, time_steps, beta, spike_grad),
     models.model_snn_random_feedback.get_model('SNN_Random_Feedback', input_dim, time_steps, beta, spike_grad),
-    models.model_snn_pepita.get_model('SNN_PEPITA', input_dim, time_steps, beta, spike_grad),
+    models.model_snn_pepita.get_model('SNN_PEPITA', input_dim, time_steps, beta, spike_grad, lr=0.01, f_factor=1),
 
     models.model_ann_backprop.get_model('ANN_Backprop', [input_dim, 128, 10]),
     models.model_ann_dfa.get_model('ANN_DFA', [input_dim, 128, 10]),
