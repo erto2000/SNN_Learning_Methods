@@ -7,6 +7,76 @@ import torch
 import torch.nn as nn
 
 
+class SNNLayer(nn.Module):
+    def __init__(self, input_dim, output_dim, beta, spike_grad=None, linear=False):
+        super(SNNLayer, self).__init__()
+
+        self.fc = nn.Linear(input_dim, output_dim)
+        self.linear = linear
+        self.register_buffer('mem', None)
+        self.spk_rec = []
+        if not self.linear:
+            self.lif = snn.Leaky(beta=beta, spike_grad=spike_grad)
+            self.reset()
+
+    def update_weight(self, delta_weight):
+        self.fc.weight -= delta_weight
+
+    def reset(self):
+        if not self.linear:
+            self.mem = self.lif.init_leaky()
+        self.spk_rec = []
+
+    def get_spk_rec(self):
+        return torch.stack(self.spk_rec)
+
+    def forward(self, x):
+        x = self.fc(x)
+        if not self.linear:
+            x, self.mem = self.lif(x, self.mem)
+            self.spk_rec.append(x)
+            return x, self.mem
+        else:
+            self.spk_rec.append(x)
+            return x, None
+
+
+class SNNDynamic(nn.Module):
+    def __init__(self, structure, beta, spike_grad=None, output_neuron=False):
+        super(SNNDynamic, self).__init__()
+
+        self.layers = nn.ModuleList()
+        for i in range(len(structure) - 1):
+            linear = i == len(structure) - 2 and not output_neuron
+            self.layers.append(SNNLayer(structure[i], structure[i + 1], beta, spike_grad, linear))
+
+    def reset(self):
+        for layer in self.layers:
+            layer.reset()
+
+    def forward(self, x):
+        for layer in self.layers:
+            x, _ = layer(x)
+        return x
+
+    def run(self, time_series):
+        spk_rec = []
+        for t in range(time_series.shape[0]):
+            x = time_series[t]
+            x = self.forward(x)
+            spk_rec.append(x)
+
+        return torch.stack(spk_rec)
+
+    def repeat_run(self, data, time_steps):
+        time_series = data.unsqueeze(0).repeat(time_steps, 1, 1)
+        spk_rec = self.run(time_series)
+        return spk_rec
+
+
+
+
+
 class SNNPepita(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, time_steps, beta, spike_grad):
         super(SNNPepita, self).__init__()
@@ -86,6 +156,15 @@ class SNN(torch.nn.Module):
 def accuracy_fn(spk_rec, targets):
     with torch.no_grad():
         return SF.accuracy_rate(spk_rec, targets)
+
+
+def get_dynamic_snn_test_fn(model, time_steps):
+    def test_fn(data, targets):
+        with torch.no_grad():
+            spk_rec = model.repeat_run(data, time_steps)
+            return accuracy_fn(spk_rec, targets)
+
+    return test_fn
 
 
 def get_snn_test_fn(model):
