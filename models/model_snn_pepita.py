@@ -1,13 +1,10 @@
 import torch
 from models.SNN import SNNPepita, get_snn_test_fn, accuracy_fn
-
-
-lr = 0.1
-f_factor = 0.05
+from snntorch import surrogate
 
 
 # Backpropagation model
-def get_model(name, input_dim, time_steps, beta, spike_grad):
+def get_model(name, input_dim, time_steps, beta, spike_grad, lr, f_factor):
     model = SNNPepita(input_dim=input_dim, hidden_dim=128, output_dim=10, time_steps=time_steps, beta=beta,
                 spike_grad=spike_grad)
     f_proj = (torch.rand(10, input_dim) * f_factor)
@@ -43,3 +40,18 @@ def get_model(name, input_dim, time_steps, beta, spike_grad):
         'optimize_fn': optimize_fn,
         'test_fn': get_snn_test_fn(model)
     }
+
+
+def get_trial_generator():
+    def trial_generator(trial):
+        input_dim = 784
+
+        lr = trial.suggest_float("lr", 1e-5, 1, log=True)
+        multiplier = trial.suggest_float("multiplier", 1e-5, 1, log=True)
+        time_steps = trial.suggest_int("time_steps", 10, 100)
+
+        beta = 0.9
+        spike_grad = surrogate.fast_sigmoid(slope=25)
+        return get_model('ANN_Pepita', input_dim, time_steps, beta, spike_grad, lr, multiplier)
+
+    return trial_generator
