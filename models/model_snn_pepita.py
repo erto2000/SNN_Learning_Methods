@@ -17,7 +17,6 @@ def get_model(name, structure, time_steps, beta, output_neuron=False,
             model.reset()
             output_spk = model.repeat_run(data, time_steps)
             layer_spk_counts = [torch.sum(layer.get_spk_rec(), dim=0) for layer in model.layers]
-            # layer_spk_counts = [model.h_sum, model.out_sum]
             p = torch.softmax(layer_spk_counts[-1], dim=1)
             onehot_labels = torch.nn.functional.one_hot(targets, structure[-1]).float()
             e = p - onehot_labels  # shape: (batch, output_dim)
@@ -27,7 +26,6 @@ def get_model(name, structure, time_steps, beta, output_neuron=False,
 
             model.reset()
             _ = model.repeat_run(modulated_input, time_steps)
-            # h_count = model.h_sum
 
             # Compute weight updates dynamically
             prev_h = modulated_input
@@ -35,7 +33,6 @@ def get_model(name, structure, time_steps, beta, output_neuron=False,
                 if i < len(model.layers) - 1:  # Hidden layers
                     h = layer_spk_counts[i] / time_steps
                     h_err = torch.sum(layer.get_spk_rec(), dim=0) / time_steps  # Activation after perturbed forward pass
-                    # h_err = h_count / time_steps  # Activation after perturbed forward pass
 
                     delta_w = (h - h_err).T @ prev_h  # Weight update
                 else:  # Last layer (uses error signal)
@@ -44,7 +41,6 @@ def get_model(name, structure, time_steps, beta, output_neuron=False,
                 # Apply weight update
                 batch_size = data.shape[0]
                 layer.update_weight(lr * delta_w / batch_size)
-                # layer[0].weight -= lr * delta_w / batch_size
 
                 # Update for next iteration
                 prev_h = h_err
