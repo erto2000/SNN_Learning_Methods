@@ -1,36 +1,53 @@
 import torch
-from models.SNN import SNNPepita, get_snn_test_fn, accuracy_fn
-from snntorch import surrogate
+from models.SNN import SNNDynamic, get_dynamic_snn_test_fn, accuracy_fn
+from utility import initialize_F_proj
 
 
 # Backpropagation model
-def get_model(name, input_dim, time_steps, beta, spike_grad, lr, f_factor):
-    model = SNNPepita(input_dim=input_dim, hidden_dim=128, output_dim=10, time_steps=time_steps, beta=beta,
-                spike_grad=spike_grad)
-    f_proj = (torch.rand(10, input_dim) * f_factor)
+def get_model(name, structure, time_steps, beta, output_neuron=False,
+              lr=0.1, init_method='default', multiplier=0.005):
+    model = SNNDynamic(structure, beta, output_neuron=output_neuron)
+
+    f_proj = initialize_F_proj((structure[-1], structure[0]), init_method=init_method, multiplier=multiplier)
 
     def optimize_fn(data, targets):
         with torch.no_grad():
             f = f_proj.to(data.device)
 
-            output_spk = model(data, use_first_dim_as_time=False)
-            h_normal, out_normal = model.h_sum, model.out_sum
-            p = torch.softmax(out_normal, dim=1)
-            onehot_labels = torch.nn.functional.one_hot(targets, 10).float()
-            e = p - onehot_labels  # shape: (batch, 10)
+            model.reset()
+            output_spk = model.repeat_run(data, time_steps)
+            layer_spk_counts = [torch.sum(layer.get_spk_rec(), dim=0) for layer in model.layers]
+            # layer_spk_counts = [model.h_sum, model.out_sum]
+            p = torch.softmax(layer_spk_counts[-1], dim=1)
+            onehot_labels = torch.nn.functional.one_hot(targets, structure[-1]).float()
+            e = p - onehot_labels  # shape: (batch, output_dim)
 
-            projected_error = e @ f  # shape: (batch, 784)
+            projected_error = e @ f  # shape: (batch, input_dim)
             modulated_input = data + projected_error
 
-            _ = model(modulated_input, use_first_dim_as_time=False)
-            h_modulated = model.h_sum
+            model.reset()
+            _ = model.repeat_run(modulated_input, time_steps)
+            # h_count = model.h_sum
 
-            delta_w1 = -((h_normal - h_modulated) / time_steps).transpose(0, 1) @ modulated_input / data.shape[0]  # shape: (hidden_dim, input_dim)
-            delta_w2 = -e.transpose(0, 1) @ (h_modulated / time_steps) / data.shape[0]  # shape: (output_dim, hidden_dim)
+            # Compute weight updates dynamically
+            prev_h = modulated_input
+            for i, layer in enumerate(model.layers):
+                if i < len(model.layers) - 1:  # Hidden layers
+                    h = layer_spk_counts[i] / time_steps
+                    h_err = torch.sum(layer.get_spk_rec(), dim=0) / time_steps  # Activation after perturbed forward pass
+                    # h_err = h_count / time_steps  # Activation after perturbed forward pass
 
-            # Manual weight update (note: biases are not updated here)
-            model.fc1.weight.data += lr * delta_w1
-            model.fc2.weight.data += lr * delta_w2
+                    delta_w = (h - h_err).T @ prev_h  # Weight update
+                else:  # Last layer (uses error signal)
+                    delta_w = e.T @ prev_h
+
+                # Apply weight update
+                batch_size = data.shape[0]
+                layer.update_weight(lr * delta_w / batch_size)
+                # layer[0].weight -= lr * delta_w / batch_size
+
+                # Update for next iteration
+                prev_h = h_err
 
             return torch.norm(e).item(), accuracy_fn(output_spk, targets)
 
@@ -38,20 +55,19 @@ def get_model(name, input_dim, time_steps, beta, spike_grad, lr, f_factor):
         'name': name,
         'model': model,
         'optimize_fn': optimize_fn,
-        'test_fn': get_snn_test_fn(model)
+        'test_fn': get_dynamic_snn_test_fn(model, time_steps)
     }
 
 
-def get_trial_generator():
+def get_trial_generator(input_dim):
     def trial_generator(trial):
-        input_dim = 784
-
         lr = trial.suggest_float("lr", 1e-5, 1, log=True)
         multiplier = trial.suggest_float("multiplier", 1e-5, 1, log=True)
         time_steps = trial.suggest_int("time_steps", 10, 100)
+        beta = trial.suggest_float("beta", 0.5, 1.0)
 
-        beta = 0.9
-        spike_grad = surrogate.fast_sigmoid(slope=25)
-        return get_model('ANN_Pepita', input_dim, time_steps, beta, spike_grad, lr, multiplier)
+        return get_model('SNN_Pepita', [input_dim, 128, 10], time_steps, beta, False,
+                         lr, 'default', multiplier)
 
     return trial_generator
+

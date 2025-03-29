@@ -13,10 +13,9 @@ class SNNLayer(nn.Module):
 
         self.fc = nn.Linear(input_dim, output_dim)
         self.linear = linear
-        self.register_buffer('mem', None)
         self.spk_rec = []
         if not self.linear:
-            self.lif = snn.Leaky(beta=beta, spike_grad=spike_grad)
+            self.lif = snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True)
             self.reset()
 
     def update_weight(self, delta_weight):
@@ -24,7 +23,7 @@ class SNNLayer(nn.Module):
 
     def reset(self):
         if not self.linear:
-            self.mem = self.lif.init_leaky()
+            utils.reset(self.lif)
         self.spk_rec = []
 
     def get_spk_rec(self):
@@ -33,12 +32,9 @@ class SNNLayer(nn.Module):
     def forward(self, x):
         x = self.fc(x)
         if not self.linear:
-            x, self.mem = self.lif(x, self.mem)
-            self.spk_rec.append(x)
-            return x, self.mem
-        else:
-            self.spk_rec.append(x)
-            return x, None
+            x = self.lif(x)
+        self.spk_rec.append(x)
+        return x
 
 
 class SNNDynamic(nn.Module):
@@ -56,14 +52,14 @@ class SNNDynamic(nn.Module):
 
     def forward(self, x):
         for layer in self.layers:
-            x, _ = layer(x)
+            x = layer(x)
         return x
 
     def run(self, time_series):
         spk_rec = []
         for t in range(time_series.shape[0]):
             x = time_series[t]
-            x = self.forward(x)
+            x = self(x)
             spk_rec.append(x)
 
         return torch.stack(spk_rec)
@@ -72,42 +68,6 @@ class SNNDynamic(nn.Module):
         time_series = data.unsqueeze(0).repeat(time_steps, 1, 1)
         spk_rec = self.run(time_series)
         return spk_rec
-
-
-
-
-
-class SNNPepita(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, time_steps, beta, spike_grad):
-        super(SNNPepita, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.lif1 = snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True)
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
-        self.time_steps = time_steps
-
-        self.h_sum = 0
-        self.out_sum = 0
-
-    def forward(self, x, use_first_dim_as_time=False):
-        # Reset hidden states for the Leaky neurons
-        utils.reset(self.lif1)
-
-        # Accumulators for hidden and output spikes
-        self.h_sum = 0
-        self.out_sum = 0
-
-        # Repeat for a number of time steps
-        spk_rec = []
-        time_steps  = x.shape[0] if use_first_dim_as_time else self.time_steps
-        for t in range(time_steps):
-            input = x[t] if use_first_dim_as_time else x
-            h = self.lif1(self.fc1(input))
-            out = self.fc2(h)
-            self.h_sum += h  # accumulate hidden-layer spikes
-            self.out_sum += out  # accumulate output spikes
-            spk_rec.append(out)
-
-        return torch.stack(spk_rec)
 
 
 #  Network architecture

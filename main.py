@@ -50,7 +50,8 @@ configs = [
     models.model_snn_backprop.get_model('SNN_Backprop', input_dim, time_steps, beta, spike_grad),
     models.model_snn_perturbation.get_model('SNN_Perturbation', input_dim, time_steps, beta, spike_grad),
     models.model_snn_random_feedback.get_model('SNN_Random_Feedback', input_dim, time_steps, beta, spike_grad),
-    models.model_snn_pepita.get_model('SNN_PEPITA', input_dim, time_steps, beta, spike_grad, lr=0.01, f_factor=1),
+    models.model_snn_pepita.get_model('SNN_PEPITA', [input_dim, 128, 10], time_steps, beta,
+                                          output_neuron=False, lr=0.0058, init_method='default', multiplier=0.076),
 
     models.model_ann_backprop.get_model('ANN_Backprop', [input_dim, 128, 10]),
     models.model_ann_dfa.get_model('ANN_DFA', [input_dim, 128, 10]),
