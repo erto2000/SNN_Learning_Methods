@@ -1,14 +1,16 @@
 from models.ANN import ANN, get_ann_test_fn, accuracy_fn
-from utility import init_model_weights, initialize_F_proj
+from utility import init_model_weights, get_random_matrix
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
 
 
-def get_model(name, structure, lr=0.01, init_method='default', multiplier=0.005):
+def get_model(name, structure, lr=0.01, init_method=None, multiplier=0.005, use_sign=False):
     model = ANN(structure, output_activation=nn.Softmax(dim=1))
-    init_model_weights(model, init_method=init_method)
-    f_proj = initialize_F_proj((structure[-1], structure[0]), init_method=init_method, multiplier=multiplier)
+    init_model_weights(model, init_method='default')
+    f_proj = get_random_matrix((structure[-1], structure[0]), method=init_method, multiplier=multiplier)
+
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 
     def optimize_fn(data, targets):
         with torch.no_grad():
@@ -21,7 +23,10 @@ def get_model(name, structure, lr=0.01, init_method='default', multiplier=0.005)
 
             # Compute error and projected error
             e = outputs - target_onehot
-            proj_err = e @ f
+            if use_sign:
+                proj_err = torch.sign(e) @ f
+            else:
+                proj_err = e @ f
 
             # Modulate input with projected error
             modulated_input = data + proj_err
@@ -35,15 +40,18 @@ def get_model(name, structure, lr=0.01, init_method='default', multiplier=0.005)
                     h = activations[i]  # Current activation
                     h_err = modulated_activations[i]  # Activation after perturbed forward pass
 
-                    delta_w = (h - h_err).T @ prev_activation  # Weight update
+                    grad = (h - h_err).T @ prev_activation  # Weight update
                 else:  # Last layer (uses error signal)
-                    delta_w = e.T @ prev_activation
+                    grad = e.T @ prev_activation
 
-                # Apply weight update
-                layer.weight -= lr * delta_w
+                # Apply grad
+                layer.weight.grad = grad
 
                 # Update for next iteration
                 prev_activation = h
+
+            # Update weights
+            optimizer.step()
 
             return torch.norm(e).item(), accuracy_fn(outputs, targets)
 

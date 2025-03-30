@@ -1,14 +1,14 @@
 import torch
 from models.SNN import SNNDynamic, get_dynamic_snn_test_fn, accuracy_fn
-from utility import initialize_F_proj
+from utility import get_random_matrix
 
 
 # Backpropagation model
 def get_model(name, structure, time_steps, beta, output_neuron=False,
-              lr=0.1, init_method='default', multiplier=0.005):
+              lr=0.1, init_method=None, multiplier=0.005):
     model = SNNDynamic(structure, beta, output_neuron=output_neuron)
 
-    f_proj = initialize_F_proj((structure[-1], structure[0]), init_method=init_method, multiplier=multiplier)
+    f_proj = get_random_matrix((structure[-1], structure[0]), method=init_method, multiplier=multiplier)
 
     def optimize_fn(data, targets):
         with torch.no_grad():
