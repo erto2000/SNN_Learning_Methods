@@ -13,7 +13,7 @@ batch_size = 64
 num_epochs = 10
 beta_low, beta_high = 0.01, 1
 learning_rate = 0.01
-# f_factor = 0.1
+f_factor = 0.1
 
 # Load data
 ucr = UCR_UEA_datasets()
@@ -41,9 +41,10 @@ class CustomRNNCell(nn.Module):
         super(CustomRNNCell, self).__init__()
         self.input_size = input_size
         self.W_ih = nn.Parameter(torch.randn(hidden_size, input_size, device=device))
-        # nn.init.xavier_uniform_(self.W_ih)
-        beta_values = torch.logspace(beta_low, beta_high, steps=hidden_size).to(device)
-        self.W_hh = torch.diag(beta_values)  # fixed recurrent
+        self.W_hh = nn.Parameter(torch.randn(hidden_size, hidden_size, device=device))
+        # beta_values = torch.logspace(beta_low, beta_high, steps=hidden_size).to(device)
+        # beta_values = torch.zeros(hidden_size, device=device)
+        # self.W_hh = torch.diag(beta_values)  # fixed recurrent
 
     def forward(self, x_t, h_prev):
         return torch.tanh(x_t @ self.W_ih.T + h_prev @ self.W_hh.T)
@@ -66,7 +67,7 @@ class CustomRNN(nn.Module):
 # === Custom Training Logic ===
 num_classes = len(le.classes_)
 rnn = CustomRNN(input_size, hidden_size, num_classes, beta_low, beta_high).to(device)
-# projection_matrix = torch.eye(input_size, device=device) * f_factor  # Identity matrix for projection
+projection_matrix = torch.eye(input_size, device=device) * f_factor  # Identity matrix for projection
 
 for epoch in range(num_epochs):
     total_classification_loss = 0
@@ -80,7 +81,8 @@ for epoch in range(num_epochs):
 
             prev_hidden_state = None
             hidden_state = torch.zeros(data.size(0), hidden_size, device=device)
-            delta_rnn = torch.zeros_like(rnn.rnn_cell.W_ih, device=device)
+            delta_rnn_ih = torch.zeros_like(rnn.rnn_cell.W_ih, device=device)
+            delta_rnn_hh = torch.zeros_like(rnn.rnn_cell.W_hh, device=device)
             delta_prediction_ro = torch.zeros_like(rnn.prediction_readout.weight, device=device)
             delta_classification_ro = torch.zeros_like(rnn.classification_readout.weight, device=device)
             for t in range(data.size(1)):
@@ -98,29 +100,29 @@ for epoch in range(num_epochs):
 
                 # === Manual Updates ===
                 if t != 0:
-                    if t == data.size(1) - 1:
-                        # === Classification error ===
-                        one_hot = nn.functional.one_hot(target, num_classes=num_classes).float()
-                        soft_classification_output = torch.softmax(classification_output, dim=1)
-                        classification_error = soft_classification_output - one_hot
-                        delta_classification_ro += classification_error.T @ hidden_state
-                    else:
-                        # === Prediction error ===
-                        prediction_error = prediction_output - data[:, t, :]
-                        delta_prediction_ro += prediction_error.T @ hidden_state
-
                     # === RNN error ===
-                    delta_rnn += (hidden_state - prev_hidden_state).T @ x_t
+                    delta_rnn_ih += (prev_hidden_state - hidden_state).T @ x_t
+                    delta_rnn_hh += (prev_hidden_state - hidden_state).T @ hidden_state
 
-                # # === Project error ===
-                # if t != data.size(1) - 1:
-                #     prediction_error = prediction_output - data[:, t+1, :]
-                #     feedback = prediction_error @ projection_matrix  # (batch_size, input_size)
+                if t == data.size(1) - 1:
+                    # === Classification error ===
+                    one_hot = nn.functional.one_hot(target, num_classes=num_classes).float()
+                    soft_classification_output = torch.softmax(classification_output, dim=1)
+                    classification_error = soft_classification_output - one_hot
+                    delta_classification_ro += classification_error.T @ hidden_state
+                else:
+                    # === Prediction error ===
+                    prediction_error = prediction_output - data[:, t+1, :]
+                    delta_prediction_ro += prediction_error.T @ hidden_state
+
+                    # === Project error ===
+                    feedback = prediction_error @ projection_matrix  # (batch_size, input_size)
 
                 prev_hidden_state = hidden_state
 
-            rnn.rnn_cell.W_ih -= (learning_rate / data.size(0) / data.size(1)) * delta_rnn
-            # rnn.prediction_readout.weight -= (learning_rate / data.size(0) / data.size(1)) * delta_prediction_ro
+            rnn.rnn_cell.W_ih -= (learning_rate / data.size(0) / data.size(1)) * delta_rnn_ih
+            rnn.rnn_cell.W_hh -= (learning_rate / data.size(0) / data.size(1)) * delta_rnn_hh
+            rnn.prediction_readout.weight -= (learning_rate / data.size(0) / data.size(1)) * delta_prediction_ro
             rnn.classification_readout.weight -= (learning_rate / data.size(0)) * delta_classification_ro
 
             # Prediction from final hidden state
