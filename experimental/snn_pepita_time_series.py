@@ -10,11 +10,12 @@ import torch.nn.functional as F
 # ─── HYPERPARAMETERS ─────────────────────────────────────────────────────────
 num_epochs     = 20
 batch_size     = 128
+hidden_size    = 128
 beta           = 0.9
 spike_grad     = surrogate.fast_sigmoid(slope=25)
 dataset_name   = "ECG5000"
 lr             = 0.01     # learning rate for manual updates
-f_factor       = 0.05     # error‐to‐input scaling
+f_factor       = 0.5     # error‐to‐input scaling
 
 
 # ─── DEVICE ───────────────────────────────────────────────────────────────────
@@ -59,7 +60,7 @@ class SNN(nn.Module):
     def reset(self):
         utils.reset(self.lif1)
 
-model = SNN(hidden_dim=128,
+model = SNN(hidden_dim=hidden_size,
             output_dim=n_classes,
             beta=beta,
             spike_grad=spike_grad).to(device)

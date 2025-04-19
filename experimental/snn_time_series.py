@@ -10,8 +10,9 @@ from snntorch import surrogate
 from tslearn.datasets import UCR_UEA_datasets
 
 # ─── PARAMETERS ───────────────────────────────────────────────────────────────
-num_epochs   = 10
+num_epochs   = 20
 batch_size   = 128
+hidden_size  = 128
 beta         = 0.9
 spike_grad   = surrogate.fast_sigmoid(slope=25)
 dataset_name = "ECG5000"   # UCR archive
@@ -71,7 +72,7 @@ class SNN(nn.Module):
 
 model = SNN(
     input_dim=1,
-    hidden_dim=128,
+    hidden_dim=hidden_size,
     output_dim=n_classes,
     time_steps=series_len,
     beta=beta,

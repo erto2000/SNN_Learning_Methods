@@ -9,12 +9,12 @@ import torch.nn.functional as F
 # ─── HYPERPARAMETERS ─────────────────────────────────────────────────────────
 num_epochs     = 20
 batch_size     = 128
+hidden_dim     = 128
 beta           = 0.9
 spike_grad     = surrogate.fast_sigmoid(slope=25)
 dataset_name   = "ECG5000"
 lr             = 0.01     # learning rate for manual updates
 f_factor       = 0.5     # error‐to‐input scaling
-hidden_dim     = 128
 
 # ─── DEVICE ───────────────────────────────────────────────────────────────────
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
