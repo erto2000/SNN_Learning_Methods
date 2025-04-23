@@ -3,9 +3,36 @@ from models.SNN import SNNDynamic, get_dynamic_snn_test_fn, accuracy_fn
 from utility import get_random_matrix
 
 
+def compute_grad(h, h_mod, h_prev, use_average=False):
+    time_steps, batch_size, dim = h.shape
+    dim_prev = h_prev.shape[2]
+
+    if use_average:
+        # Average method
+        h_norm_mean = h.mean(dim=(0, 1))      # Shape: (dim,)
+        h_mod_mean = h_mod.mean(dim=(0, 1))   # Shape: (dim,)
+        prev_mean = h_prev.mean(dim=(0, 1))   # Shape: (dim_prev,)
+
+        grad = torch.ger(h_norm_mean - h_mod_mean, prev_mean)
+
+    else:
+        # Sum method
+        # Compute (h - h_mod) --> Shape: (time_steps, batch_size, dim)
+        diff = h - h_mod  # Shape: (time_steps, batch_size, dim)
+
+        # Reshape for batch matrix multiplication
+        diff = diff.view(-1, dim)           # Shape: (time_steps * batch_size, dim)
+        prev = h_prev.view(-1, dim_prev)    # Shape: (time_steps * batch_size, dim_prev)
+
+        # Perform matrix multiplication (dim, N) @ (N, dim_prev) = (dim, dim_prev)
+        grad = diff.T @ prev
+        grad /= (batch_size * time_steps)
+
+    return grad
+
 # Backpropagation model
-def get_model(name, structure, time_steps, beta, output_neuron=False,
-              lr=0.1, init_method=None, multiplier=0.005):
+def get_model(name, structure, beta, time_steps=None, output_neuron=False,
+              lr=0.1, user_average=True, init_method=None, multiplier=0.005):
     model = SNNDynamic(structure, beta, output_neuron=output_neuron)
 
     f_proj = get_random_matrix((structure[-1], structure[0]), method=init_method, multiplier=multiplier)
@@ -13,39 +40,44 @@ def get_model(name, structure, time_steps, beta, output_neuron=False,
     def optimize_fn(data, targets):
         with torch.no_grad():
             f = f_proj.to(data.device)
+            if time_steps:
+                data = data.unsqueeze(0).repeat(time_steps, 1, 1)
+            else:
+                data = data.permute(1, 0, 2)  # shape: (time, batch, input_dim)
 
             model.reset()
-            output_spk = model.repeat_run(data, time_steps)
-            layer_spk_counts = [torch.sum(layer.get_spk_rec(), dim=0) for layer in model.layers]
-            p = torch.softmax(layer_spk_counts[-1], dim=1)
+            _ = model.run(data)
+            layer_spikes = [layer.get_spk_rec() for layer in model.layers]
+            output_activations = layer_spikes[-1].sum(dim=0)  # shape: (batch, output_dim)
+            p = torch.softmax(output_activations, dim=1)
             onehot_labels = torch.nn.functional.one_hot(targets, structure[-1]).float()
             e = p - onehot_labels  # shape: (batch, output_dim)
 
             projected_error = e @ f  # shape: (batch, input_dim)
-            modulated_input = data + projected_error
+            modulated_time_series = data + projected_error
 
             model.reset()
-            _ = model.repeat_run(modulated_input, time_steps)
+            _ = model.run(modulated_time_series)
+            layer_spikes_mod = [layer.get_spk_rec() for layer in model.layers]
 
             # Compute weight updates dynamically
-            prev_h = modulated_input
+            prev_h = modulated_time_series
             for i, layer in enumerate(model.layers):
                 if i < len(model.layers) - 1:  # Hidden layers
-                    h = layer_spk_counts[i] / time_steps
-                    h_err = torch.sum(layer.get_spk_rec(), dim=0) / time_steps  # Activation after perturbed forward pass
-
-                    delta_w = (h - h_err).T @ prev_h  # Weight update
+                    grad = compute_grad(layer_spikes[i], layer_spikes_mod[i], prev_h, use_average=user_average)
                 else:  # Last layer (uses error signal)
-                    delta_w = e.T @ prev_h
+                    prev_h_avg = prev_h.mean(dim=0)  # Average over time
+                    grad = e.T @ prev_h_avg
+                    grad /= e.shape[0] # Normalize by batch size
+
 
                 # Apply weight update
-                batch_size = data.shape[0]
-                layer.update_weight(lr * delta_w / batch_size)
+                layer.update_weight(lr * grad)
 
                 # Update for next iteration
-                prev_h = h_err
+                prev_h = layer_spikes_mod[i]
 
-            return torch.norm(e).item(), accuracy_fn(output_spk, targets)
+            return torch.norm(e).item(), accuracy_fn(layer_spikes[-1], targets)
 
     return {
         'name': name,

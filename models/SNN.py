@@ -8,22 +8,23 @@ import torch.nn as nn
 
 
 class SNNLayer(nn.Module):
-    def __init__(self, input_dim, output_dim, beta, spike_grad=None, linear=False):
+    def __init__(self, input_dim, output_dim, beta, spike_grad=None, neuron_type='lif'):
         super(SNNLayer, self).__init__()
 
         self.fc = nn.Linear(input_dim, output_dim)
-        self.linear = linear
         self.spk_rec = []
-        if not self.linear:
-            self.lif = snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True)
+        if neuron_type == 'lif':
+            self.neuron = snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True)
             self.reset()
+        else:
+            self.neuron = None
 
     def update_weight(self, delta_weight):
         self.fc.weight -= delta_weight
 
     def reset(self):
-        if not self.linear:
-            utils.reset(self.lif)
+        if self.neuron:
+            utils.reset(self.neuron)
         self.spk_rec = []
 
     def get_spk_rec(self):
@@ -31,8 +32,8 @@ class SNNLayer(nn.Module):
 
     def forward(self, x):
         x = self.fc(x)
-        if not self.linear:
-            x = self.lif(x)
+        if self.neuron:
+            x = self.neuron(x)
         self.spk_rec.append(x)
         return x
 
@@ -43,8 +44,8 @@ class SNNDynamic(nn.Module):
 
         self.layers = nn.ModuleList()
         for i in range(len(structure) - 1):
-            linear = i == len(structure) - 2 and not output_neuron
-            self.layers.append(SNNLayer(structure[i], structure[i + 1], beta, spike_grad, linear))
+            neuron_type = None if i == len(structure) - 2 and not output_neuron else 'lif'
+            self.layers.append(SNNLayer(structure[i], structure[i + 1], beta, spike_grad, neuron_type))
 
     def reset(self):
         for layer in self.layers:
@@ -56,18 +57,9 @@ class SNNDynamic(nn.Module):
         return x
 
     def run(self, time_series):
-        spk_rec = []
         for t in range(time_series.shape[0]):
-            x = time_series[t]
-            x = self(x)
-            spk_rec.append(x)
-
-        return torch.stack(spk_rec)
-
-    def repeat_run(self, data, time_steps):
-        time_series = data.unsqueeze(0).repeat(time_steps, 1, 1)
-        spk_rec = self.run(time_series)
-        return spk_rec
+            self(time_series[t])
+        return self.layers[-1].get_spk_rec()
 
 
 #  Network architecture
@@ -118,10 +110,15 @@ def accuracy_fn(spk_rec, targets):
         return SF.accuracy_rate(spk_rec, targets)
 
 
-def get_dynamic_snn_test_fn(model, time_steps):
+def get_dynamic_snn_test_fn(model, time_steps=None):
     def test_fn(data, targets):
         with torch.no_grad():
-            spk_rec = model.repeat_run(data, time_steps)
+            if time_steps:
+                data = data.unsqueeze(0).repeat(time_steps, 1, 1)
+            else:
+                data = data.permute(1, 0, 2)
+            model.reset()
+            spk_rec = model.run(data)
             return accuracy_fn(spk_rec, targets)
 
     return test_fn

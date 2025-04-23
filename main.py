@@ -31,7 +31,7 @@ spike_grad = surrogate.fast_sigmoid(slope=25)
 
 # Training parameters
 training_epochs = 10
-test_interval = 50
+info_interval = 50
 
 # Optuna parameters
 optuna_study_name = 'optimization_test'
@@ -50,8 +50,8 @@ configs = [
     models.model_snn_backprop.get_model('SNN_Backprop', input_dim, time_steps, beta, spike_grad),
     models.model_snn_perturbation.get_model('SNN_Perturbation', input_dim, time_steps, beta, spike_grad),
     models.model_snn_random_feedback.get_model('SNN_Random_Feedback', input_dim, time_steps, beta, spike_grad),
-    models.model_snn_pepita.get_model('SNN_PEPITA', [input_dim, 128, 10], time_steps, beta,
-                                          output_neuron=False, lr=0.0058, init_method='default', multiplier=0.076),
+    models.model_snn_pepita.get_model('SNN_PEPITA', [input_dim, 128, 10], beta, time_steps=time_steps,
+                                          output_neuron=False, lr=0.0058, init_method='gaussian', multiplier=0.076),
 
     models.model_ann_backprop.get_model('ANN_Backprop', [input_dim, 128, 10]),
     models.model_ann_dfa.get_model('ANN_DFA', [input_dim, 128, 10]),
@@ -62,7 +62,7 @@ configs = [
 # Training function
 def training():
     trainer = Trainer(configs, device)
-    trainer.train(train_loader, test_loader, training_epochs, test_interval=test_interval)
+    trainer.train(train_loader, test_loader, training_epochs, info_interval=info_interval)
     plot_results(trainer)
 
 

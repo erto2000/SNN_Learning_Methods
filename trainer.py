@@ -9,7 +9,7 @@ class Trainer:
         self.optimize_fns = []
         self.test_fns = []
         self.metrics = {}
-        self.iteration = 0  # Global iteration counter
+        self.global_iteration = 0
         self.accumulated_times = {}  # Store accumulated time per model
 
         for config in configs:
@@ -26,11 +26,12 @@ class Trainer:
             }
             self.accumulated_times[config['name']] = 0.0  # Initialize time accumulator
 
-    def train(self, train_loader, test_loader, num_epochs, test_interval=50):
+    def train(self, train_loader, test_loader, num_epochs, info_interval=50):
         for epoch in range(num_epochs):
             print(f"\n{'='*80}")
             print(f"Epoch {epoch + 1}/{num_epochs}")
             print(f"{'='*80}\n")
+            iteration = 0
             for i, (data, targets) in enumerate(train_loader):
                 data = data.to(self.device)
                 targets = targets.to(self.device)
@@ -48,12 +49,12 @@ class Trainer:
                     self.accumulated_times[self.names[m]] += elapsed_time
 
                 # Run test evaluation if it's the correct iteration.
-                if self.iteration % test_interval == 0:
-                    self.test(test_loader, self.iteration, epoch, losses, train_accuracies)
+                if iteration % info_interval == 0:
+                    self.print_info(test_loader, self.global_iteration, epoch, losses, train_accuracies)
+                iteration += 1
+                self.global_iteration += 1
 
-                self.iteration += 1  # Increase the global iteration counter
-
-    def test(self, test_loader, iteration, epoch, losses, train_accuracies):
+    def print_info(self, test_loader, iteration, epoch, losses, train_accuracies):
         header = f"{'Model':<25}{'Epoch':<8}{'Iter':<8}{'Loss':<10}{'Train Acc (%)':<15}{'Test Acc (%)':<15}{'Time (s)':<10}"
         print(header)
         print("-" * len(header))
