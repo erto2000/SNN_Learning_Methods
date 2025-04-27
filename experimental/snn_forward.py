@@ -13,16 +13,16 @@ import matplotlib.pyplot as plt
 #  Hyperparameters & Architecture
 # ----------------------------
 DEVICE           = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE       = 128
+BATCH_SIZE       = 4096
 LR               = 1e-3
-EPOCHS_PER_LAYER = 40
+EPOCHS_PER_LAYER = 100
 TIME_STEPS       = 10
 ALPHA            = 0.6
-BETA             = 0.9
+BETA             = 0.99
 
 # dims = [input_dim, hidden1, hidden2, ...]
 # Here: 784 → 500 → 500
-dims = [784, 128]
+dims = [784, 500, 500]
 # ----------------------------
 
 # Data transforms
@@ -64,8 +64,8 @@ class LeakyLayer(nn.Module):
         spike_count = torch.zeros(batch, self.fc.out_features, device=x.device)
 
         # normalize to unit norm (orientation only)
-        x = x / (x.norm(p=2, dim=1, keepdim=True) + 1e-4) * 10
         cur = self.fc(x)
+        cur = cur / (cur.norm(p=2, dim=1, keepdim=True) + 1e-4) * 10
         for _ in range(self.T):
             spk, mem = self.lif(cur, mem)
             spike_count += spk
