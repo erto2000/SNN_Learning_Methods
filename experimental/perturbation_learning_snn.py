@@ -1,10 +1,12 @@
 import torch
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from core import SNN
 from snntorch import surrogate
 from snntorch import functional as SF
 import copy
+import snntorch as snn
+import torch.nn as nn
+
 
 # Hyperparameters
 input_size = 28 * 28  # MNIST image size (28x28 pixels)
@@ -12,7 +14,7 @@ hidden_size = 128     # Number of hidden neurons
 output_size = 10      # Number of output classes (digits 0-9)
 learning_rate = 0.01
 batch_size = 128
-epochs = 5
+epochs = 10
 beta = 0.9
 time_steps = 50
 spike_grad = surrogate.fast_sigmoid(slope=25)
@@ -28,9 +30,33 @@ test_dataset = datasets.MNIST(root="../data", train=False, transform=transform, 
 train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
 test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False)
 
-# Model Initialization
-model = SNN(input_size, time_steps, beta, spike_grad).to(device)
-loss_fn = SF.ce_rate_loss()
+
+#  Network architecture
+class SNN(torch.nn.Module):
+    def __init__(self, input_dim, time_steps, beta, spike_grad, linear_layer=nn.Linear):
+        super().__init__()
+
+        self.time_steps = time_steps
+
+        self.fc1 = linear_layer(input_dim, 128)
+        self.lif1 = snn.Leaky(beta=beta, spike_grad=spike_grad)
+        self.fc2 = linear_layer(128, 10)
+        self.lif2 = snn.Leaky(beta=beta, spike_grad=spike_grad)
+
+    def forward(self, data):
+        mem1 = self.lif1.init_leaky()
+        mem2 = self.lif2.init_leaky()
+
+        # Record the final layer
+        spk2_rec = []
+        for step in range(self.time_steps):
+            cur1 = self.fc1(data)
+            spk1, mem1 = self.lif1(cur1, mem1)
+            cur2 = self.fc2(spk1)
+            spk2, mem2 = self.lif2(cur2, mem2)
+            spk2_rec.append(spk2)
+
+        return torch.stack(spk2_rec, dim=0)
 
 
 def perturbation_update(model, data, target, device, loss_fn, sigma=0.1):
@@ -81,9 +107,13 @@ def perturbation_update(model, data, target, device, loss_fn, sigma=0.1):
     return model, loss_orig
 
 
+# Model Initialization
+model = SNN(input_size, time_steps, beta, spike_grad).to(device)
+loss_fn = SF.ce_rate_loss()
+
+
 # Training Loop
-num_epochs = 5
-for epoch in range(num_epochs):
+for epoch in range(epochs):
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
         model, loss_orig = perturbation_update(model, data, target, device, loss_fn, sigma=0.01)
@@ -101,4 +131,4 @@ for epoch in range(num_epochs):
                     total += spk_rec.size(1)
 
             accuracy = 100 * acc/total
-            print(f"Epoch {epoch + 1}/{num_epochs}, Batch {batch_idx}, Accuracy: {accuracy:.2f}%")
+            print(f"Epoch {epoch + 1}/{epochs}, Batch {batch_idx}, Accuracy: {accuracy:.2f}%")

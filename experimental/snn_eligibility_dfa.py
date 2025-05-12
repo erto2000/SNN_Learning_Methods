@@ -7,7 +7,7 @@ from tslearn.datasets import UCR_UEA_datasets
 import torch.nn.functional as F
 
 # ─── HYPERPARAMETERS ─────────────────────────────────────────────────────────
-num_epochs   = 20
+num_epochs   = 10
 batch_size   = 128
 hidden_size  = 128
 beta         = 0.9

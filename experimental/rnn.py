@@ -9,8 +9,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Hyperparameters
 input_size = 1
-hidden_size = 32
-batch_size = 64
+hidden_size = 128
+batch_size = 128
 num_epochs = 10
 learning_rate = 0.001
 
@@ -45,8 +45,8 @@ class SimpleRNN(nn.Module):
 
     def forward(self, x):
         out, _ = self.rnn(x)  # out: (batch, seq, hidden)
-        out = self.fc(out)
-        return out
+        out = out[:, -1, :]     # (batch, hidden)
+        return self.fc(out)     # (batch, num_classes)
 
 
 # Model, loss, optimizer

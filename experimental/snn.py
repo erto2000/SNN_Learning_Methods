@@ -10,12 +10,12 @@ import torchvision
 import torchvision.transforms as transforms
 
 # Parameters
-num_epochs = 5
+num_epochs = 10
 batch_size = 128
 beta = 0.9
 time_steps = 50
 spike_grad = surrogate.fast_sigmoid(slope=25)
-data_percentage = 0.1  # Load only 50% of the dataset (set between 0 and 1)
+data_percentage = 1
 
 # Device
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")

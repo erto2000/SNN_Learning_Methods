@@ -8,11 +8,10 @@ from snntorch.spikegen import rate
 
 # Parameters
 num_epochs = 10
-batch_size = 64
+batch_size = 128
 beta = 0.9
 time_steps = 50
-spike_grad = surrogate.fast_sigmoid(slope=25)
-data_percentage = 0.1  # Load a fraction of the dataset
+data_percentage = 1  # Load a fraction of the dataset
 lr = 0.1
 f_factor = 0.05
 
@@ -45,10 +44,10 @@ test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, s
 
 # Define a new SNN model with explicit layers
 class SNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, time_steps, beta, spike_grad):
+    def __init__(self, input_dim, hidden_dim, output_dim, time_steps, beta):
         super(SNN, self).__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.lif1 = snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True)
+        self.lif1 = snn.Leaky(beta=beta, init_hidden=True)
         self.fc2 = nn.Linear(hidden_dim, output_dim)
         self.time_steps = time_steps
 
@@ -74,8 +73,7 @@ class SNN(nn.Module):
 
 # Initialize the model and the random projection matrix.
 # The projection matrix projects a 10-dimensional error to the input dimension (784).
-model = SNN(input_dim=28 * 28, hidden_dim=128, output_dim=10, time_steps=time_steps, beta=beta,
-            spike_grad=spike_grad).to(device)
+model = SNN(input_dim=28 * 28, hidden_dim=128, output_dim=10, time_steps=time_steps, beta=beta).to(device)
 projection = (torch.rand(10, 28 * 28) * f_factor).to(device)
 
 

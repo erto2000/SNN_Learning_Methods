@@ -13,14 +13,14 @@ import matplotlib.pyplot as plt
 #  Hyperparameters & Architecture
 # ----------------------------
 DEVICE           = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE       = 512
+BATCH_SIZE       = 128
 LR               = 1e-3
 EPOCHS_PER_LAYER = 10
 TIME_STEPS       = 10
 ALPHA            = 0.6
-BETA             = 0.99
+BETA             = 0.9
 
-dims = [784, 500, 500]
+dims = [784, 128]
 # ----------------------------
 
 transform = Compose([

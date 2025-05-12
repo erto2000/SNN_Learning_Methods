@@ -79,7 +79,7 @@ def perturbation_update(model, data, target, device, loss, sigma=0.1):
 
 
 # Training Loop
-num_epochs = 15
+num_epochs = 10
 for epoch in range(num_epochs):
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):

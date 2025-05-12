@@ -10,7 +10,7 @@ import torchvision.transforms as transforms
 #    and softmax on the output.
 # ------------------------------------------------
 class OneHiddenLayerNet(nn.Module):
-    def __init__(self, input_size=784, hidden_size=1024, output_size=10):
+    def __init__(self, input_size=784, hidden_size=128, output_size=10):
         super(OneHiddenLayerNet, self).__init__()
         # No bias in these Linear layers
         self.fc1 = nn.Linear(input_size, hidden_size, bias=False)
@@ -167,4 +167,4 @@ def evaluate_accuracy(model, loader, device):
 
 if __name__ == "__main__":
     # You can change init_method to "he_uniform" to use Kaiming He uniform initialization.
-    train_mnist_two_forward_passes(epochs=10, batch_size=64, lr=0.1, init_method="he_uniform", factor=0.05)
+    train_mnist_two_forward_passes(epochs=10, batch_size=128, lr=0.1, init_method="he_uniform", factor=0.05)

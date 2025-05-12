@@ -13,7 +13,7 @@ hidden_size = 128     # Number of hidden neurons
 output_size = 10      # Number of output classes (digits 0-9)
 learning_rate = 0.01
 batch_size = 128
-epochs = 5
+epochs = 10
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load MNIST dataset

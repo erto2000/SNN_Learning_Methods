@@ -183,14 +183,14 @@ class FeedbackFFNet(nn.Module):
 
 
 DEVICE           = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE       = 512
+BATCH_SIZE       = 128
 LR               = 1e-3
 EPOCH            = 10
 TIME_STEPS       = 10
 ALPHA            = 0.6
-BETA             = 0.99
-ETA              = 1.0
-DIMS             = [784, 250, 250]
+BETA             = 0.9
+ETA              = 1
+DIMS             = [784, 102, 102]
 
 # Data transforms
 transform = Compose([
