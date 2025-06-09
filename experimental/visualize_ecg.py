@@ -21,19 +21,25 @@ def plot_one_sample_per_class(random_seed: int = 0):
     classes = np.unique(y)
     print("Found classes:", classes)
 
-    # 5. Pick one sample index per class (first occurrence)
-    #    To pick randomly instead, uncomment the np.random.seed / np.random.choice lines.
-    # np.random.seed(random_seed)
-    # sample_indices = [np.random.choice(np.where(y == cls)[0]) for cls in classes]
+    # 5. Define label mapping
+    label_map = {
+        1: "Normal",
+        2: "R-on-T PVC",
+        3: "PVC",
+        4: "SP Beat",
+        5: "Unclassified"
+    }
+
+    # 6. Pick one sample index per class (first occurrence)
     sample_indices = [np.where(y == cls)[0][0] for cls in classes]
     for cls, idx in zip(classes, sample_indices):
-        print(f"Class {int(cls)} → sample index {idx}")
+        print(f"Class {int(cls)} ({label_map[int(cls)]}) → sample index {idx}")
 
-    # 6. Overlay plot: one waveform per class
+    # 7. Overlay plot: one waveform per class
     sns.set(style="whitegrid")
     plt.figure(figsize=(10, 6))
     for cls, idx in zip(classes, sample_indices):
-        plt.plot(X[idx], label=f"Class {int(cls)}", linewidth=1.5)
+        plt.plot(X[idx], label=label_map[int(cls)], linewidth=1.5)
     plt.title("ECG5000: One Sample per Class (Overlaid)")
     plt.xlabel("Time Index")
     plt.ylabel("Amplitude")
@@ -41,11 +47,11 @@ def plot_one_sample_per_class(random_seed: int = 0):
     plt.tight_layout()
     plt.show()
 
-    # 7. Separate subplots: one waveform per class
+    # 8. Separate subplots: one waveform per class
     fig, axs = plt.subplots(len(classes), 1, figsize=(10, 12), sharex=True)
     for ax, cls, idx in zip(axs, classes, sample_indices):
         ax.plot(X[idx], color=f"C{int(cls)}", linewidth=1.5)
-        ax.set_title(f"Class {int(cls)} Sample (index {idx})")
+        ax.set_title(f"{label_map[int(cls)]} (index {idx})")
         ax.set_ylabel("Amplitude")
     axs[-1].set_xlabel("Time Index")
     plt.suptitle("ECG5000: One Representative Waveform per Class", y=1.02, fontsize=16)
