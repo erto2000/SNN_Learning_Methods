@@ -19,10 +19,10 @@ WINDOW_LEN  = 128
 CLASS_NAMES = ["Walking","Walking Upstairs","Walking Downstairs","Sitting","Standing","Laying"]
 
 # Training
-seed        = 42
-num_epochs  = 15
+seed        = 11
+num_epochs  = 10
 batch_size  = 128
-hidden_size = 256            # try 128..512
+hidden_size = 128            # try 128..512
 lr_in       = 5e-4
 lr_rec      = 5e-4
 lr_out      = 1e-3
@@ -168,73 +168,80 @@ def train_epoch_eprop(model, loader):
     total_loss, total_acc, n_batches = 0.0, 0.0, 0
 
     for series, labels in loader:
-        series = series.to(device)   # [B, T, C]
-        labels = labels.to(device)   # [B]
+        series = series.to(device)  # [B,T,C]
+        labels = labels.to(device)
+        B, T, C = series.shape
+        H, K = model.H, model.K
 
-        # ---- Forward pass through time (no autograd through time) ----
-        z_seq, u_seq = model.forward_unrolled(series)      # [T,B,H], [T,B,H]
-        logits, z_sum = model.logits_from_spikes(z_seq)    # [B,K], [B,H]
+        # States
+        v = torch.zeros(B, H, device=device)
+        z = torch.zeros(B, H, device=device)
+        r_sum = torch.zeros(B, H, device=device)  # time-integrated spikes for readout
 
-        # Loss (for logging only)
-        loss_val = F.cross_entropy(logits, labels).item()
+        # Eligibility traces (kept online)
+        e_in  = torch.zeros(B, C, H, device=device)  # for W_in
+        e_rec = torch.zeros(B, H, H, device=device)  # for W_rec
 
-        # Predictions for metrics
-        preds = logits.argmax(dim=1)
-        acc   = (preds == labels).float().mean().item()
+        # Gradient accumulators
+        dW_in  = torch.zeros_like(model.W_in)
+        dW_rec = torch.zeros_like(model.W_rec)
+        dW_out = torch.zeros_like(model.W_out)
+        db_out = torch.zeros_like(model.b_out)
 
-        # ---- Top-down learning signal (symmetric e-prop) --------------
-        # grad wrt logits for CE: softmax - onehot
-        probs = torch.softmax(logits, dim=1)               # [B,K]
-        grad_logits = probs - one_hot(labels, model.K)     # [B,K]
-
-        # same learning signal for all timesteps since logits depend on sum_t z_t
-        # L: [B,H]
-        L = grad_logits @ model.W_out.T
-
-        # ---- Local eligibility / updates (input & recurrent) ----------
-        B = series.shape[0]
-        T = series.shape[1]
-        dW_in  = torch.zeros_like(model.W_in)              # [C,H]
-        dW_rec = torch.zeros_like(model.W_rec)             # [H,H]
-
-        z_prev = torch.zeros(B, model.H, device=device)
+        last_logits = None
 
         for t in range(T):
-            x_t   = series[:, t, :]                        # [B,C]
-            u_t   = u_seq[t]                               # [B,H]
-            z_t   = z_seq[t]                               # [B,H]
+            x_t = series[:, t, :]                            # [B,C]
+            # LIF step
+            v = model.alpha * v + x_t @ model.W_in + z @ model.W_rec
+            u = v - model.v_th
+            spk = (u > 0).float()
+            v = v - model.v_th * spk
+            psi = model._surrogate_fast_sigmoid(u, model.slope)  # [B,H]
 
-            # surrogate derivative at threshold
-            psi_t = model._surrogate_fast_sigmoid(u_t, slope)  # [B,H]
+            # --- e-prop eligibility traces (simple LIF version) ---
+            # Decayed traces + new local factors (no reset term for simplicity)
+            e_in  = model.alpha * e_in  + x_t.unsqueeze(2) * psi.unsqueeze(1)  # [B,C,H]
+            e_rec = model.alpha * e_rec + z.unsqueeze(2)   * psi.unsqueeze(1)  # [B,H,H]
 
-            # local post factor: L * psi
-            local = L * psi_t                              # [B,H]
+            # Readout (use cumulative spikes like your sum-over-time logits)
+            r_sum = r_sum + spk
+            logits_t = r_sum @ model.W_out + model.b_out   # [B,K]
+            last_logits = logits_t
 
-            # e_ij^t approximated by presyn activity times local post factor
-            # dW_in  += x_t^T @ local
-            dW_in  += x_t.T @ local                        # [C,H]
-            # dW_rec += z_prev^T @ local
-            dW_rec += z_prev.T @ local                     # [H,H]
+            # Learning signal at this step (symmetric feedback)
+            probs_t = torch.softmax(logits_t, dim=1)
+            grad_logits_t = probs_t - F.one_hot(labels, num_classes=K).float()  # [B,K]
+            L_t = grad_logits_t @ model.W_out.T                                  # [B,H]
 
-            z_prev = z_t
+            # Accumulate synaptic gradients via eligibilities
+            dW_in  += torch.einsum('bch,bh->ch', e_in,  L_t)  # [C,H]
+            dW_rec += torch.einsum('bij,bj->ij', e_rec, L_t)  # [H,H]
+            dW_out += r_sum.T @ grad_logits_t                 # [H,K]
+            db_out += grad_logits_t.sum(dim=0)                # [K]
 
-        # ---- Readout (output) gradient (standard) ---------------------
-        dW_out = z_sum.T @ grad_logits                     # [H,K]
-        db_out = grad_logits.sum(dim=0)                    # [K]
+            # next
+            z = spk
+            # (Optional) you can also step weights here every few steps instead of at sequence end.
 
-        # ---- Apply updates (SGD) --------------------------------------
+            # For logging: average CE across time
+            total_loss += F.cross_entropy(logits_t, labels, reduction="mean").item()
+
+        # SGD step
         model.W_in  -= (lr_in  / B) * dW_in
         model.W_rec -= (lr_rec / B) * dW_rec
         model.W_out -= (lr_out / B) * dW_out
         model.b_out -= (lr_out / B) * db_out
-
         model.clamp_rec()
 
-        total_loss += loss_val
-        total_acc  += acc
-        n_batches  += 1
+        # Metrics from final step
+        preds = last_logits.argmax(dim=1)
+        total_acc += (preds == labels).float().mean().item()
+        n_batches += 1
 
-    return total_loss / max(1, n_batches), 100.0 * total_acc / max(1, n_batches)
+    # Average loss per batch per time step
+    return total_loss / max(1, n_batches * T), 100.0 * total_acc / max(1, n_batches)
+
 
 @torch.no_grad()
 def eval_epoch(model, loader):
