@@ -35,6 +35,8 @@ v_th        = 1.0            # threshold
 slope       = 25.0           # surrogate sharpness (fast-sigmoid)
 device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+use_recurrence = True
+
 # ----------------------- Utilities & Data -----------------------
 def set_seed(s=seed):
     torch.manual_seed(s); np.random.seed(s)
@@ -81,40 +83,49 @@ class HARTimeSeriesDataset(Dataset):
 # ----------------------- E-prop SNN Module ----------------------
 class EpropSNN(torch.nn.Module):
     """
-    One-layer recurrent LIF SNN with manual e-prop updates.
+    One-layer LIF SNN with optional recurrence and manual e-prop updates.
     - Input:  x_t in R^C
-    - Hidden: LIF spikes z_t in {0,1}^H with recurrent weights
+    - Hidden: spikes z_t in {0,1}^H (with or without recurrent weights)
     - Readout: logits = sum_t z_t @ W_out + b_out  (no output spikes)
     """
-    def __init__(self, input_dim, hidden_dim, n_classes, alpha=0.9, v_th=1.0, slope=25.0):
+    def __init__(self, input_dim, hidden_dim, n_classes, alpha=0.9, v_th=1.0, slope=25.0,
+                 rec_enabled=True):
         super().__init__()
         self.C, self.H, self.K = input_dim, hidden_dim, n_classes
         self.alpha = alpha
         self.v_th  = v_th
         self.slope = slope
+        self.rec_enabled = rec_enabled
 
         # Parameters we will update manually (requires_grad=False)
         # Xavier-like init
         k_in  = math.sqrt(1.0 / self.C)
-        k_rec = math.sqrt(1.0 / self.H)
-        k_out = math.sqrt(1.0 / self.H)
+        k_rec = math.sqrt(1.0 / self.H) if self.H > 0 else 1.0
+        k_out = math.sqrt(1.0 / self.H) if self.H > 0 else 1.0
 
         self.W_in  = torch.nn.Parameter(torch.empty(self.C, self.H).uniform_(-k_in,  k_in),  requires_grad=False)
+        # Always instantiate W_rec, but we may ignore it when rec is disabled
         self.W_rec = torch.nn.Parameter(torch.empty(self.H, self.H).uniform_(-k_rec, k_rec), requires_grad=False)
         self.W_out = torch.nn.Parameter(torch.empty(self.H, self.K).uniform_(-k_out, k_out), requires_grad=False)
         self.b_out = torch.nn.Parameter(torch.zeros(self.K), requires_grad=False)
 
+        # if recurrence is disabled, freeze W_rec to zero upfront
+        if not self.rec_enabled:
+            with torch.no_grad():
+                self.W_rec.zero_()
+
     @torch.no_grad()
     def clamp_rec(self):
+        # do nothing if recurrence is disabled
+        if not self.rec_enabled:
+            return
         if drop_diag:
-            # avoid self-connections causing ping-pong
             self.W_rec.fill_diagonal_(0.0)
         if weight_clip is not None:
             self.W_rec.clamp_(-weight_clip, weight_clip)
 
     @staticmethod
     def _surrogate_fast_sigmoid(u, slope):
-        # derivative of sigmoid(slope*u): slope * sigm * (1-sigm)
         sig = torch.sigmoid(slope * u)
         return slope * sig * (1.0 - sig)
 
@@ -135,11 +146,11 @@ class EpropSNN(torch.nn.Module):
         zs, us = [], []
         for t in range(T):
             x_t = series[:, t, :]                          # [B, C]
-            # membrane update with soft reset
-            v = self.alpha * v + x_t @ self.W_in + z @ self.W_rec
-            u = v - self.v_th                              # distance to threshold
-            spk = (u > 0).float()                          # hard spike
-            v = v - self.v_th * spk                        # soft reset
+            rec_term = (z @ self.W_rec) if self.rec_enabled else 0.0
+            v = self.alpha * v + x_t @ self.W_in + rec_term
+            u = v - self.v_th
+            spk = (u > 0).float()
+            v = v - self.v_th * spk
 
             zs.append(spk)
             us.append(u)
@@ -151,9 +162,6 @@ class EpropSNN(torch.nn.Module):
 
     @torch.no_grad()
     def logits_from_spikes(self, z_seq):
-        """
-        Integrate hidden spikes over time and compute logits.
-        """
         z_sum = z_seq.sum(dim=0)          # [B, H]
         logits = z_sum @ self.W_out + self.b_out  # [B, K]
         return logits, z_sum
@@ -180,11 +188,13 @@ def train_epoch_eprop(model, loader):
 
         # Eligibility traces (kept online)
         e_in  = torch.zeros(B, C, H, device=device)  # for W_in
-        e_rec = torch.zeros(B, H, H, device=device)  # for W_rec
+        # only allocate e_rec if recurrence is enabled
+        e_rec = torch.zeros(B, H, H, device=device) if model.rec_enabled else None
 
         # Gradient accumulators
         dW_in  = torch.zeros_like(model.W_in)
-        dW_rec = torch.zeros_like(model.W_rec)
+        # only allocate dW_rec if recurrence is enabled
+        dW_rec = torch.zeros_like(model.W_rec) if model.rec_enabled else None
         dW_out = torch.zeros_like(model.W_out)
         db_out = torch.zeros_like(model.b_out)
 
@@ -193,16 +203,17 @@ def train_epoch_eprop(model, loader):
         for t in range(T):
             x_t = series[:, t, :]                            # [B,C]
             # LIF step
-            v = model.alpha * v + x_t @ model.W_in + z @ model.W_rec
+            rec_term = (z @ model.W_rec) if model.rec_enabled else 0.0
+            v = model.alpha * v + x_t @ model.W_in + rec_term
             u = v - model.v_th
             spk = (u > 0).float()
             v = v - model.v_th * spk
             psi = model._surrogate_fast_sigmoid(u, model.slope)  # [B,H]
 
             # --- e-prop eligibility traces (simple LIF version) ---
-            # Decayed traces + new local factors (no reset term for simplicity)
             e_in  = model.alpha * e_in  + x_t.unsqueeze(2) * psi.unsqueeze(1)  # [B,C,H]
-            e_rec = model.alpha * e_rec + z.unsqueeze(2)   * psi.unsqueeze(1)  # [B,H,H]
+            if model.rec_enabled:
+                e_rec = model.alpha * e_rec + z.unsqueeze(2) * psi.unsqueeze(1)  # [B,H,H]
 
             # Readout (use cumulative spikes like your sum-over-time logits)
             r_sum = r_sum + spk
@@ -215,24 +226,25 @@ def train_epoch_eprop(model, loader):
             L_t = grad_logits_t @ model.W_out.T                                  # [B,H]
 
             # Accumulate synaptic gradients via eligibilities
-            dW_in  += torch.einsum('bch,bh->ch', e_in,  L_t)  # [C,H]
-            dW_rec += torch.einsum('bij,bj->ij', e_rec, L_t)  # [H,H]
-            dW_out += r_sum.T @ grad_logits_t                 # [H,K]
-            db_out += grad_logits_t.sum(dim=0)                # [K]
+            dW_in  += torch.einsum('bch,bh->ch', e_in,  L_t)          # [C,H]
+            if model.rec_enabled:
+                dW_rec += torch.einsum('bij,bj->ij', e_rec, L_t)      # [H,H]
+            dW_out += r_sum.T @ grad_logits_t                         # [H,K]
+            db_out += grad_logits_t.sum(dim=0)                        # [K]
 
             # next
             z = spk
-            # (Optional) you can also step weights here every few steps instead of at sequence end.
 
             # For logging: average CE across time
             total_loss += F.cross_entropy(logits_t, labels, reduction="mean").item()
 
         # SGD step
         model.W_in  -= (lr_in  / B) * dW_in
-        model.W_rec -= (lr_rec / B) * dW_rec
+        if model.rec_enabled:
+            model.W_rec -= (lr_rec / B) * dW_rec
         model.W_out -= (lr_out / B) * dW_out
         model.b_out -= (lr_out / B) * db_out
-        model.clamp_rec()
+        model.clamp_rec()  # no-op if recurrence disabled
 
         # Metrics from final step
         preds = last_logits.argmax(dim=1)
@@ -276,11 +288,14 @@ if __name__ == "__main__":
     time_steps = X_train.shape[1]     # 128 (not directly needed here)
     n_classes  = len(CLASS_NAMES)
 
-    model = EpropSNN(input_dim, hidden_size, n_classes, alpha=alpha, v_th=v_th, slope=slope).to(device)
+    # plumb the flag to the module
+    model = EpropSNN(input_dim, hidden_size, n_classes,
+                     alpha=alpha, v_th=v_th, slope=slope,
+                     rec_enabled=use_recurrence).to(device)
     model.clamp_rec()
 
     # Train
-    print(f"Device: {device}; Hidden: {hidden_size}; alpha={alpha}; slope={slope}")
+    print(f"Device: {device}; Hidden: {hidden_size}; alpha={alpha}; slope={slope}; recurrence={use_recurrence}")
     for epoch in range(1, num_epochs + 1):
         train_loss, train_acc = train_epoch_eprop(model, train_loader)
         test_acc = eval_epoch(model, test_loader)
