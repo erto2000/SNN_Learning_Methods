@@ -12,8 +12,8 @@ from torch.utils.data import Dataset, DataLoader
 
 # ---------------------------- Config ----------------------------
 DATA_URL    = "https://archive.ics.uci.edu/ml/machine-learning-databases/00240/UCI%20HAR%20Dataset.zip"
-ZIP_PATH    = "../data/UCI_HAR.zip"
-DATA_DIR    = "../data/UCI_HAR_Dataset"
+ZIP_PATH    = "../../data/UCI_HAR.zip"
+DATA_DIR    = "../../data/UCI_HAR_Dataset"
 
 WINDOW_LEN  = 128
 CLASS_NAMES = ["Walking","Walking Upstairs","Walking Downstairs","Sitting","Standing","Laying"]

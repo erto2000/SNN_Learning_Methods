@@ -13,8 +13,8 @@ from snntorch import utils, surrogate
 
 # ─── PARAMETERS ───────────────────────────────────────────────────────────────
 DATA_URL    = "https://archive.ics.uci.edu/ml/machine-learning-databases/00240/UCI%20HAR%20Dataset.zip"
-ZIP_PATH    = "../data/UCI_HAR.zip"
-DATA_DIR    = "../data/UCI_HAR_Dataset"
+ZIP_PATH    = "../../data/UCI_HAR.zip"
+DATA_DIR    = "../../data/UCI_HAR_Dataset"
 WINDOW_LEN  = 128
 CHANNELS    = [
     "body_acc_x", "body_acc_y", "body_acc_z",

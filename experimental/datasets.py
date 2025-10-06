@@ -4,24 +4,27 @@
 datasets.py
 Unified loaders for:
 - UCI HAR (accelerometer/gyroscope)
-- WISDM (accelerometer)
 - Google Speech Commands (audio → log-mel), labels auto-detected
 - MNIST (static repeat)
 - (optional) MNIST rate-coded variant
 
 Public API:
     get_dataloaders(dataset, root="./data", batch_size=128,
-                    window_len=128, num_workers=2, max_samples=None,
-                    mnist_T_steps=50)
+                    max_samples=None, sample_length=None)
+
+sample_length semantics:
+    - None: use each sample's real (native) sequence length as-is (one segment).
+    - L>0: cap/split into segments of length L; the final remainder is padded
+           to L within the batch collate.
+Batched tensors are shaped: [batch, segment, time, value]
 
 Returns:
     train_loader, test_loader, meta
 where meta = {
     "n_classes": int,
     "input_dim": int,   # feature dimension per time step
-    "time_steps": int,  # sequence length (T)
+    "time_steps": int,  # segment length used by the loader (T)
     "class_names": List[str],
-    # present for WISDM only (stats computed on train split)
     "norm_mean": Optional[List[float]],
     "norm_std": Optional[List[float]],
 }
@@ -29,13 +32,12 @@ where meta = {
 
 from typing import Tuple, Dict, List, Optional
 import os
-import math
 import zipfile
 import urllib.request
-import sys
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 # Optional (only needed for Speech Commands)
@@ -55,20 +57,7 @@ except Exception:
 
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Debugger-aware worker handling (helps on Windows + PyCharm)
-# ───────────────────────────────────────────────────────────────────────────────
-
-def _is_debugging() -> bool:
-    try:
-        if sys.gettrace() is not None:
-            return True
-    except Exception:
-        pass
-    return os.environ.get("PYCHARM_HOSTED") == "1"
-
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Common dataset wrappers
+# Common dataset wrappers + batching helpers
 # ───────────────────────────────────────────────────────────────────────────────
 
 class TimeSeriesDataset(Dataset):
@@ -86,24 +75,131 @@ class TimeSeriesDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-def _make_loaders(train_ds: Dataset, test_ds: Dataset,
-                  batch_size: int, num_workers: int = 2) -> Tuple[DataLoader, DataLoader]:
-    debugging = _is_debugging()
-    pin_mem = torch.cuda.is_available()
-    nw_train = 0 if debugging else max(0, int(num_workers))
-    nw_test  = 0 if debugging else max(0, int(num_workers))
+def _split_into_segments(x: torch.Tensor, L: Optional[int]) -> List[torch.Tensor]:
+    """
+    x: [T, D] (D can be 1)
+    L: segment length or None
+    Returns list of [t_i, D] (t_i <= L when L is not None)
+    """
+    if x.dim() == 1:
+        x = x.unsqueeze(-1)  # [T, 1]
+    T = x.shape[0]
+    if L is None or L <= 0:
+        return [x]  # one segment, real length
+    if T <= L:
+        return [x]  # one segment, shorter than or equal to cap
+    segs = []
+    start = 0
+    while start < T:
+        segs.append(x[start:start+L])
+        start += L
+    return segs
 
-    train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=nw_train, drop_last=False, pin_memory=pin_mem,
-        persistent_workers=False
-    )
-    test_loader = DataLoader(
-        test_ds, batch_size=batch_size, shuffle=False,
-        num_workers=nw_test, drop_last=False, pin_memory=pin_mem,
-        persistent_workers=False
-    )
-    return train_loader, test_loader
+
+def _pad_time_to(x: torch.Tensor, T_pad: int) -> torch.Tensor:
+    """Right-pad along time to T_pad. x: [T, D] -> [T_pad, D]"""
+    T, D = x.shape
+    if T == T_pad:
+        return x
+    out = torch.zeros((T_pad, D), dtype=x.dtype)
+    out[:T] = x
+    return out
+
+
+def make_segment_collate(sample_length: Optional[int]):
+    """
+    Returns a collate_fn that:
+      - splits each sequence into segments of length sample_length (if given)
+      - right-pads each segment in time to (sample_length or batch max)
+      - pads number of segments per sample to S_max
+    Output: X [B, S, T, D], y [B]
+    """
+    L = sample_length
+
+    def _collate(batch):
+        # batch: list of (x:[T,D or T], y:int)
+        all_segments: List[List[torch.Tensor]] = []
+        ys: List[int] = []
+
+        # First pass: split
+        for x, y in batch:
+            if x.dim() == 1:
+                x = x.unsqueeze(-1)
+            segs = _split_into_segments(x, L)
+            all_segments.append(segs)
+            ys.append(int(y))
+
+        # Determine padding lengths
+        S_max = max(len(segs) for segs in all_segments) if all_segments else 1
+        if L is not None and L > 0:
+            T_pad = L
+        else:
+            # no fixed length: pad to the max time across all segments in this batch
+            T_pad = 1
+            for segs in all_segments:
+                for s in segs:
+                    T_pad = max(T_pad, s.shape[0])
+
+        # Feature dim (D) — assume consistent within batch
+        D = all_segments[0][0].shape[1] if all_segments and all_segments[0] else 1
+        B = len(batch)
+
+        X = torch.zeros((B, S_max, T_pad, D), dtype=torch.float32)
+
+        for b, segs in enumerate(all_segments):
+            for s_idx, s in enumerate(segs):
+                X[b, s_idx] = _pad_time_to(s, T_pad).to(torch.float32)
+            # remaining [S_max - len(segs)] left as zeros
+
+        y = torch.tensor(ys, dtype=torch.long)
+        return X, y
+
+    return _collate
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Generic utilities to work with segmented batches
+# ───────────────────────────────────────────────────────────────────────────────
+
+def flatten_segments(X: torch.Tensor, y: torch.Tensor):
+    """
+    X: [B, S, T, D], y: [B]
+    Returns:
+      X_segs: [Nseg, T, D]     (valid, non-zero segments only)
+      y_segs: [Nseg]
+      sample_ids: [Nseg]       (original sample index per segment)
+      seg_mask: [B, S]         (True for valid segments)
+
+    A segment is considered valid if sum(|x|) over (T,D) > 0.
+    Works for any dataset that uses this collate scheme.
+    """
+    assert X.dim() == 4, f"Expected [B,S,T,D], got {tuple(X.shape)}"
+    B, S, T, D = X.shape
+    seg_mask = (X.abs().sum(dim=(2, 3)) > 0)  # [B, S]
+    b_idx, s_idx = torch.where(seg_mask)
+    if b_idx.numel() == 0:
+        return X.new_zeros((0, T, D)), y.new_zeros((0,), dtype=torch.long), b_idx, seg_mask
+    X_segs = X[b_idx, s_idx]  # [Nseg, T, D]
+    y_segs = y[b_idx]         # [Nseg]
+    sample_ids = b_idx        # [Nseg]
+    return X_segs, y_segs, sample_ids, seg_mask
+
+
+def majority_vote(preds_seg: torch.Tensor, sample_ids: torch.Tensor, num_classes: int, B: int):
+    """
+    preds_seg:  [Nseg] predicted label per segment
+    sample_ids: [Nseg] original sample index (0..B-1) per segment
+    num_classes: int
+    B: batch size (number of samples)
+
+    Returns per-sample prediction: [B]
+    """
+    if preds_seg.numel() == 0:
+        return torch.zeros(B, dtype=torch.long, device=preds_seg.device)
+    counts = torch.zeros(B, num_classes, device=preds_seg.device)
+    one_hot = F.one_hot(preds_seg, num_classes=num_classes).float()
+    counts.index_add_(0, sample_ids, one_hot)        # sum per (sample, class)
+    return counts.argmax(dim=1)                      # [B]
 
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -146,8 +242,9 @@ def _har_load_split(data_dir: str, split: str) -> Tuple[np.ndarray, np.ndarray]:
     y      = np.loadtxt(y_path).astype(int) - 1
     return X, y
 
-def load_har(root: str, batch_size: int, num_workers: int = 2,
-             max_samples: Optional[int] = None):
+def load_har(root: str, batch_size: int,
+             max_samples: Optional[int] = None,
+             sample_length: Optional[int] = None):
     data_dir = _har_download_and_extract(root)
     X_train, y_train = _har_load_split(data_dir, "train")
     X_test,  y_test  = _har_load_split(data_dir, "test")
@@ -161,164 +258,33 @@ def load_har(root: str, batch_size: int, num_workers: int = 2,
     train_ds = TimeSeriesDataset(X_train, y_train)
     test_ds  = TimeSeriesDataset(X_test,  y_test)
 
-    train_loader, test_loader = _make_loaders(train_ds, test_ds, batch_size, num_workers)
+    collate_fn = make_segment_collate(sample_length)
+    pin_mem = torch.cuda.is_available()
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                              drop_last=False, pin_memory=pin_mem,
+                              collate_fn=collate_fn)
+    test_loader  = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
+                              drop_last=False, pin_memory=pin_mem,
+                              collate_fn=collate_fn)
+
+    # Infer meta["time_steps"]
+    if sample_length is not None and sample_length > 0:
+        time_steps = int(sample_length)
+        input_dim  = int(X_train.shape[2] if len(X_train) else X_test.shape[2])
+    else:
+        # Probe one minibatch to get the padded T for None case
+        tmpX, _ = next(iter(DataLoader(train_ds, batch_size=1, shuffle=False, collate_fn=collate_fn)))
+        time_steps = int(tmpX.shape[2])  # [B,S,T,D]
+        input_dim  = int(tmpX.shape[3])
+
     meta = {
         "n_classes": len(_HAR_CLASSES),
-        "input_dim": X_train.shape[2] if len(X_train) else X_test.shape[2],
-        "time_steps": X_train.shape[1] if len(X_train) else X_test.shape[1],
+        "input_dim": input_dim,
+        "time_steps": time_steps,
         "class_names": _HAR_CLASSES,
         "norm_mean": None,
         "norm_std": None,
-    }
-    return train_loader, test_loader, meta
-
-
-# ───────────────────────────────────────────────────────────────────────────────
-# WISDM (accelerometer) — sliding window
-# ───────────────────────────────────────────────────────────────────────────────
-
-_WISDM_CANON = {
-    "Walking": "Walking",
-    "Jogging": "Jogging",
-    "Sitting": "Sitting",
-    "Standing": "Standing",
-    "Upstairs": "Upstairs",
-    "Downstairs": "Downstairs",
-}
-
-def _wisdm_find_file(root: str) -> Optional[str]:
-    candidates = []
-    wroot = os.path.join(root, "WISDM")
-    if os.path.isdir(wroot):
-        for fn in os.listdir(wroot):
-            if fn.lower().endswith((".csv", ".txt")) and "wisdm" in fn.lower():
-                candidates.append(os.path.join(wroot, fn))
-        if not candidates:
-            for fn in os.listdir(wroot):
-                if fn.lower().endswith((".csv", ".txt")):
-                    candidates.append(os.path.join(wroot, fn))
-    return candidates[0] if candidates else None
-
-def _sliding_windows(arr: np.ndarray, win: int, step: int) -> np.ndarray:
-    T, C = arr.shape
-    if T < win:
-        pad = np.zeros((win - T, C), dtype=arr.dtype)
-        arr = np.concatenate([arr, pad], axis=0)
-        T = win
-    starts = np.arange(0, T - win + 1, step)
-    windows = np.stack([arr[s:s+win] for s in starts], axis=0) if len(starts) else arr[None, :win]
-    return windows
-
-def _wisdm_parse_and_window(path: str, window_len: int = 128, step: Optional[int] = None):
-    if step is None:
-        step = window_len // 2  # 50% overlap
-
-    X_all: List[np.ndarray] = []
-    y_all: List[int] = []
-
-    def flush_current(cur_act, cur_buf):
-        if cur_act is None or not cur_buf:
-            return None, []
-        arr = np.array(cur_buf, dtype=np.float32)  # [T,3]
-        wins = _sliding_windows(arr, window_len, step)  # [N,T,3]
-        label = list(_WISDM_CANON.keys()).index(cur_act)
-        X_all.append(wins)
-        y_all.append(np.full((wins.shape[0],), label, dtype=np.int64))
-        return None, []
-
-    cur_act = None
-    cur_buf: List[List[float]] = []
-
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            if line.endswith(";"):
-                line = line[:-1]
-            parts = line.split(",")
-            if len(parts) < 6:
-                continue
-
-            act_raw  = parts[1].strip()
-            xs, ys, zs = parts[3:6]
-            act_norm = act_raw.capitalize()
-            if act_norm not in _WISDM_CANON:
-                cur_act, cur_buf = flush_current(cur_act, cur_buf)
-                continue
-
-            if cur_act is not None and act_norm != cur_act:
-                cur_act, cur_buf = flush_current(cur_act, cur_buf)
-
-            cur_act = act_norm
-            try:
-                x = float(xs); y = float(ys); z = float(zs)
-            except ValueError:
-                continue
-            cur_buf.append([x, y, z])
-
-    cur_act, cur_buf = flush_current(cur_act, cur_buf)
-
-    if not X_all:
-        raise RuntimeError(f"[WISDM] No usable windows parsed from {path}.")
-
-    X = np.concatenate(X_all, axis=0)          # [N, T, 3]
-    y = np.concatenate(y_all, axis=0)          # [N]
-    class_names = list(_WISDM_CANON.values())
-
-    rng = np.random.default_rng(0)
-    idx = rng.permutation(len(X))
-    return X[idx], y[idx], class_names
-
-def load_wisdm(root: str, batch_size: int, window_len: int = 128,
-               num_workers: int = 2, test_split: float = 0.2,
-               max_samples: Optional[int] = None):
-    """
-    Loads WISDM and **normalizes inside the loader**.
-    Normalization is per-channel using train-split mean/std computed over (N,T) axes.
-    """
-    path = _wisdm_find_file(root)
-    if path is None:
-        raise FileNotFoundError(
-            "[WISDM] Could not find a WISDM CSV/TXT.\n"
-            f"Expected something like {os.path.join(root, 'WISDM', 'WISDM_ar_v1.1_raw.txt')}."
-        )
-
-    X, y, class_names = _wisdm_parse_and_window(path, window_len=window_len, step=window_len // 2)
-
-    if max_samples is not None:
-        X, y = X[:max_samples], y[:max_samples]
-
-    # ----- split -----
-    N = len(X)
-    n_test = max(1, int(math.ceil(N * float(test_split))))
-    n_train = max(1, N - n_test)
-
-    X_train, y_train = X[:n_train], y[:n_train]
-    X_test,  y_test  = X[n_train:n_train+n_test], y[n_train:n_train+n_test]
-
-    # ----- compute train stats & normalize both splits -----
-    # shapes: X_train [Ntr, T, C]
-    eps = 1e-6
-    mean = X_train.mean(axis=(0, 1), keepdims=True)                 # [1,1,C]
-    var  = ((X_train - mean)**2).mean(axis=(0, 1), keepdims=True)   # [1,1,C]
-    std  = np.sqrt(np.clip(var, eps, None))                         # [1,1,C]
-
-    X_train = (X_train - mean) / std
-    X_test  = (X_test  - mean) / std
-
-    train_ds = TimeSeriesDataset(X_train.astype(np.float32), y_train.astype(np.int64))
-    test_ds  = TimeSeriesDataset(X_test.astype(np.float32),  y_test.astype(np.int64))
-
-    train_loader, test_loader = _make_loaders(train_ds, test_ds, batch_size, num_workers)
-    meta = {
-        "n_classes": len(class_names),
-        "input_dim": X.shape[2],
-        "time_steps": X.shape[1],
-        "class_names": class_names,
-        # expose stats for reproducibility / debugging
-        "norm_mean": mean.reshape(-1).tolist(),
-        "norm_std": std.reshape(-1).tolist(),
     }
     return train_loader, test_loader, meta
 
@@ -422,22 +388,11 @@ class _SpeechCommandsWrapper(Dataset):
         return logmel, y
 
 
-def _sc_collate(batch):
-    Ts = [b[0].shape[0] for b in batch]
-    Tm = max(Ts)
-    mels = batch[0][0].shape[1]
-    X = torch.zeros((len(batch), Tm, mels), dtype=torch.float32)
-    y = torch.zeros((len(batch),), dtype=torch.long)
-    for i, (x, yi) in enumerate(batch):
-        T = x.shape[0]
-        X[i, :T] = x
-        y[i] = yi
-    return X, y
-
-def load_speech_commands(root: str, batch_size: int, num_workers: int = 2,
+def load_speech_commands(root: str, batch_size: int,
                          mels: int = 64,
                          include_silence: bool = True,
-                         max_samples: Optional[int] = None) -> Tuple[DataLoader, DataLoader, Dict]:
+                         max_samples: Optional[int] = None,
+                         sample_length: Optional[int] = None) -> Tuple[DataLoader, DataLoader, Dict]:
     assert _HAS_TORCHAUDIO, "torchaudio is required for Speech Commands."
     os.makedirs(root, exist_ok=True)
 
@@ -457,21 +412,18 @@ def load_speech_commands(root: str, batch_size: int, num_workers: int = 2,
         full_train = torch.utils.data.Subset(full_train, range(max_train))
         test_ds    = torch.utils.data.Subset(test_ds,   range(max_test))
 
+    collate_fn = make_segment_collate(sample_length)
+    pin_mem = torch.cuda.is_available()
     train_loader = DataLoader(full_train, batch_size=batch_size, shuffle=True,
-                              num_workers=(0 if _is_debugging() else num_workers),
-                              collate_fn=_sc_collate, pin_memory=torch.cuda.is_available(),
-                              persistent_workers=False)
+                              collate_fn=collate_fn, pin_memory=pin_mem, drop_last=False)
     test_loader  = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
-                              num_workers=(0 if _is_debugging() else num_workers),
-                              collate_fn=_sc_collate, pin_memory=torch.cuda.is_available(),
-                              persistent_workers=False)
+                              collate_fn=collate_fn, pin_memory=pin_mem, drop_last=False)
 
     # Peek to infer T and D
     tmpX, _ = next(iter(DataLoader(full_train, batch_size=1, shuffle=False,
-                                   collate_fn=_sc_collate, num_workers=0)))
-    time_steps = int(tmpX.shape[1])
-    input_dim  = int(tmpX.shape[2])
-    # class names come from the wrapped dataset
+                                   collate_fn=collate_fn)))
+    time_steps = int(tmpX.shape[2])  # [B,S,T,D]
+    input_dim  = int(tmpX.shape[3])
     class_names = train_ds.target_words
 
     meta = {
@@ -486,29 +438,32 @@ def load_speech_commands(root: str, batch_size: int, num_workers: int = 2,
 
 
 # ───────────────────────────────────────────────────────────────────────────────
-# MNIST — static repeat
+# MNIST — static repeat (real T=50 by default)
 # ───────────────────────────────────────────────────────────────────────────────
 
+_MNIST_STATIC_REAL_T = 50  # "real" native length; sample_length may cap/split
+
 class _MNISTRepeatSeq(Dataset):
-    """Each example: flattened image repeated across T steps → [T, 784]."""
-    def __init__(self, train: bool, root: str, T_steps: int = 50):
+    """Each example: flattened image repeated across REAL_T steps → [T, 784]."""
+    def __init__(self, train: bool, root: str, real_T: int = _MNIST_STATIC_REAL_T):
         assert _HAS_TORCHVISION, "torchvision is required for MNIST."
         self.ds = tvds.MNIST(root=root, train=train, download=True, transform=T.ToTensor())
-        self.T_steps = int(T_steps)
+        self.real_T = int(real_T)
 
     def __len__(self): return len(self.ds)
 
     def __getitem__(self, idx):
         x, y = self.ds[idx]              # x: [1,28,28] in [0,1]
         x = x.view(-1)                   # [784]
-        series = x.unsqueeze(0).repeat(self.T_steps, 1)  # [T,784]
+        series = x.unsqueeze(0).repeat(self.real_T, 1)  # [T,784]
         return series, int(y)
 
-def load_mnist_static(root: str, batch_size: int, num_workers: int = 2,
-                      T_steps: int = 50, max_samples: Optional[int] = None):
+def load_mnist_static(root: str, batch_size: int,
+                      max_samples: Optional[int] = None,
+                      sample_length: Optional[int] = None):
     os.makedirs(root, exist_ok=True)
-    train_ds = _MNISTRepeatSeq(train=True,  root=root, T_steps=T_steps)
-    test_ds  = _MNISTRepeatSeq(train=False, root=root, T_steps=T_steps)
+    train_ds = _MNISTRepeatSeq(train=True,  root=root, real_T=_MNIST_STATIC_REAL_T)
+    test_ds  = _MNISTRepeatSeq(train=False, root=root, real_T=_MNIST_STATIC_REAL_T)
 
     if max_samples is not None:
         max_train = max(1, min(max_samples, len(train_ds)))
@@ -516,11 +471,21 @@ def load_mnist_static(root: str, batch_size: int, num_workers: int = 2,
         train_ds  = torch.utils.data.Subset(train_ds, range(max_train))
         test_ds   = torch.utils.data.Subset(test_ds,  range(max_test))
 
-    train_loader, test_loader = _make_loaders(train_ds, test_ds, batch_size, num_workers)
+    collate_fn = make_segment_collate(sample_length)
+    pin_mem = torch.cuda.is_available()
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                              drop_last=False, pin_memory=pin_mem,
+                              collate_fn=collate_fn)
+    test_loader  = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
+                              drop_last=False, pin_memory=pin_mem,
+                              collate_fn=collate_fn)
+    # Probe to fill meta
+    tmpX, _ = next(iter(DataLoader(train_ds, batch_size=1, shuffle=False, collate_fn=collate_fn)))
     meta = {
         "n_classes": 10,
-        "input_dim": 28 * 28,
-        "time_steps": int(T_steps),
+        "input_dim": int(tmpX.shape[3]),
+        "time_steps": int(tmpX.shape[2]),
         "class_names": [str(i) for i in range(10)],
         "norm_mean": None,
         "norm_std": None,
@@ -528,37 +493,52 @@ def load_mnist_static(root: str, batch_size: int, num_workers: int = 2,
     return train_loader, test_loader, meta
 
 
-# (Optional) MNIST rate-coded variant
+# (Optional) MNIST rate-coded variant (real T=20 by default)
+_MNIST_RATE_REAL_T = 20
+
 class _MNISTRateSpike(Dataset):
-    """Rate code: per-pixel Bernoulli spikes over T steps → [T,784]."""
-    def __init__(self, train: bool, root: str, T_steps: int = 20, gain: float = 0.7, seed: int = 0):
+    """Rate code: per-pixel Bernoulli spikes over REAL_T steps → [T,784]."""
+    def __init__(self, train: bool, root: str, real_T: int = _MNIST_RATE_REAL_T,
+                 gain: float = 0.7, seed: int = 0):
         assert _HAS_TORCHVISION, "torchvision is required for MNIST."
         self.ds = tvds.MNIST(root=root, train=train, download=True, transform=T.ToTensor())
-        self.T_steps, self.gain = int(T_steps), float(gain)
+        self.real_T, self.gain = int(real_T), float(gain)
         self.rng = torch.Generator().manual_seed(seed + (0 if train else 1))
     def __len__(self): return len(self.ds)
     def __getitem__(self, idx):
         x, y = self.ds[idx]          # [1,28,28]
         x01 = (x - x.min()) / (x.max() - x.min() + 1e-8)
         p = torch.clamp(self.gain * x01, 0.0, 1.0)
-        spikes = torch.bernoulli(p.expand(self.T_steps, -1, -1, -1), generator=self.rng)  # [T,1,28,28]
-        return spikes.squeeze(1).reshape(self.T_steps, 28*28).float(), int(y)
+        spikes = torch.bernoulli(p.expand(self.real_T, -1, -1, -1), generator=self.rng)  # [T,1,28,28]
+        return spikes.squeeze(1).reshape(self.real_T, 28*28).float(), int(y)
 
 
-def load_mnist_rate(root: str, batch_size: int, num_workers: int = 2,
-                    T_steps: int = 20, gain: float = 0.7,
-                    max_samples: Optional[int] = None):
+def load_mnist_rate(root: str, batch_size: int,
+                    gain: float = 0.7,
+                    max_samples: Optional[int] = None,
+                    sample_length: Optional[int] = None):
     assert _HAS_TORCHVISION, "torchvision is required for MNIST."
-    train_ds = _MNISTRateSpike(train=True,  root=root, T_steps=T_steps, gain=gain, seed=0)
-    test_ds  = _MNISTRateSpike(train=False, root=root, T_steps=T_steps, gain=gain, seed=0)
+    train_ds = _MNISTRateSpike(train=True,  root=root, real_T=_MNIST_RATE_REAL_T, gain=gain, seed=0)
+    test_ds  = _MNISTRateSpike(train=False, root=root, real_T=_MNIST_RATE_REAL_T, gain=gain, seed=0)
     if max_samples is not None:
         train_ds  = torch.utils.data.Subset(train_ds, range(min(max_samples, len(train_ds))))
         test_ds   = torch.utils.data.Subset(test_ds,  range(max(1, min(max_samples // 4 if max_samples > 4 else 1, len(test_ds)))))
-    train_loader, test_loader = _make_loaders(train_ds, test_ds, batch_size, num_workers)
+
+    collate_fn = make_segment_collate(sample_length)
+    pin_mem = torch.cuda.is_available()
+
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                              drop_last=False, pin_memory=pin_mem,
+                              collate_fn=collate_fn)
+    test_loader  = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
+                              drop_last=False, pin_memory=pin_mem,
+                              collate_fn=collate_fn)
+    # Probe to fill meta
+    tmpX, _ = next(iter(DataLoader(train_ds, batch_size=1, shuffle=False, collate_fn=collate_fn)))
     meta = {
         "n_classes": 10,
-        "input_dim": 28*28,
-        "time_steps": int(T_steps),
+        "input_dim": int(tmpX.shape[3]),
+        "time_steps": int(tmpX.shape[2]),
         "class_names": [str(i) for i in range(10)],
         "norm_mean": None,
         "norm_std": None,
@@ -573,34 +553,35 @@ def load_mnist_rate(root: str, batch_size: int, num_workers: int = 2,
 def get_dataloaders(dataset: str,
                     root: str = "./data",
                     batch_size: int = 128,
-                    window_len: int = 128,
-                    num_workers: int = 2,
                     max_samples: Optional[int] = None,
-                    mnist_T_steps: int = 50):
+                    sample_length: Optional[int] = None):
+    """
+    dataset: one of {"har", "speech_commands", "mnist", "mnist_rate"}
+    sample_length: Optional[int] used to cap/split sequences into equal segments.
+                   None keeps each example as a single segment with its real length.
+    """
     ds = dataset.lower()
     os.makedirs(root, exist_ok=True)
 
     if ds == "har":
-        return load_har(root, batch_size, num_workers, max_samples=max_samples)
-
-    elif ds == "wisdm":
-        return load_wisdm(root, batch_size, window_len, num_workers,
-                          test_split=0.2, max_samples=max_samples)
+        return load_har(root, batch_size, max_samples=max_samples,
+                        sample_length=sample_length)
 
     elif ds == "speech_commands":
-        # leave max_samples=None for full coverage (or set a cap for speed)
-        return load_speech_commands(root, batch_size, num_workers,
-                                    max_samples=max_samples)
+        return load_speech_commands(root, batch_size,
+                                    max_samples=max_samples,
+                                    sample_length=sample_length)
 
     elif ds == "mnist":
-        return load_mnist_static(root, batch_size, num_workers,
-                                 T_steps=int(mnist_T_steps),
-                                 max_samples=max_samples)
+        return load_mnist_static(root, batch_size,
+                                 max_samples=max_samples,
+                                 sample_length=sample_length)
 
     elif ds == "mnist_rate":
-        return load_mnist_rate(root, batch_size, num_workers,
-                               T_steps=int(mnist_T_steps), gain=0.7,
-                               max_samples=max_samples)
+        return load_mnist_rate(root, batch_size,
+                               gain=0.7,
+                               max_samples=max_samples,
+                               sample_length=sample_length)
 
     else:
         raise ValueError(f"Unknown dataset: {dataset!r}")

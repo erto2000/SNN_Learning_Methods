@@ -29,8 +29,8 @@ transform = Compose([
     Lambda(lambda x: x.view(-1))
 ])
 
-train_ds = MNIST('../data', train=True,  download=True, transform=transform)
-test_ds  = MNIST('../data', train=False, download=True, transform=transform)
+train_ds = MNIST('../../data', train=True, download=True, transform=transform)
+test_ds  = MNIST('../../data', train=False, download=True, transform=transform)
 train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
 test_loader  = DataLoader(test_ds,  batch_size=BATCH_SIZE, shuffle=False)
 

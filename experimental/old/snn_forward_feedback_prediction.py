@@ -118,9 +118,9 @@ class FeedbackFFNet(nn.Module):
 # ——— set up data, model, and training loop —————————————————————
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 transform = Compose([ToTensor(), Normalize((0,), (1,)), Lambda(lambda x: x.view(-1))])
-train_loader = DataLoader(MNIST('../data', train=True,  download=True, transform=transform),
+train_loader = DataLoader(MNIST('../../data', train=True, download=True, transform=transform),
                           batch_size=512, shuffle=True)
-test_loader  = DataLoader(MNIST('../data', train=False, download=True, transform=transform),
+test_loader  = DataLoader(MNIST('../../data', train=False, download=True, transform=transform),
                           batch_size=512)
 
 net = FeedbackFFNet([784, 250, 250], T=10, beta=0.99, eta=0, lr=1e-4).to(device)
