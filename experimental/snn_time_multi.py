@@ -12,6 +12,7 @@ from datasets import get_dataloaders, flatten_segments, majority_vote
 DATASET_NAME  = "har"
 DATA_ROOT     = "../data"
 SAMPLE_LENGTH = None
+STRIDE        = None
 
 BATCH_SIZE    = 128
 NUM_EPOCHS    = 10
@@ -182,6 +183,7 @@ def main():
         root=DATA_ROOT,
         batch_size=BATCH_SIZE,
         sample_length=SAMPLE_LENGTH,
+        stride=STRIDE,
     )
     n_classes  = meta["n_classes"]
     input_dim  = meta["input_dim"]   # per-timestep feature dim (D)

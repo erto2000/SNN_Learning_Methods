@@ -19,6 +19,7 @@ from datasets import get_dataloaders, flatten_segments, majority_vote
 DATASET_NAME  = "har"
 DATA_ROOT     = "../data"
 SAMPLE_LENGTH = None
+STRIDE        = None
 
 # Training
 num_epochs  = 10
@@ -35,7 +36,7 @@ ACCUMULATION_MODE = "accum"     # "original" or "accum"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Architecture: input_dim -> DIMS... -> output_dim
-DIMS = [128, 128]   # e.g. [256, 128]
+DIMS = [128]   # e.g. [256, 128]
 
 # ─── MODEL ────────────────────────────────────────────────────────────────────
 class SNNMulti(nn.Module):
@@ -266,6 +267,7 @@ def main():
         root=DATA_ROOT,
         batch_size=batch_size,
         sample_length=SAMPLE_LENGTH,   # set to int to cap/split (e.g., 128)
+        stride=STRIDE,
     )
     in_channels = meta["input_dim"]   # D
     n_classes   = meta["n_classes"]   # K

@@ -10,12 +10,17 @@ Unified loaders for:
 
 Public API:
     get_dataloaders(dataset, root="./data", batch_size=128,
-                    max_samples=None, sample_length=None)
+                    max_samples=None, sample_length=None, stride=None)
 
 sample_length semantics:
     - None: use each sample's real (native) sequence length as-is (one segment).
-    - L>0: cap/split into segments of length L; the final remainder is padded
-           to L within the batch collate.
+    - L>0: cap/split into segments of window length L; the final remainder is
+           padded to L within the batch collate.
+
+stride semantics (effective only when sample_length=L>0):
+    - None: hop = L (side-to-side windows, no overlap).
+    - S>0: hop = S (overlap if S<L, gaps if S>L).
+
 Batched tensors are shaped: [batch, segment, time, value]
 
 Returns:
@@ -75,24 +80,27 @@ class TimeSeriesDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
-def _split_into_segments(x: torch.Tensor, L: Optional[int]) -> List[torch.Tensor]:
+def _split_into_segments(x: torch.Tensor,
+                         L: Optional[int],
+                         stride: Optional[int]) -> List[torch.Tensor]:
     """
     x: [T, D] (D can be 1)
-    L: segment length or None
-    Returns list of [t_i, D] (t_i <= L when L is not None)
+    L: window length or None
+    stride: hop/stride between windows; when None, hop defaults to L
+    Returns list of [t_i, D] (t_i <= L when L is not None; last is remainder)
     """
     if x.dim() == 1:
         x = x.unsqueeze(-1)  # [T, 1]
     T = x.shape[0]
     if L is None or L <= 0:
         return [x]  # one segment, real length
-    if T <= L:
-        return [x]  # one segment, shorter than or equal to cap
+    hop = int(stride) if (stride is not None and stride > 0) else L
     segs = []
     start = 0
+    # Always include the final (possibly shorter) remainder; collate will pad.
     while start < T:
-        segs.append(x[start:start+L])
-        start += L
+        segs.append(x[start:start + L])
+        start += hop
     return segs
 
 
@@ -106,15 +114,18 @@ def _pad_time_to(x: torch.Tensor, T_pad: int) -> torch.Tensor:
     return out
 
 
-def make_segment_collate(sample_length: Optional[int]):
+def make_segment_collate(sample_length: Optional[int],
+                         stride: Optional[int]):
     """
     Returns a collate_fn that:
       - splits each sequence into segments of length sample_length (if given)
+        using hop = (stride if provided, else sample_length)
       - right-pads each segment in time to (sample_length or batch max)
       - pads number of segments per sample to S_max
     Output: X [B, S, T, D], y [B]
     """
     L = sample_length
+    S = stride
 
     def _collate(batch):
         # batch: list of (x:[T,D or T], y:int)
@@ -125,7 +136,7 @@ def make_segment_collate(sample_length: Optional[int]):
         for x, y in batch:
             if x.dim() == 1:
                 x = x.unsqueeze(-1)
-            segs = _split_into_segments(x, L)
+            segs = _split_into_segments(x, L, S)
             all_segments.append(segs)
             ys.append(int(y))
 
@@ -244,7 +255,8 @@ def _har_load_split(data_dir: str, split: str) -> Tuple[np.ndarray, np.ndarray]:
 
 def load_har(root: str, batch_size: int,
              max_samples: Optional[int] = None,
-             sample_length: Optional[int] = None):
+             sample_length: Optional[int] = None,
+             stride: Optional[int] = None):
     data_dir = _har_download_and_extract(root)
     X_train, y_train = _har_load_split(data_dir, "train")
     X_test,  y_test  = _har_load_split(data_dir, "test")
@@ -258,7 +270,7 @@ def load_har(root: str, batch_size: int,
     train_ds = TimeSeriesDataset(X_train, y_train)
     test_ds  = TimeSeriesDataset(X_test,  y_test)
 
-    collate_fn = make_segment_collate(sample_length)
+    collate_fn = make_segment_collate(sample_length, stride)
     pin_mem = torch.cuda.is_available()
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
@@ -392,7 +404,8 @@ def load_speech_commands(root: str, batch_size: int,
                          mels: int = 64,
                          include_silence: bool = True,
                          max_samples: Optional[int] = None,
-                         sample_length: Optional[int] = None) -> Tuple[DataLoader, DataLoader, Dict]:
+                         sample_length: Optional[int] = None,
+                         stride: Optional[int] = None) -> Tuple[DataLoader, DataLoader, Dict]:
     assert _HAS_TORCHAUDIO, "torchaudio is required for Speech Commands."
     os.makedirs(root, exist_ok=True)
 
@@ -412,7 +425,7 @@ def load_speech_commands(root: str, batch_size: int,
         full_train = torch.utils.data.Subset(full_train, range(max_train))
         test_ds    = torch.utils.data.Subset(test_ds,   range(max_test))
 
-    collate_fn = make_segment_collate(sample_length)
+    collate_fn = make_segment_collate(sample_length, stride)
     pin_mem = torch.cuda.is_available()
     train_loader = DataLoader(full_train, batch_size=batch_size, shuffle=True,
                               collate_fn=collate_fn, pin_memory=pin_mem, drop_last=False)
@@ -460,7 +473,8 @@ class _MNISTRepeatSeq(Dataset):
 
 def load_mnist_static(root: str, batch_size: int,
                       max_samples: Optional[int] = None,
-                      sample_length: Optional[int] = None):
+                      sample_length: Optional[int] = None,
+                      stride: Optional[int] = None):
     os.makedirs(root, exist_ok=True)
     train_ds = _MNISTRepeatSeq(train=True,  root=root, real_T=_MNIST_STATIC_REAL_T)
     test_ds  = _MNISTRepeatSeq(train=False, root=root, real_T=_MNIST_STATIC_REAL_T)
@@ -471,7 +485,7 @@ def load_mnist_static(root: str, batch_size: int,
         train_ds  = torch.utils.data.Subset(train_ds, range(max_train))
         test_ds   = torch.utils.data.Subset(test_ds,  range(max_test))
 
-    collate_fn = make_segment_collate(sample_length)
+    collate_fn = make_segment_collate(sample_length, stride)
     pin_mem = torch.cuda.is_available()
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
@@ -516,7 +530,8 @@ class _MNISTRateSpike(Dataset):
 def load_mnist_rate(root: str, batch_size: int,
                     gain: float = 0.7,
                     max_samples: Optional[int] = None,
-                    sample_length: Optional[int] = None):
+                    sample_length: Optional[int] = None,
+                    stride: Optional[int] = None):
     assert _HAS_TORCHVISION, "torchvision is required for MNIST."
     train_ds = _MNISTRateSpike(train=True,  root=root, real_T=_MNIST_RATE_REAL_T, gain=gain, seed=0)
     test_ds  = _MNISTRateSpike(train=False, root=root, real_T=_MNIST_RATE_REAL_T, gain=gain, seed=0)
@@ -524,7 +539,7 @@ def load_mnist_rate(root: str, batch_size: int,
         train_ds  = torch.utils.data.Subset(train_ds, range(min(max_samples, len(train_ds))))
         test_ds   = torch.utils.data.Subset(test_ds,  range(max(1, min(max_samples // 4 if max_samples > 4 else 1, len(test_ds)))))
 
-    collate_fn = make_segment_collate(sample_length)
+    collate_fn = make_segment_collate(sample_length, stride)
     pin_mem = torch.cuda.is_available()
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
@@ -554,34 +569,37 @@ def get_dataloaders(dataset: str,
                     root: str = "./data",
                     batch_size: int = 128,
                     max_samples: Optional[int] = None,
-                    sample_length: Optional[int] = None):
+                    sample_length: Optional[int] = None,
+                    stride: Optional[int] = None):
     """
     dataset: one of {"har", "speech_commands", "mnist", "mnist_rate"}
     sample_length: Optional[int] used to cap/split sequences into equal segments.
                    None keeps each example as a single segment with its real length.
+    stride: Optional[int] hop/stride between windows when sample_length is set.
+            None defaults to hop = sample_length (no overlap).
     """
     ds = dataset.lower()
     os.makedirs(root, exist_ok=True)
 
     if ds == "har":
         return load_har(root, batch_size, max_samples=max_samples,
-                        sample_length=sample_length)
+                        sample_length=sample_length, stride=stride)
 
     elif ds == "speech_commands":
         return load_speech_commands(root, batch_size,
                                     max_samples=max_samples,
-                                    sample_length=sample_length)
+                                    sample_length=sample_length, stride=stride)
 
     elif ds == "mnist":
         return load_mnist_static(root, batch_size,
                                  max_samples=max_samples,
-                                 sample_length=sample_length)
+                                 sample_length=sample_length, stride=stride)
 
     elif ds == "mnist_rate":
         return load_mnist_rate(root, batch_size,
                                gain=0.7,
                                max_samples=max_samples,
-                               sample_length=sample_length)
+                               sample_length=sample_length, stride=stride)
 
     else:
         raise ValueError(f"Unknown dataset: {dataset!r}")

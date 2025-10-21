@@ -17,6 +17,7 @@ DATASET_NAME  = "har"
 DATA_ROOT     = "../data"
 BATCH_SIZE    = 128
 SAMPLE_LENGTH = None
+STRIDE        = None
 
 # Training
 seed        = 11
@@ -34,7 +35,7 @@ slope       = 25.0         # surrogate sharpness (fast-sigmoid)
 device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Architecture
-DIMS = [128, 128]          # e.g., input_dim -> 512 -> 256 -> n_classes
+DIMS = [128]          # e.g., input_dim -> 512 -> 256 -> n_classes
 use_recurrence = False     # per-hidden-layer recurrence on/off
 
 # ----------------------- Utilities -----------------------
@@ -348,6 +349,7 @@ if __name__ == "__main__":
         root=DATA_ROOT,
         batch_size=BATCH_SIZE,
         sample_length=SAMPLE_LENGTH,
+        stride=STRIDE,
     )
     n_classes  = meta["n_classes"]
     input_dim  = meta["input_dim"]

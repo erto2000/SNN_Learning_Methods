@@ -24,6 +24,7 @@ from datasets import get_dataloaders, flatten_segments, majority_vote
 DATASET_NAME = "MNIST"
 DATA_ROOT    = "../data"
 SAMPLE_LENGTH = None
+STRIDE        = None
 
 BATCH_SIZE       = 128
 DIMS             = [512]      # hidden layer sizes; first auto-set to per-timestep input size (+ n_classes)
@@ -232,6 +233,7 @@ if __name__ == "__main__":
         root=DATA_ROOT,
         batch_size=BATCH_SIZE,
         sample_length=SAMPLE_LENGTH,
+        stride=STRIDE,
     )
     N_CLASSES  = meta["n_classes"]
     D_TIMESTEP = meta["input_dim"]     # per-timestep feature dimension (D)
