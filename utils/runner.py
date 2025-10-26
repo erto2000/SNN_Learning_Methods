@@ -5,7 +5,7 @@ import traceback, io, os
 from datetime import datetime
 from contextlib import redirect_stdout
 from utils.common import set_seed, select_device
-from utils.datasets import get_dataloaders
+from datasets.registry import get_dataloaders
 from utils.training import build_cfg, run_train_loop
 from utils.registry import LEARNER_REGISTRY
 
@@ -29,13 +29,12 @@ def _make_learner(cfg, meta, device, g: Dict[str, Any]):
         raise ValueError(f"Unknown learner: {name}")
 
     if name == "bp":
-        return LearnerCls(cfg, meta, device, agg=g["BP_AGG"], head=g["BP_HEAD"], lr=g["BP_LR"])
+        return LearnerCls(cfg, meta, device, agg=g["BP_AGG"], lr=g["BP_LR"])
     if name == "ff":
         return LearnerCls(cfg, meta, device, alpha=g["FF_ALPHA"], lr=g["FF_LR"], total_epochs=g["EPOCHS"])
     if name == "eprop":
         return LearnerCls(
             cfg, meta, device,
-            use_recurrence=g["EP_USE_REC"],
             lr_in=g["EP_LR_IN"], lr_rec=g["EP_LR_REC"], lr_out=g["EP_LR_OUT"],
             drop_diag=g["EP_DROP_DIAG"], weight_clip=g["EP_WEIGHT_CLIP"],
         )
@@ -45,10 +44,10 @@ def _make_learner(cfg, meta, device, g: Dict[str, Any]):
 
 def _print_header(run_id: str, g: Dict[str, Any], meta: Dict[str, Any]) -> None:
     print(f"\n=== Run: {run_id} ===")
-    print(f"[Data] {g['DATASET'].upper()} | classes={meta['n_classes']} | D={meta['input_dim']} | segment_T≈{meta['time_steps']}")
-    print(f"[Arch] hidden={g['HIDDEN_SIZES']} | norm={g['NORM']} | base_head={( 'logits' if g['LEARNER']!='ff' else None)} | learner={g['LEARNER']}")
-    if g["LEARNER"] == "eprop":
-        print(f"[E-Prop] recurrence={g['EP_USE_REC']}")
+    print(f"[Data] {g['DATASET'].upper()} | input_dim={meta['input_dim']} | classes={meta['n_classes']} | "
+          f"number_of_samples(train/test)={meta['num_train_samples']}/{meta['num_test_samples']} | "
+          f"epoch={g['EPOCHS']} | batch_size={g['BATCH_SIZE']} | segment_T≈{meta['time_steps']} | stride={g['STRIDE']}")
+    print(f"[Arch] hidden={g['HIDDEN_SIZES']} | norm={g['NORM']} | base_head={g['HEAD']} | recurrent={g['RECURRENT']} | learner={g['LEARNER']}")
 
 # ---------- core ----------
 def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -88,10 +87,10 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
             # Train
             final_stats, epoch_log = run_train_loop(
                 learner, train_loader, test_loader, device, meta["n_classes"],
-                epochs=g["EPOCHS"], test_end_only=g["TEST_END_ONLY"],
+                epochs=g["EPOCHS"], test_every_epoch=g["TEST_EVERY_EPOCH"],
             )
 
-            if g["TEST_END_ONLY"]:
+            if not g["TEST_EVERY_EPOCH"]:
                 from datetime import datetime as _dt
                 ts = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
                 print(f"[{ts}] [Final Test] sample_acc:{final_stats['sample_acc']:.2f}%")

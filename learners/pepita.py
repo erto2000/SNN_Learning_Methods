@@ -10,13 +10,12 @@ class PepitaLearner(BaseLearner):
     Single-batch `train_step` performs one update.
     """
     def __init__(self, net_cfg, meta, device, mode="original", lr=0.01, f_factor=0.05):
-        cfg = dataclasses.replace(net_cfg, head="logits")
-        super().__init__(cfg, meta, device)
+        super().__init__(net_cfg, meta, device)
         self.mode = mode
         self.lr = lr
 
         K = meta["n_classes"]
-        D0 = cfg.layers[0].dim_in
+        D0 = net_cfg.layers[0].dim_in
         self.F = torch.empty(K, D0, device=device).normal_() * f_factor
 
     def _build_model(self):
@@ -58,6 +57,8 @@ class PepitaLearner(BaseLearner):
         logits = fp["logits"]
         p = torch.softmax(logits, dim=1)
         e = p - F.one_hot(y, num_classes=K).float()       # [B,K]
+
+        loss = F.cross_entropy(logits, y)
 
         # -------- input modulation using feedback F
         X_mod = X + (e @ self.F).unsqueeze(1)             # [B,T,D]
@@ -106,7 +107,7 @@ class PepitaLearner(BaseLearner):
             self.model.head.weight.data.add_(self.lr * dWo)
 
         running_acc += (logits.argmax(1) == y).float().mean().item() * 100.0
-        return {"acc": running_acc}
+        return {"acc": running_acc, "loss": loss.item()}
 
     @torch.no_grad()
     def predict_batch(self, X: torch.Tensor) -> torch.Tensor:

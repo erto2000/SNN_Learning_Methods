@@ -6,7 +6,10 @@ import random
 def select_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def set_seed(seed: int):
+def set_seed(seed: int | None):
+    if seed is None:
+        return
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

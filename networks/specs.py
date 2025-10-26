@@ -9,7 +9,7 @@ HeadType = Optional[Literal["logits", "lif"]]  # None => no head (e.g., FF)
 class LayerSpec:
     dim_in: int
     dim_out: int
-    recurrent: bool = False   # learners decide; only E-Prop may enable this
+    recurrent: bool = False
     norm:   NormType = None   # "layernorm" | "batchnorm" | None
 
 @dataclass

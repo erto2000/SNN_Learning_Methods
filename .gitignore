@@ -4,3 +4,4 @@ data/
 experimental/data/
 venv/
 optuna_results/
+results/

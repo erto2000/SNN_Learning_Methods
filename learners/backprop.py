@@ -12,10 +12,8 @@ class BackpropLearner(BaseLearner):
       - aggregation over time is learner-owned: "sum" | "mean" | "last"
       - train_step updates once for the given batch.
     """
-    def __init__(self, net_cfg, meta, device, agg: str = "sum", head: str = "logits", lr: float = 1e-3):
-        assert head in ("logits", "lif")
-        cfg = dataclasses.replace(net_cfg, head=head)
-        super().__init__(cfg, meta, device)
+    def __init__(self, net_cfg, meta, device, agg: str = "sum", lr: float = 1e-3):
+        super().__init__(net_cfg, meta, device)
         self.agg = agg
         self.loss = nn.CrossEntropyLoss()
         self.opt = optim.Adam(self.model.parameters(), lr=lr)

@@ -35,6 +35,7 @@ class SNNCore(nn.Module):
         self.norms = nn.ModuleList()
         self.lifs  = nn.ModuleList()
         self.Wrecs = nn.ParameterList()
+        self.Wrec_flags: List[bool] = []
 
         for ls in cfg.layers:
             self.fcs.append(nn.Linear(ls.dim_in, ls.dim_out))
@@ -45,7 +46,9 @@ class SNNCore(nn.Module):
             else:
                 self.norms.append(nn.Identity())
             self.lifs.append(snn.Leaky(beta=cfg.beta, spike_grad=sg))
+
             # Recurrence tensor (manual updates by learners if they choose)
+            self.Wrec_flags.append(ls.recurrent)
             Wrec = nn.Parameter(torch.zeros(ls.dim_out, ls.dim_out), requires_grad=False)
             self.Wrecs.append(Wrec)
 
@@ -81,8 +84,10 @@ class SNNCore(nn.Module):
 
     def init_state(self, N: int, device, dtype) -> Tuple[SNNState, Optional[torch.Tensor]]:
         mems = [torch.zeros(N, fc.out_features, device=device, dtype=dtype) for fc in self.fcs]
-        # Keep spike placeholders only if a learner will use recurrence; otherwise None
-        spks = [None for _ in mems]
+        spks = [
+            torch.zeros(N, fc.out_features, device=device, dtype=dtype) if self.Wrec_flags[i] else None
+            for i, fc in enumerate(self.fcs)
+        ]
         head_mem = torch.zeros(N, self.n_classes, device=device, dtype=dtype) if self.head_lif else None
         return SNNState(mems, spks), head_mem
 
@@ -92,32 +97,30 @@ class SNNCore(nn.Module):
         state: SNNState,
         head_mem: Optional[torch.Tensor] = None,
         need_pre: bool = False,
-        use_recurrence_mask: Optional[List[bool]] = None,
     ):
         """
         x_t: [N, Din0]
         need_pre=True -> returns per-layer pre-activations (post-norm, pre-LIF)
-        use_recurrence_mask: optional list[bool] per layer; True -> add z_{t-1} @ Wrec
         returns:
           last_hidden_spikes [N,H_L], head_out (None|[N,K]), new_state, new_head_mem,
           layer_spikes list([N,H_l]), optionally layer_pres list([N,H_l])
         """
-        if use_recurrence_mask is None:
-            use_recurrence_mask = [False] * len(self.fcs)
 
         h = x_t
         new_mems, new_spks, layer_spikes, pres = [], [], [], []
-        for i, (fc, norm, lif, Wrec) in enumerate(zip(self.fcs, self.norms, self.lifs, self.Wrecs)):
+        for i, (fc, norm, lif) in enumerate(zip(self.fcs, self.norms, self.lifs)):
             pre = fc(h)
-            if use_recurrence_mask[i] and state.spikes[i] is not None:
-                pre = pre + state.spikes[i] @ Wrec  # simple additive recurrence
+            if self.Wrec_flags[i]:
+                prev_spk = state.spikes[i]
+                if prev_spk is not None:
+                    pre = pre + prev_spk @ self.Wrecs[i]
             pre = norm(pre)
             if need_pre:
                 pres.append(pre)
             spk, mem = lif(pre, state.mems[i])
             new_mems.append(mem)
             # preserve last spikes if recurrence is being used for this layer
-            new_spks.append(spk if use_recurrence_mask[i] else None)
+            new_spks.append(spk if self.Wrec_flags[i] else None)
             layer_spikes.append(spk)
             h = spk
 
