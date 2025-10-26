@@ -35,7 +35,7 @@ ACCUMULATION_MODE = "accum"     # "original" or "accum"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Architecture: input_dim -> DIMS... -> output_dim
-DIMS = [128, 128]   # e.g. [256, 128]
+DIMS = [128]   # e.g. [256, 128]
 
 # ─── MODEL ────────────────────────────────────────────────────────────────────
 class SNNMulti(nn.Module):

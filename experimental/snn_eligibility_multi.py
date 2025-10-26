@@ -34,7 +34,7 @@ slope       = 25.0         # surrogate sharpness (fast-sigmoid)
 device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Architecture
-DIMS = [128, 128]          # e.g., input_dim -> 512 -> 256 -> n_classes
+DIMS = [128]          # e.g., input_dim -> 512 -> 256 -> n_classes
 use_recurrence = False     # per-hidden-layer recurrence on/off
 
 # ----------------------- Utilities -----------------------

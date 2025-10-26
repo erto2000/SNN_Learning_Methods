@@ -21,7 +21,7 @@ from snntorch import surrogate
 from datasets import get_dataloaders, flatten_segments, majority_vote
 
 # ─── PARAMETERS ───────────────────────────────────────────────────────────────
-DATASET_NAME = "MNIST"
+DATASET_NAME = "har"
 DATA_ROOT    = "../data"
 SAMPLE_LENGTH = None
 
