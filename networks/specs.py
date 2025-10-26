@@ -20,4 +20,4 @@ class NetConfig:
     slope: float = 25.0        # used by learners when they need surrogate dσ/dx
     threshold: float = 1.0     # used by lerners (e.g., E-Prop) for u = pre - v_tha
     head: Optional[HeadType] = "logits"  # "logits" | "lif" | None
-    init: str = "kaiming_uniform"
+    init: str = "default"

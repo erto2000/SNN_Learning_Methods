@@ -144,7 +144,13 @@ class FFLearner(BaseLearner):
         loss.backward()
         opt.step()
 
-        return {"layer": layer_idx, "loss": loss.item()}
+        # Compute training accuracy for logging: use the model's predict_batch (no_grad)
+        #         # predict_batch expects raw input X of shape [B,T,D]
+        with torch.no_grad():
+            preds = self.predict_batch(X)
+            acc = (preds == y).float().mean().item() * 100.0
+
+        return {"layer": layer_idx, "loss": loss.item(), "acc": acc}
 
     def on_epoch_end(self):
         """

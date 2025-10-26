@@ -62,6 +62,8 @@ class SNNCore(nn.Module):
 
         for m in self.modules():
             if isinstance(m, nn.Linear):
+                if cfg.init == 'default':
+                    continue
                 if cfg.init == "kaiming_uniform":
                     init.kaiming_uniform_(m.weight, a=0.0, mode="fan_in", nonlinearity="linear")
                 elif cfg.init == "kaiming_normal":
