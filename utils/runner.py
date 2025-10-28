@@ -1,25 +1,32 @@
 # utils/runner.py
 from typing import Dict, Any, List
 from copy import deepcopy
-import traceback, io, os
+import traceback
+import io
+import os
 from datetime import datetime
 from contextlib import redirect_stdout
+
 from utils.common import set_seed, select_device
-from datasets.registry import get_dataloaders
+from timeseries.registry import get_dataloaders
 from utils.training import build_cfg, run_train_loop
 from utils.registry import LEARNER_REGISTRY
+
 
 # ---------- tiny tee to capture console while echoing ----------
 class _TeeIO(io.StringIO):
     def __init__(self, real_stdout):
         super().__init__()
         self._real = real_stdout
+
     def write(self, s):
         self._real.write(s)
         return super().write(s)
+
     def flush(self):
         self._real.flush()
         return super().flush()
+
 
 # ---------- registry helpers (unchanged) ----------
 def _make_learner(cfg, meta, device, g: Dict[str, Any]):
@@ -42,12 +49,19 @@ def _make_learner(cfg, meta, device, g: Dict[str, Any]):
         return LearnerCls(cfg, meta, device, mode=g["PEP_MODE"], lr=g["PEP_LR"], f_factor=g["PEP_F_FACTOR"])
     raise ValueError(f"Unhandled learner: {name}")
 
+
 def _print_header(run_id: str, g: Dict[str, Any], meta: Dict[str, Any]) -> None:
     print(f"\n=== Run: {run_id} ===")
-    print(f"[Data] {g['DATASET'].upper()} | input_dim={meta['input_dim']} | classes={meta['n_classes']} | "
-          f"number_of_samples(train/test)={meta['num_train_samples']}/{meta['num_test_samples']} | "
-          f"epoch={g['EPOCHS']} | batch_size={g['BATCH_SIZE']} | segment_T≈{meta['time_steps']} | stride={g['STRIDE']}")
-    print(f"[Arch] hidden={g['HIDDEN_SIZES']} | norm={g['NORM']} | base_head={g['HEAD']} | recurrent={g['RECURRENT']} | learner={g['LEARNER']}")
+    print(
+        f"[Data] {g['DATASET'].upper()} | input_dim={meta['input_dim']} | classes={meta['n_classes']} | "
+        f"number_of_samples(train/test)={meta['num_train_samples']}/{meta['num_test_samples']} | "
+        f"epoch={g['EPOCHS']} | batch_size={g['BATCH_SIZE']} | segment_T≈{meta.get('time_steps', 'n/a')}"
+    )
+    print(
+        f"[Arch] hidden={g['HIDDEN_SIZES']} | norm={g['NORM']} | base_head={g['HEAD']} | "
+        f"recurrent={g['RECURRENT']} | learner={g['LEARNER']}"
+    )
+
 
 # ---------- core ----------
 def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -56,6 +70,14 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
     (including captured console_log). No file writing here.
     """
     g = deepcopy(config)
+
+    # Pull out the transform object (avoid serializing it later)
+    # and deepcopy to ensure per-run state (e.g., ZScore fit stats) are isolated.
+    transform = g.pop("TRANSFORM", None)
+    if transform is not None:
+        from copy import deepcopy as _dc
+        transform = _dc(transform)
+
     run_id = g.get("RUN_ID", f"{g['DATASET']}-{g['LEARNER']}-seed{g['SEED']}")
     start_dt = datetime.now()
     started_at = start_dt.isoformat(timespec="seconds")
@@ -73,8 +95,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                 root=g["DATA_ROOT"],
                 batch_size=g["BATCH_SIZE"],
                 max_samples=g["MAX_SAMPLES"],
-                sample_length=g["SAMPLE_LENGTH"],
-                stride=g["STRIDE"],
+                transform=transform,   # may be None or a Compose([...])
             )
 
             # Model + learner
@@ -91,8 +112,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
             )
 
             if not g["TEST_EVERY_EPOCH"]:
-                from datetime import datetime as _dt
-                ts = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 print(f"[{ts}] [Final Test] sample_acc:{final_stats['sample_acc']:.2f}%")
 
             status = "ok"
@@ -120,7 +140,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "run_id": run_id,
-        "config": g,
+        "config": g,  # note: TRANSFORM removed above (non-serializable)
         "meta": meta if isinstance(meta, dict) else {},
         "final": final_stats,
         "history": epoch_log,
@@ -130,8 +150,9 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
         "started_at": started_at,
         "finished_at": finished_at,
         "duration_seconds": duration_seconds,
-        "console_log": console_text,  # <— so save_results can write it
+        "console_log": console_text,
     }
+
 
 def run_all(run_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
@@ -153,9 +174,10 @@ def run_all(run_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "started_at": None,
                 "finished_at": None,
                 "duration_seconds": None,
-                "console_log": "",  # nothing captured at this level
+                "console_log": "",
             })
     return results
+
 
 def summarize(results: List[Dict[str, Any]]) -> None:
     if not results:

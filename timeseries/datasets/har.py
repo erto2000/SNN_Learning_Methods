@@ -1,6 +1,7 @@
-# datasets/har.py
+# timeseries/datasets/har.py
+from __future__ import annotations
 import os, zipfile, urllib.request
-from typing import Optional, Tuple, List
+from typing import Optional, List, Tuple
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -26,7 +27,9 @@ def _download_and_extract(root: str) -> str:
         print("[HAR] Extracting...")
         with zipfile.ZipFile(zip_path, "r") as z:
             z.extractall(root)
-        os.rename(os.path.join(root, "UCI HAR Dataset"), data_dir)
+        src = os.path.join(root, "UCI HAR Dataset")
+        if not os.path.exists(data_dir):
+            os.rename(src, data_dir)
     return data_dir
 
 def _load_split(data_dir: str, split: str):
@@ -39,25 +42,25 @@ def _load_split(data_dir: str, split: str):
     y = np.loadtxt(os.path.join(data_dir, split, f"y_{split}.txt")).astype(int) - 1
     return X, y
 
-class _HARDataset(Dataset):
+class HARDatasetRaw(Dataset):
+    """IO-only: returns raw per-sample time series [T,D] (D=9)."""
     def __init__(self, X: np.ndarray, y: np.ndarray):
-        self.X = torch.from_numpy(X).float()   # [N,T,C]
-        self.y = torch.from_numpy(y).long()    # [N]
+        self.X = torch.from_numpy(X).float()      # [N,T,C]
+        self.y = torch.from_numpy(y).long()       # [N]
     def __len__(self): return len(self.X)
     def __getitem__(self, i):
-        x = self.X[i]               # [T,C]
+        x = self.X[i]            # [T,C]
         y = int(self.y[i])
-        return x, y
+        info = {"id": i, "length": x.shape[0], "channels": x.shape[1]}
+        return x, y, info
 
-def build_har(root: str, max_samples: Optional[int] = None, **_) -> Tuple[Dataset, Dataset, List[str]]:
+def build_har_raw(root: str, max_samples: Optional[int] = None):
     data_dir = _download_and_extract(root)
     X_tr, y_tr = _load_split(data_dir, "train")
     X_te, y_te = _load_split(data_dir, "test")
-
     if max_samples is not None:
         n_tr = min(max_samples, len(X_tr))
         n_te = max(1, min(max_samples // 4 if (max_samples and max_samples > 4) else 1, len(X_te)))
         X_tr, y_tr = X_tr[:n_tr], y_tr[:n_tr]
         X_te, y_te = X_te[:n_te], y_te[:n_te]
-
-    return _HARDataset(X_tr, y_tr), _HARDataset(X_te, y_te), _HAR_CLASSES
+    return HARDatasetRaw(X_tr, y_tr), HARDatasetRaw(X_te, y_te), list(_HAR_CLASSES)

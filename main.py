@@ -1,8 +1,34 @@
 # main.py
-# Keep this file minimal: only parameters + high-level flow.
-from networks.specs import HeadType
 from utils.runner import run_all, summarize
 from utils.results import save_results
+import timeseries.transforms as transforms
+
+# ──────────────────────────────────────────────────────────────────────────────
+# DATASET PIPELINES
+L = 128
+H = 64
+HAR_PIPELINE = transforms.Compose([
+    transforms.ToFloat32(),
+    transforms.Ensure2D(),
+    transforms.SlidingWindow(length=L, hop=H),   # [T,D] -> [S,L,D]
+])
+
+MNIST_STATIC_PIPELINE = transforms.Compose([
+    transforms.ToFloat32(),
+    transforms.RepeatStatic(T=50),
+])
+
+MNIST_RATE_PIPELINE = transforms.Compose([
+    transforms.ToFloat32(),
+    transforms.DeterministicSpikes(gain=0.7, T=20, base_seed=0),  # [1,784] -> [20,784]
+])
+
+SC_PIPELINE = transforms.Compose([
+    transforms.ToFloat32(),
+    transforms.Ensure2D(),                                 # waveform -> [T,1]
+    transforms.ToLogMel(sample_rate=16000, n_mels=64,
+             win_len_ms=25, hop_ms=10),        # -> [F,M]
+])
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DEFAULTS (you can override per-run below)
@@ -12,8 +38,6 @@ DEFAULT = dict(
     BATCH_SIZE       = 128,
     EPOCHS           = 10,
     MAX_SAMPLES      = None,
-    SAMPLE_LENGTH    = None,
-    STRIDE           = None,
     TEST_EVERY_EPOCH = False,
     SEED             = None,
 
@@ -59,6 +83,7 @@ RUNS = [
         "LEARNER": "bp",
         "EPOCHS": 5,
         "HIDDEN_SIZES": [128],
+        "TRANSFORM": HAR_PIPELINE,
     },
     # {
     #     **DEFAULT,
