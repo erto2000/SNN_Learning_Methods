@@ -30,9 +30,10 @@ _REGISTRY: Dict[str, LoaderFn] = {
     "speech_commands": build_sc_raw,
 }
 
-def _maybe_fit_pipeline(train_ds: Dataset, transform) -> None:
+def _maybe_fit_pipeline(train_ds, transform) -> None:
     if isinstance(transform, Compose):
-        transform.fit(train_ds)
+        # use a subset to estimate mean/std
+        transform.fit(train_ds, max_samples=min(2000, len(train_ds)))
     elif hasattr(transform, "fit"):
         transform.fit(train_ds)
 

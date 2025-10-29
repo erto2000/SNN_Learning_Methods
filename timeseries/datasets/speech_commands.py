@@ -75,7 +75,7 @@ class SpeechCommandsRaw(Dataset):
 
 def build_sc_raw(root: str,
                  max_samples: Optional[int] = None,
-                 include_silence: bool = True,
+                 include_silence: bool = False,
                  *,
                  seed: int = 123,
                  min_per_class: int = 6):
