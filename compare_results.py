@@ -7,7 +7,7 @@ Create comparison plots from finished runs.
 - Run:  python compare_results.py
 """
 
-from io.comparison import build_comparison
+from visualization.comparison import build_comparison
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DEFAULTS

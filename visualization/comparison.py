@@ -1,4 +1,4 @@
-# io/comparison.py
+# visualization/comparison.py
 from __future__ import annotations
 import os, json
 from typing import List, Dict, Any, Tuple

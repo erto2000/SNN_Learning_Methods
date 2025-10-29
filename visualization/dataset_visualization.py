@@ -1,4 +1,4 @@
-# io/dataset_viz.py
+# visualization/dataset_viz.py
 from __future__ import annotations
 from typing import List, Dict, Any, Optional
 import os

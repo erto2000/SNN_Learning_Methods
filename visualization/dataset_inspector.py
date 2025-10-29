@@ -1,4 +1,4 @@
-# io/dataset_inspector.py
+# visualization/dataset_inspector.py
 from __future__ import annotations
 import os, json, math, random
 from copy import deepcopy
@@ -135,24 +135,47 @@ def _compute_embeddings(ds, per_class: int, class_names: List[str], seed: int, m
     Z = Xc @ Vt[:2].T
     return Z.astype(np.float32), y
 
+def _is_primitive(v):
+    return isinstance(v, (str, int, float, bool, type(None)))
+
 def _summarize_pipeline(transform) -> Dict[str, Any]:
     if transform is None:
         return {"ops": []}
+
     ops = []
     if isinstance(transform, Compose):
         it = transform.ops
     else:
         it = [transform]
+
     for op in it:
         name = op.__class__.__name__
-        params = {k: (float(v) if isinstance(v, (int, float)) else v) for k, v in op.__dict__.items() if not k.startswith("_")}
-        # include small summaries for fitted stats if present
-        fit_keys = [k for k in op.__dict__.keys() if k.startswith("_") and isinstance(getattr(op, k), torch.Tensor)]
+        params = {}
+        # keep only primitives (and small tuples/lists of primitives)
+        for k, v in op.__dict__.items():
+            if k.startswith("_"):
+                continue
+            if _is_primitive(v):
+                params[k] = v
+            elif isinstance(v, (list, tuple)) and all(_is_primitive(x) for x in v):
+                params[k] = list(v)
+            else:
+                # skip complex objects (e.g., torchaudio transforms), but record their type names
+                params[k] = f"<{v.__class__.__name__}>"
+
+        # tiny summaries for any fitted tensors stored privately (e.g., ZScore)
         fit_summary = {}
-        for fk in fit_keys:
-            t: torch.Tensor = getattr(op, fk)
-            fit_summary[fk] = {"shape": list(t.shape), "mean": float(t.float().mean().item()), "std": float(t.float().std().item())}
+        for fk, fv in op.__dict__.items():
+            if fk.startswith("_") and isinstance(fv, torch.Tensor):
+                t = fv.detach().float()
+                fit_summary[fk] = {
+                    "shape": list(t.shape),
+                    "mean": float(t.mean().item()),
+                    "std":  float(t.std().item()),
+                }
+
         ops.append({"op": name, "params": params, "fitted": fit_summary})
+
     return {"ops": ops}
 
 # ──────────────────────────────────────────────────────────────────────────────

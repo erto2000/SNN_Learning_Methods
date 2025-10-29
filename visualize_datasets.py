@@ -1,21 +1,22 @@
-# scripts/dataset_visualize.py
+# visualize_datasets.py
 """
 Standalone dataset visualization (no training).
 - Edit VIS list below (like RUNS in main.py).
-- Run:  python scripts/dataset_visualize.py
+- Run:  python scripts/visualize_datasets.py
 Artifacts go to: results/_dataset_visualization/<TAG>/<ID>/
 """
 
-from io.dataset_inspector import build_dataset_viz
+from visualization.dataset_inspector import build_dataset_viz
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DEFAULTS (edit as needed)
 BASE_DIR = "results"
 TAG = "har_exploration"
+SEED = 123
 
 # Pipelines: reuse the same ones you have in main.py if you want post-pipeline views
 import timeseries.transforms as transforms
-L, H = 128, 64
+L, H = 64, 64
 HAR_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.Ensure2D(),
@@ -45,7 +46,7 @@ VIS = [
         MAX_SAMPLES=2000,
         TRANSFORM=None,
         NOTES="HAR raw signals",
-        SEED=123,
+        SEED=SEED,
     ),
     dict(
         ID="har-post-L128H64",
@@ -55,15 +56,14 @@ VIS = [
         MAX_SAMPLES=2000,
         TRANSFORM=HAR_PIPELINE,
         NOTES="HAR after SlidingWindow(L=128, H=64)",
-        SEED=123,
+        SEED=SEED,
     ),
-    # Examples (uncomment as needed)
-    # dict(ID="sc-post-mels64", DATASET="speech_commands", SPLITS=["train","test"], DATA_ROOT="./data",
-    #      MAX_SAMPLES=4000, TRANSFORM=SC_PIPELINE, NOTES="SC log-mel", SEED=123),
-    # dict(ID="mnist-static", DATASET="mnist", SPLITS=["train","test"], DATA_ROOT="./data",
-    #      MAX_SAMPLES=2000, TRANSFORM=MNIST_STATIC_PIPELINE, NOTES="MNIST repeated static", SEED=123),
-    # dict(ID="mnist-rate", DATASET="mnist", SPLITS=["train","test"], DATA_ROOT="./data",
-    #      MAX_SAMPLES=2000, TRANSFORM=MNIST_RATE_PIPELINE, NOTES="MNIST rate-coded spikes", SEED=123),
+    dict(ID="sc-post-mels64", DATASET="speech_commands", SPLITS=["train","test"], DATA_ROOT="./data",
+         MAX_SAMPLES=4000, TRANSFORM=SC_PIPELINE, NOTES="SC log-mel", SEED=SEED),
+    dict(ID="mnist-static", DATASET="mnist", SPLITS=["train","test"], DATA_ROOT="./data",
+         MAX_SAMPLES=2000, TRANSFORM=MNIST_STATIC_PIPELINE, NOTES="MNIST repeated static", SEED=SEED),
+    dict(ID="mnist-rate", DATASET="mnist", SPLITS=["train","test"], DATA_ROOT="./data",
+         MAX_SAMPLES=2000, TRANSFORM=MNIST_RATE_PIPELINE, NOTES="MNIST rate-coded spikes", SEED=SEED),
 ]
 # ──────────────────────────────────────────────────────────────────────────────
 
