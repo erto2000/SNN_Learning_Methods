@@ -16,7 +16,7 @@ from .dataset_visualization import (
     save_class_distribution, save_length_hist, save_pad_ratio,
     save_examples_har_traces, save_examples_waveforms, save_examples_mnist_grid,
     save_examples_mel_specs, save_examples_spike_raster, save_embeddings_scatter,
-    save_pipeline_summary
+    save_pipeline_summary, save_counts_json
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ def _set_seed(seed: Optional[int]) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-def _build_raw(dataset: str, root: str, max_samples: Optional[int]) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset, List[str]]:
+def _build_raw(dataset: str, root: str, max_samples: Optional[int]) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset, List[str], dir]:
     name = dataset.lower()
     if name not in DS_REGISTRY:
         raise ValueError(f"Unknown dataset: {dataset!r}. Registered: {list(DS_REGISTRY)}")
@@ -204,7 +204,7 @@ def build_dataset_viz(
     _ensure_dir(os.path.join(out_dir, "embeddings"))
 
     # 1) Build raw datasets
-    train_raw, test_raw, class_names = _build_raw(DATASET, DATA_ROOT, MAX_SAMPLES)
+    train_raw, test_raw, class_names, info = _build_raw(DATASET, DATA_ROOT, MAX_SAMPLES)
     split_map = {"train": train_raw, "test": test_raw}
 
     # 2) Fit/apply pipeline (if provided)
@@ -214,12 +214,41 @@ def build_dataset_viz(
     # 3) Corpus stats + figures (raw)
     figs = {}
     selection = {"seed": SEED, "per_class_examples": 3}
+
+    split_sizes = {}
+    split_counts = {}
     for split in SPLITS:
         ds_raw = split_map[split]
+        split_sizes[split] = len(ds_raw)
+
         counts = _class_counts(ds_raw, len(class_names))
-        figs[f"class_distribution_{split}"] = save_class_distribution(counts, class_names, os.path.join(out_dir, "corpus", f"class_distribution_{split}.png"))
+        split_counts[split] = counts
+
+        # per-split figure
+        figs[f"class_distribution_{split}"] = save_class_distribution(
+            counts, class_names,
+            os.path.join(out_dir, "corpus", f"class_distribution_{split}.png")
+        )
+        # per-split tables
+        save_counts_json(counts, class_names, os.path.join(out_dir,"corpus",f"class_counts_{split}.json"))
+        # length hist per split (unchanged)
         lens = _collect_lengths(ds_raw)
-        figs[f"length_hist_{split}"] = save_length_hist(lens, os.path.join(out_dir, "corpus", f"length_hist_{split}.png"))
+        figs[f"length_hist_{split}"] = save_length_hist(
+            lens, os.path.join(out_dir, "corpus", f"length_hist_{split}.png")
+        )
+
+    # OVERALL (across requested SPLITS only)
+    overall_counts = [0] * len(class_names)
+    for split in SPLITS:
+        cc = split_counts[split]
+        for i in range(len(overall_counts)):
+            overall_counts[i] += cc[i]
+
+    figs["class_distribution_overall"] = save_class_distribution(
+        overall_counts, class_names,
+        os.path.join(out_dir, "corpus", "class_distribution_overall.png")
+    )
+    save_counts_json(overall_counts, class_names, os.path.join(out_dir,"corpus","class_counts_overall.json"))
 
     # 4) Post-pipeline corpus stats + figures
     if tf is not None:
@@ -274,7 +303,11 @@ def build_dataset_viz(
     summary = dict(
         id=ID, dataset=DATASET, splits=SPLITS, data_root=DATA_ROOT, max_samples=MAX_SAMPLES,
         notes=NOTES, seed=SEED, class_names=class_names,
-        has_transform=tf is not None, output_dir=out_dir
+        has_transform=tf is not None, output_dir=out_dir, split_sizes=split_sizes,
+        overall_total=int(sum(split_sizes[s] for s in SPLITS)),
+        true_toal=info['true_train_total']+info['true_test_total'],
+        true_train_total=info['true_train_total'],
+        true_test_total=info['true_test_total'],
     )
     summary_path = os.path.join(out_dir, "summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:

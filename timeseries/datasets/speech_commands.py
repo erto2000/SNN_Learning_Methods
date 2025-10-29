@@ -73,16 +73,42 @@ class SpeechCommandsRaw(Dataset):
         info = {"id": idx, "length": x.shape[0], "sample_rate": self.sample_rate}
         return x, y, info
 
-def build_sc_raw(root: str, max_samples: Optional[int] = None, include_silence: bool = True):
+def build_sc_raw(root: str,
+                 max_samples: Optional[int] = None,
+                 include_silence: bool = True,
+                 *,
+                 seed: int = 123,
+                 min_per_class: int = 6):
+    """
+    Returns:
+      - train: training+validation concatenated
+      - test: official testing split
+    Both are optionally subsampled STRATIFIED (not head-sliced).
+    """
     os.makedirs(root, exist_ok=True)
     train = SpeechCommandsRaw("training",   root=root, include_silence=include_silence)
     valid = SpeechCommandsRaw("validation", root=root, include_silence=include_silence)
     test  = SpeechCommandsRaw("testing",    root=root, include_silence=include_silence)
+
     from torch.utils.data import ConcatDataset, Subset
+    from ._subsample import stratified_indices
+
     full_train = ConcatDataset([train, valid])
+
+    info = {
+        "true_train_total": len(full_train),
+        "true_test_total": len(test)
+    }
+
     if max_samples is not None:
         max_tr = max(1, min(max_samples, len(full_train)))
-        max_te = max(1, min(max_samples // 4 if (max_samples and max_samples > 4) else 1, len(test)))
-        full_train = Subset(full_train, range(max_tr))
-        test = Subset(test, range(max_te))
-    return full_train, test, train.class_names
+        # keep test smaller but ensure at least a few per class (handles silence too)
+        max_te = max(1, min(max(max_samples // 4, 6*len(train.class_names)), len(test)))
+
+        tr_idx = stratified_indices(full_train, max_tr, seed=seed, min_per_class=min_per_class)
+        te_idx = stratified_indices(test,      max_te, seed=seed, min_per_class=max(3, min_per_class//2))
+
+        full_train = Subset(full_train, tr_idx)
+        test       = Subset(test,      te_idx)
+
+    return full_train, test, train.class_names, info

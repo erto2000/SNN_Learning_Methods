@@ -7,6 +7,7 @@ Artifacts go to: results/_dataset_visualization/<TAG>/<ID>/
 """
 
 from visualization.dataset_inspector import build_dataset_viz
+import os
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DEFAULTS (edit as needed)
@@ -72,8 +73,17 @@ def main():
         artifacts = build_dataset_viz(base_dir=BASE_DIR, tag=TAG, **job)
         print("\n===== Dataset Visualization =====")
         print(f"ID: {job['ID']}  |  out: {artifacts['out_dir']}")
+
+        # Figures created
         for k, v in artifacts["figs"].items():
             if v: print(f"- {k}: {v}")
+
+        # Quick table locations
+        corpus = os.path.join(artifacts["out_dir"], "corpus")
+        print(f"- per-split counts (csv/json) in: {corpus}")
+        print(f"- overall counts: {os.path.join(corpus,'class_counts_overall.csv')}")
+
+        # Summary
         print(f"- summary: {artifacts['summary_path']}")
 
 if __name__ == "__main__":

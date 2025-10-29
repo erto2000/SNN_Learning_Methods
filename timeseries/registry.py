@@ -22,7 +22,7 @@ class DatasetMeta:
     num_test_samples: Optional[int] = None
     time_steps: Optional[int] = None   # approximate (from segment length if present)
 
-LoaderFn = Callable[..., Tuple[Dataset, Dataset, List[str]]]
+LoaderFn = Callable[..., Tuple[Dataset, Dataset, List[str], dict]]
 
 _REGISTRY: Dict[str, LoaderFn] = {
     "har": build_har_raw,
@@ -47,7 +47,7 @@ def get_dataloaders(dataset: str,
     if name not in _REGISTRY:
         raise ValueError(f"Unknown dataset: {dataset!r}. Registered: {list(_REGISTRY)}")
 
-    train_ds, test_ds, class_names = _REGISTRY[name](root=root, max_samples=max_samples, **kwargs)
+    train_ds, test_ds, class_names, info = _REGISTRY[name](root=root, max_samples=max_samples, **kwargs)
 
     if transform is not None:
         _maybe_fit_pipeline(train_ds, transform)

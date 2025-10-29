@@ -22,11 +22,30 @@ class MNISTRaw(Dataset):
         info = {"id": idx, "length": 1, "dim": x.shape[1]}
         return x, int(y), info
 
-def build_mnist_raw(root: str, max_samples: Optional[int] = None):
+def build_mnist_raw(root: str,
+                    max_samples: Optional[int] = None,
+                    *,
+                    seed: int = 123,
+                    min_per_class: int = 10):
+    from torch.utils.data import Subset
+    from ._subsample import stratified_indices
+
     train = MNISTRaw(train=True,  root=root)
     test  = MNISTRaw(train=False, root=root)
+
+    info = {
+        "true_train_total": len(train),
+        "true_test_total": len(test)
+    }
+
     if max_samples is not None:
-        from torch.utils.data import Subset
-        train = Subset(train, range(min(max_samples, len(train))))
-        test  = Subset(test,  range(max(1, min(max_samples // 4 if max_samples and max_samples > 4 else 1, len(test)))))
-    return train, test, [str(i) for i in range(10)]
+        max_tr = max(1, min(max_samples, len(train)))
+        max_te = max(1, min(max(max_samples // 4, 100), len(test)))
+
+        tr_idx = stratified_indices(train, max_tr, seed=seed, min_per_class=min_per_class)
+        te_idx = stratified_indices(test,  max_te, seed=seed, min_per_class=max(5, min_per_class//2))
+
+        train = Subset(train, tr_idx)
+        test  = Subset(test,  te_idx)
+
+    return train, test, [str(i) for i in range(10)], info

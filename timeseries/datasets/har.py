@@ -54,13 +54,37 @@ class HARDatasetRaw(Dataset):
         info = {"id": i, "length": x.shape[0], "channels": x.shape[1]}
         return x, y, info
 
-def build_har_raw(root: str, max_samples: Optional[int] = None):
+def build_har_raw(root: str,
+                  max_samples: Optional[int] = None,
+                  *,
+                  seed: int = 123,
+                  min_per_class: int = 5) -> Tuple[Dataset, Dataset, List[str], dict]:
+    from ._subsample import stratified_indices
+
     data_dir = _download_and_extract(root)
     X_tr, y_tr = _load_split(data_dir, "train")
     X_te, y_te = _load_split(data_dir, "test")
+
+    info = {
+        "true_train_total": len(X_tr),
+        "true_test_total": len(X_te)
+    }
+
+    train = HARDatasetRaw(X_tr, y_tr)
+    test  = HARDatasetRaw(X_te, y_te)
+
     if max_samples is not None:
-        n_tr = min(max_samples, len(X_tr))
-        n_te = max(1, min(max_samples // 4 if (max_samples and max_samples > 4) else 1, len(X_te)))
-        X_tr, y_tr = X_tr[:n_tr], y_tr[:n_tr]
-        X_te, y_te = X_te[:n_te], y_te[:n_te]
-    return HARDatasetRaw(X_tr, y_tr), HARDatasetRaw(X_te, y_te), list(_HAR_CLASSES)
+        # choose a train cap and a test cap (keep test smaller but meaningful)
+        max_tr = max(1, min(max_samples, len(train)))
+        # keep test ~25% of max_samples but at least a few per class
+        max_te = max(1, min(max(max_samples // 4, 6*len(_HAR_CLASSES)), len(test)))
+
+        tr_idx = stratified_indices(train, max_tr, seed=seed, min_per_class=min_per_class)
+        te_idx = stratified_indices(test,  max_te, seed=seed, min_per_class=max(2, min_per_class//2))
+
+        from torch.utils.data import Subset
+        train = Subset(train, tr_idx)
+        test  = Subset(test,  te_idx)
+
+    return train, test, list(_HAR_CLASSES), info
+

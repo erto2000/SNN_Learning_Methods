@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 from torch.utils.data import Dataset, Subset
+import json
 
 COLORS = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
           "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf"]
@@ -167,3 +168,15 @@ def save_pipeline_summary(obj: Dict[str, Any], path: str) -> str:
     with open(path, "w", encoding="utf-8") as f:
         import json; json.dump(obj, f, indent=2)
     return path
+
+def save_counts_json(counts, class_names, json_path):
+    total = int(sum(counts))
+    rows = []
+    for name, c in zip(class_names, counts):
+        pct = (100.0 * c / total) if total > 0 else 0.0
+        rows.append({"class": name, "count": int(c), "percent": pct})
+
+    obj = {"total": total, "per_class": rows}
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
