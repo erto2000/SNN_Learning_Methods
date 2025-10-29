@@ -54,8 +54,9 @@ def _print_header(run_id: str, g: Dict[str, Any], meta: Dict[str, Any]) -> None:
     print(f"\n=== Run: {run_id} ===")
     print(
         f"[Data] {g['DATASET'].upper()} | input_dim={meta['input_dim']} | classes={meta['n_classes']} | "
+        f"time_steps={meta.get('time_steps', 'n/a')} | "
         f"number_of_samples(train/test)={meta['num_train_samples']}/{meta['num_test_samples']} | "
-        f"epoch={g['EPOCHS']} | batch_size={g['BATCH_SIZE']} | segment_T≈{meta.get('time_steps', 'n/a')}"
+        f"epoch={g['EPOCHS']} | batch_size={g['BATCH_SIZE']}"
     )
     print(
         f"[Arch] hidden={g['HIDDEN_SIZES']} | norm={g['NORM']} | base_head={g['HEAD']} | "
