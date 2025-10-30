@@ -6,6 +6,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from ._subsample import stratified_indices_from_labels
+
 _HAR_URL   = "https://archive.ics.uci.edu/ml/machine-learning-databases/00240/UCI%20HAR%20Dataset.zip"
 _HAR_ZIP   = "UCI_HAR.zip"
 _HAR_DIR   = "UCI_HAR_Dataset"
@@ -59,8 +61,10 @@ def build_har_raw(root: str,
                   *,
                   seed: int = 123,
                   min_per_class: int = 5) -> Tuple[Dataset, Dataset, List[str], dict]:
-    from ._subsample import stratified_indices
-
+    """
+    Returns (train_ds, test_ds, class_names, info) where train/test items are (x:[T,D], y:int, info:dict).
+    When max_samples is set, returns stratified Subset splits using only label lists (decoupled).
+    """
     data_dir = _download_and_extract(root)
     X_tr, y_tr = _load_split(data_dir, "train")
     X_te, y_te = _load_split(data_dir, "test")
@@ -79,12 +83,15 @@ def build_har_raw(root: str,
         # keep test ~25% of max_samples but at least a few per class
         max_te = max(1, min(max(max_samples // 4, 6*len(_HAR_CLASSES)), len(test)))
 
-        tr_idx = stratified_indices(train, max_tr, seed=seed, min_per_class=min_per_class)
-        te_idx = stratified_indices(test,  max_te, seed=seed, min_per_class=max(2, min_per_class//2))
+        # Fast explicit labels (no item loads)
+        tr_labels = [int(x) for x in train.y.tolist()]
+        te_labels = [int(x) for x in test.y.tolist()]
+
+        tr_idx = stratified_indices_from_labels(tr_labels, max_tr, seed=seed, min_per_class=min_per_class)
+        te_idx = stratified_indices_from_labels(te_labels, max_te, seed=seed, min_per_class=max(2, min_per_class//2))
 
         from torch.utils.data import Subset
         train = Subset(train, tr_idx)
         test  = Subset(test,  te_idx)
 
     return train, test, list(_HAR_CLASSES), info
-

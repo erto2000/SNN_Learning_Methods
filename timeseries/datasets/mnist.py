@@ -4,6 +4,8 @@ from typing import Optional, List, Tuple
 import torch
 from torch.utils.data import Dataset
 
+from ._subsample import stratified_indices_from_labels
+
 try:
     from torchvision import datasets as tvds, transforms as T
     _HAS_TV = True
@@ -26,9 +28,12 @@ def build_mnist_raw(root: str,
                     max_samples: Optional[int] = None,
                     *,
                     seed: int = 123,
-                    min_per_class: int = 10):
+                    min_per_class: int = 10) -> Tuple[Dataset, Dataset, List[str], dict]:
+    """
+    Returns (train_ds, test_ds, class_names, info) where train/test items are (x:[T,D], y:int, info:dict).
+    When max_samples is set, returns stratified Subset splits using only label lists (decoupled).
+    """
     from torch.utils.data import Subset
-    from ._subsample import stratified_indices
 
     train = MNISTRaw(train=True,  root=root)
     test  = MNISTRaw(train=False, root=root)
@@ -42,8 +47,12 @@ def build_mnist_raw(root: str,
         max_tr = max(1, min(max_samples, len(train)))
         max_te = max(1, min(max(max_samples // 4, 100), len(test)))
 
-        tr_idx = stratified_indices(train, max_tr, seed=seed, min_per_class=min_per_class)
-        te_idx = stratified_indices(test,  max_te, seed=seed, min_per_class=max(5, min_per_class//2))
+        # Fast labels via torchvision tensors (no item loads)
+        tr_labels = [int(x) for x in train.ds.targets.tolist()]
+        te_labels = [int(x) for x in test.ds.targets.tolist()]
+
+        tr_idx = stratified_indices_from_labels(tr_labels, max_tr, seed=seed, min_per_class=min_per_class)
+        te_idx = stratified_indices_from_labels(te_labels, max_te, seed=seed, min_per_class=max(5, min_per_class//2))
 
         train = Subset(train, tr_idx)
         test  = Subset(test,  te_idx)

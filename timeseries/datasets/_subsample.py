@@ -1,16 +1,10 @@
+# timeseries/datasets/_subsample.py
 from __future__ import annotations
 from typing import Dict, List, Optional
 import random
-from ._labels import get_labels
 
-def _class_buckets_from_labels(labels: List[int]) -> Dict[int, List[int]]:
-    buckets: Dict[int, List[int]] = {}
-    for i, y in enumerate(labels):
-        buckets.setdefault(int(y), []).append(i)
-    return buckets
-
-def stratified_indices(
-    ds,
+def stratified_indices_from_labels(
+    labels: List[int],
     max_total: Optional[int],
     *,
     seed: int = 123,
@@ -18,21 +12,32 @@ def stratified_indices(
     per_class_cap: Optional[int] = None
 ) -> List[int]:
     """
-    Same API as before, but FAST:
-    - Builds buckets from cached integer labels (no x loads, no audio I/O)
-    - Deterministic given seed
+    Build stratified indices from a *label list* (no dataset coupling).
+
+    Args:
+      labels: list of class ids, one per sample (len = len(dataset)).
+      max_total: cap on total returned indices. If None, return all.
+      seed: RNG seed for deterministic shuffling/round-robin.
+      min_per_class: guarantee at least this many per class if available.
+      per_class_cap: optional per-class hard cap.
+
+    Returns:
+      A shuffled list of indices into the original dataset.
     """
     rng = random.Random(seed)
-    labels = get_labels(ds)                 # O(N) simple ints
-    buckets = _class_buckets_from_labels(labels)
 
-    # shuffle each bucket
+    # bucketize
+    buckets: Dict[int, List[int]] = {}
+    for i, y in enumerate(labels):
+        buckets.setdefault(int(y), []).append(i)
+
+    # shuffle each bucket deterministically
     for k in buckets:
         rng.shuffle(buckets[k])
 
-    # floor
+    # floor (guarantee min_per_class)
     picked: List[int] = []
-    start_ptr = {}
+    start_ptr: Dict[int, int] = {}
     for k, idxs in buckets.items():
         take = min(min_per_class, len(idxs))
         if per_class_cap is not None:
@@ -41,7 +46,8 @@ def stratified_indices(
         start_ptr[k] = take
 
     if max_total is None:
-        rest = []
+        # take the rest up to per_class_cap, then shuffle all
+        rest: List[int] = []
         for k, idxs in buckets.items():
             end = len(idxs) if per_class_cap is None else min(len(idxs), per_class_cap)
             rest.extend(idxs[start_ptr[k]:end])
@@ -50,7 +56,7 @@ def stratified_indices(
         rng.shuffle(out)
         return out
 
-    # round-robin top-up
+    # round-robin fill-up to max_total
     ks = list(buckets.keys())
     while len(picked) < max_total and ks:
         for k in list(ks):
