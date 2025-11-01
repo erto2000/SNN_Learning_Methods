@@ -172,3 +172,81 @@ class SlidingWindow(Transform):
                 pad = s.new_zeros((Lmax, D)); pad[:s.shape[0]] = s; out.append(pad)
         X = torch.stack(out, dim=0) if out else x.new_zeros((1, self.L, D))
         return X, y, info
+
+class Resample(Transform):
+    def __init__(self, orig_sr: int, new_sr: int):
+        assert _HAS_TA, "torchaudio required for Resample."
+        import torchaudio
+        self.orig_sr, self.new_sr = int(orig_sr), int(new_sr)
+    def __call__(self, x, y, info):
+        # x:[T,1] waveform
+        import torchaudio
+        X = x.transpose(0,1)  # [1,T]
+        X = torchaudio.functional.resample(X, self.orig_sr, self.new_sr)
+        return X.transpose(0,1).contiguous(), y, {**info, "sample_rate": self.new_sr}
+
+class RandomTimeCrop(Transform):
+    """Random crop waveform to fixed T (pads if short)."""
+    def __init__(self, T: int): self.T = int(T)
+    def __call__(self, x, y, info):
+        T = x.shape[0]
+        if T == self.T: return x, y, info
+        if T < self.T:
+            pad = x.new_zeros((self.T, x.shape[1])); pad[:T] = x
+            return pad, y, info
+        start = torch.randint(0, T-self.T+1, (1,)).item()
+        return x[start:start+self.T], y, info
+
+class SpecAugmentLike(Transform):
+    """Apply simple time masking on [F,M] log-mels."""
+    def __init__(self, max_time_mask: int = 20, p: float = 0.5):
+        self.max_time_mask, self.p = int(max_time_mask), float(p)
+    def __call__(self, x, y, info):
+        if x.dim() == 2 and torch.rand(()) < self.p:
+            F, M = x.shape
+            w = torch.randint(1, self.max_time_mask+1, ()).item()
+            s = torch.randint(0, max(1, M - w + 1), ()).item()
+            x = x.clone(); x[:, s:s+w] = x.min()
+        return x, y, info
+
+class EventToVoxel(Transform):
+    def __init__(self, H:int, W:int, bins:int, t_min:float=None, t_max:float=None, polarity:bool=True):
+        self.H, self.W, self.bins = int(H), int(W), int(bins)
+        self.t_min, self.t_max = t_min, t_max
+        self.polarity = bool(polarity)
+
+    def __call__(self, x, y, info):
+        ev = info.get("events", None)
+        assert ev is not None, "EventToVoxel expects info['events']=[N,4]"
+        # ev: [N,4] with (t,x,y,p), t in seconds (float32)
+
+        # pull fields
+        t  = ev[:, 0]
+        xs = ev[:, 1].long().clamp_(0, self.W - 1)
+        ys = ev[:, 2].long().clamp_(0, self.H - 1)
+        ps = ev[:, 3].long().clamp_(0, 1)  # make LONG for indexing
+
+        # handle empty events gracefully
+        N = ev.shape[0]
+        device = ev.device
+        vox = torch.zeros((self.bins, self.H, self.W, 2 if self.polarity else 1),
+                          dtype=torch.float32, device=device)
+
+        if N == 0:
+            return vox.view(self.bins, -1), y, info
+
+        # time binning
+        t0 = float(self.t_min if self.t_min is not None else (t.min().item()))
+        t1 = float(self.t_max if self.t_max is not None else (t.max().item() + 1e-6))
+        tb = ((t - t0) / (t1 - t0) * self.bins).long().clamp_(0, self.bins - 1)
+
+        # values to add (must be a tensor, not an int)
+        vals = torch.ones_like(tb, dtype=vox.dtype, device=device)
+
+        if self.polarity:
+            vox.index_put_((tb, ys, xs, ps), vals, accumulate=True)
+        else:
+            ch0 = torch.zeros_like(ps, dtype=torch.long, device=device)
+            vox.index_put_((tb, ys, xs, ch0), vals, accumulate=True)
+
+        return vox.view(self.bins, -1), y, info

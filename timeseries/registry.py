@@ -12,6 +12,11 @@ from .core import MapDataset
 from .datasets.har import build_har_raw
 from .datasets.mnist import build_mnist_raw
 from .datasets.speech_commands import build_sc_raw
+from .datasets.esc50 import build_esc50_raw
+from .datasets.urban8k import build_urban8k_raw
+from .datasets.pamap2 import build_pamap2_raw
+from .datasets.mitbih import build_mitbih_raw
+from .datasets.dvs_gesture import build_dvs_gesture_raw
 
 @dataclass
 class DatasetMeta:
@@ -28,6 +33,11 @@ _REGISTRY: Dict[str, LoaderFn] = {
     "har": build_har_raw,
     "mnist": build_mnist_raw,
     "speech_commands": build_sc_raw,
+    "esc50": build_esc50_raw,
+    "urban8k": build_urban8k_raw,
+    "pamap2": build_pamap2_raw,
+    "mitbih": build_mitbih_raw,
+    "dvs_gesture": build_dvs_gesture_raw,
 }
 
 def _maybe_fit_pipeline(train_ds, transform) -> None:

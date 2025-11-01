@@ -5,7 +5,7 @@ import traceback
 import io
 import os
 from datetime import datetime
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 
 from utils.common import set_seed, select_device
 from timeseries.registry import get_dataloaders
@@ -84,7 +84,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
     started_at = start_dt.isoformat(timespec="seconds")
 
     tee = _TeeIO(real_stdout=os.sys.stdout)
-    with redirect_stdout(tee):
+    with redirect_stdout(tee), redirect_stderr(tee):
         try:
             # Repro + device
             set_seed(g["SEED"])
@@ -122,9 +122,11 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
 
         except Exception as e:
             status = "error"
-            error = str(e)
-            tb = traceback.format_exc(limit=50)
-            print(f"\n[Error] Run '{run_id}' failed:\n{error}\n")
+            error = f"{type(e).__name__}: {e}"
+            tb = traceback.format_exc()
+            ts_err = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"\n[{ts_err}] [Error] Run '{run_id}' failed:")
+            print(tb)
             final_stats, epoch_log = {}, {}
             meta = locals().get("meta", {})
             # free CUDA for later runs
