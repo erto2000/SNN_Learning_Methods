@@ -16,7 +16,8 @@ from .dataset_visualization import (
     save_class_distribution, save_length_hist, save_pad_ratio,
     save_examples_har_traces, save_examples_waveforms, save_examples_mnist_grid,
     save_examples_mel_specs, save_examples_spike_raster, save_embeddings_scatter,
-    save_pipeline_summary, save_counts_json
+    save_pipeline_summary, save_counts_json,
+    save_examples_multichannel_traces, save_examples_voxel_slices,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -92,24 +93,55 @@ def _class_counts(ds, n_classes: int) -> List[int]:
             counts[y]+=1
     return counts
 
-def _estimate_pad_ratio(ds, batch_size=128, num_batches=3) -> Tuple[float, Optional[float]]:
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, collate_fn=collate_pad, num_workers=0, drop_last=False)
-    pad_time_vals, pad_seg_vals = [], []
-    n = 0
-    for bidx, (_X, _y, info) in enumerate(loader):
-        n += 1
-        if "time_mask" in info:
-            tm = info["time_mask"]
-            pad_time = (tm.numel() - tm.sum().item()) / tm.numel()
-            pad_time_vals.append(pad_time)
-        if "seg_mask" in info:
-            sm = info["seg_mask"]
-            pad_seg = (sm.numel() - sm.sum().item()) / sm.numel()
-            pad_seg_vals.append(pad_seg)
-        if n >= num_batches:
-            break
-    mean_time = float(np.mean(pad_time_vals)) if pad_time_vals else 0.0
-    mean_seg  = float(np.mean(pad_seg_vals))  if pad_seg_vals  else None
+def _estimate_pad_ratio(ds, max_items: int = 64) -> Tuple[float, Optional[float]]:
+    n = len(ds)
+    if n == 0:
+        return 0.0, None
+
+    # Probe up to max_items items (uniformly spread to avoid scanning the whole ds)
+    idxs = list(range(min(max_items, n)))
+    if n > max_items:
+        # spread across dataset
+        step = max(1, n // max_items)
+        idxs = [min(i * step, n - 1) for i in range(max_items)]
+
+    dims = None
+    Ts, Ss = [], []  # time lengths and segment counts
+    for i in idxs:
+        try:
+            x, _, _ = ds[i]
+        except Exception:
+            continue
+        dims = x.dim()
+        if dims == 2:
+            Ts.append(int(x.shape[0]))
+        elif dims == 3:
+            Ss.append(int(x.shape[0]))
+            Ts.append(int(x.shape[1]))  # per-segment length after SlidingWindow
+        else:
+            # ignore unknown
+            pass
+
+    if not Ts:
+        return 0.0, None
+
+    if dims == 2:
+        T_max = max(Ts)
+        if T_max <= 0:
+            return 0.0, None
+        mean_time = float(sum(1.0 - (t / T_max) for t in Ts)) / len(Ts)
+        return mean_time, None
+
+    # dims == 3
+    S_max = max(Ss) if Ss else 0
+    T_max = max(Ts) if Ts else 0
+    if S_max <= 0 or T_max <= 0:
+        return 0.0, 0.0
+
+    # approximate mean paddings
+    mean_seg = float(sum(1.0 - (s / S_max) for s in Ss)) / len(Ss) if Ss else 0.0
+    # for time mask, pretend filled cells per sample = S_i * T_i
+    mean_time = float(sum(1.0 - ((s * t) / (S_max * T_max)) for s, t in zip(Ss, Ts))) / len(Ss)
     return mean_time, mean_seg
 
 def _compute_embeddings(ds, per_class: int, class_names: List[str], seed: int, max_total: int = 512) -> Tuple[np.ndarray, np.ndarray]:
@@ -194,8 +226,20 @@ def build_dataset_viz(
 ) -> Dict[str, Any]:
     """
     Orchestrates a single dataset visualization job.
+    Produces:
+      - corpus stats/plots (per split + overall)
+      - (optional) post-pipeline padding stats
+      - example figures (raw and/or post) per dataset family
+      - simple embedding PCA (post only)
+      - pipeline provenance json
+      - selection indices + summary.json
+
+    Returns:
+      dict(out_dir, figs, summary_path, pipeline_ops)
     """
     _set_seed(SEED)
+
+    # ── Output folders
     out_dir = os.path.join(base_dir, "_dataset_visualization", tag, ID)
     _ensure_dir(out_dir)
     _ensure_dir(os.path.join(out_dir, "corpus"))
@@ -203,20 +247,21 @@ def build_dataset_viz(
     _ensure_dir(os.path.join(out_dir, "examples_post"))
     _ensure_dir(os.path.join(out_dir, "embeddings"))
 
-    # 1) Build raw datasets
+    # ── 1) Raw datasets
     train_raw, test_raw, class_names, info = _build_raw(DATASET, DATA_ROOT, MAX_SAMPLES)
     split_map = {"train": train_raw, "test": test_raw}
 
-    # 2) Fit/apply pipeline (if provided)
+    # ── 2) Fit/apply pipeline (if provided)
     tf = _maybe_fit_pipeline(TRANSFORM, train_raw)
     split_post = {s: _apply_transform(ds, tf) for s, ds in split_map.items()} if tf is not None else {}
 
-    # 3) Corpus stats + figures (raw)
-    figs = {}
-    selection = {"seed": SEED, "per_class_examples": 3}
+    # ── 3) Corpus stats + per-split figures (RAW)
+    figs: Dict[str, str] = {}
+    selection: Dict[str, Any] = {"seed": SEED, "per_class_examples": 3}
 
-    split_sizes = {}
-    split_counts = {}
+    split_sizes: Dict[str, int] = {}
+    split_counts: Dict[str, List[int]] = {}
+
     for split in SPLITS:
         ds_raw = split_map[split]
         split_sizes[split] = len(ds_raw)
@@ -224,20 +269,21 @@ def build_dataset_viz(
         counts = _class_counts(ds_raw, len(class_names))
         split_counts[split] = counts
 
-        # per-split figure
+        # class distribution (bar)
         figs[f"class_distribution_{split}"] = save_class_distribution(
             counts, class_names,
             os.path.join(out_dir, "corpus", f"class_distribution_{split}.png")
         )
-        # per-split tables
-        save_counts_json(counts, class_names, os.path.join(out_dir,"corpus",f"class_counts_{split}.json"))
-        # length hist per split (unchanged)
+        # count tables (json)
+        save_counts_json(counts, class_names, os.path.join(out_dir, "corpus", f"class_counts_{split}.json"))
+
+        # length histogram (sequence length in time)
         lens = _collect_lengths(ds_raw)
         figs[f"length_hist_{split}"] = save_length_hist(
             lens, os.path.join(out_dir, "corpus", f"length_hist_{split}.png")
         )
 
-    # OVERALL (across requested SPLITS only)
+    # OVERALL across requested SPLITS only
     overall_counts = [0] * len(class_names)
     for split in SPLITS:
         cc = split_counts[split]
@@ -248,66 +294,128 @@ def build_dataset_viz(
         overall_counts, class_names,
         os.path.join(out_dir, "corpus", "class_distribution_overall.png")
     )
-    save_counts_json(overall_counts, class_names, os.path.join(out_dir,"corpus","class_counts_overall.json"))
+    save_counts_json(overall_counts, class_names, os.path.join(out_dir, "corpus", "class_counts_overall.json"))
 
-    # 4) Post-pipeline corpus stats + figures
+    # ── 4) Post-pipeline corpus stats (padding) if available
     if tf is not None:
         for split in SPLITS:
             ds_post = split_post[split]
             pad_time, pad_seg = _estimate_pad_ratio(ds_post)
-            figs[f"pad_ratio_{split}"] = save_pad_ratio(pad_time, pad_seg, os.path.join(out_dir, "corpus", f"pad_ratio_{split}.png"))
-            # if 3D segments exist, we can also histogram segments per sample by probing a small subset
-            # (Optional) could be added later.
+            figs[f"pad_ratio_{split}"] = save_pad_ratio(
+                pad_time, pad_seg, os.path.join(out_dir, "corpus", f"pad_ratio_{split}.png")
+            )
 
-    # 5) Examples (raw & post) — light, stratified
+    # ── 5) Examples (raw & post) — lightweight, stratified
     for split in SPLITS:
         ds_raw = split_map[split]
-        sel = _subset_stratified(ds_raw, per_class=selection["per_class_examples"], class_names=class_names, seed=SEED, max_total=64)
+        sel = _subset_stratified(
+            ds_raw, per_class=selection["per_class_examples"],
+            class_names=class_names, seed=SEED, max_total=64
+        )
         selection[f"indices_raw_{split}"] = list(sel.indices) if hasattr(sel, "indices") else []
-        # RAW examples per dataset type
-        if DATASET == "har":
-            figs[f"har_traces_{split}"] = save_examples_har_traces(sel, class_names, os.path.join(out_dir, "examples_raw", f"har_traces_{split}.png"))
-        elif DATASET == "speech_commands":
-            figs[f"waveforms_{split}"] = save_examples_waveforms(sel, class_names, os.path.join(out_dir, "examples_raw", f"waveforms_{split}.png"))
-        elif DATASET == "mnist":
-            figs[f"mnist_grid_{split}"] = save_examples_mnist_grid(sel, class_names, os.path.join(out_dir, "examples_raw", f"mnist_grid_{split}.png"))
 
-        # POST examples when available
+        # RAW per-dataset visuals
+        if DATASET == "har":
+            figs[f"har_traces_{split}"] = save_examples_har_traces(
+                sel, class_names, os.path.join(out_dir, "examples_raw", f"har_traces_{split}.png")
+            )
+        elif DATASET in ("speech_commands",):
+            figs[f"waveforms_{split}"] = save_examples_waveforms(
+                sel, class_names, os.path.join(out_dir, "examples_raw", f"waveforms_{split}.png")
+            )
+        elif DATASET == "mnist":
+            figs[f"mnist_grid_{split}"] = save_examples_mnist_grid(
+                sel, class_names, os.path.join(out_dir, "examples_raw", f"mnist_grid_{split}.png")
+            )
+        elif DATASET in ("esc50", "urban8k"):
+            figs[f"waveforms_{split}"] = save_examples_waveforms(
+                sel, class_names, os.path.join(out_dir, "examples_raw", f"waveforms_{split}.png")
+            )
+        elif DATASET == "pamap2":
+            figs[f"pamap2_traces_{split}"] = save_examples_multichannel_traces(
+                sel, class_names, os.path.join(out_dir, "examples_raw", f"pamap2_traces_{split}.png")
+            )
+        elif DATASET == "mitbih":
+            figs[f"ecg_{split}"] = save_examples_waveforms(
+                sel, class_names, os.path.join(out_dir, "examples_raw", f"ecg_{split}.png")
+            )
+        # DVS raw (events) omitted; post handles voxel render
+
+        # POST examples when pipeline exists
         if tf is not None:
             ds_post = split_post[split]
-            selp = _subset_stratified(ds_post, per_class=selection["per_class_examples"], class_names=class_names, seed=SEED, max_total=64)
+            selp = _subset_stratified(
+                ds_post, per_class=selection["per_class_examples"],
+                class_names=class_names, seed=SEED, max_total=64
+            )
             selection[f"indices_post_{split}"] = list(selp.indices) if hasattr(selp, "indices") else []
-            if DATASET == "har":
-                # Overlay a few segments per class (kept compact)
-                figs[f"har_segments_{split}"] = save_examples_har_traces(selp, class_names, os.path.join(out_dir, "examples_post", f"har_segments_{split}.png"), overlay_segments=True)
-            elif DATASET == "speech_commands":
-                figs[f"mel_specs_{split}"] = save_examples_mel_specs(selp, class_names, os.path.join(out_dir, "examples_post", f"mel_specs_{split}.png"))
-            elif DATASET == "mnist":
-                # If rate-coded spikes: raster; if static-repeat: time strip; we auto-detect by T>1
-                figs[f"mnist_time_{split}"] = save_examples_spike_raster(selp, class_names, os.path.join(out_dir, "examples_post", f"mnist_time_{split}.png"))
 
-    # 6) Embeddings (post only, model-agnostic features)
+            if DATASET == "har":
+                figs[f"har_segments_{split}"] = save_examples_har_traces(
+                    selp, class_names, os.path.join(out_dir, "examples_post", f"har_segments_{split}.png"),
+                    overlay_segments=True
+                )
+            elif DATASET == "speech_commands":
+                figs[f"mel_specs_{split}"] = save_examples_mel_specs(
+                    selp, class_names, os.path.join(out_dir, "examples_post", f"mel_specs_{split}.png")
+                )
+            elif DATASET == "mnist":
+                figs[f"mnist_time_{split}"] = save_examples_spike_raster(
+                    selp, class_names, os.path.join(out_dir, "examples_post", f"mnist_time_{split}.png")
+                )
+            elif DATASET in ("esc50", "urban8k"):
+                figs[f"mel_specs_{split}"] = save_examples_mel_specs(
+                    selp, class_names, os.path.join(out_dir, "examples_post", f"mel_specs_{split}.png")
+                )
+            elif DATASET == "pamap2":
+                figs[f"pamap2_segments_{split}"] = save_examples_multichannel_traces(
+                    selp, class_names, os.path.join(out_dir, "examples_post", f"pamap2_segments_{split}.png"),
+                    overlay_segments=True
+                )
+            elif DATASET == "mitbih":
+                figs[f"ecg_post_{split}"] = save_examples_waveforms(
+                    selp, class_names, os.path.join(out_dir, "examples_post", f"ecg_{split}.png")
+                )
+            elif DATASET == "dvs_gesture":
+                # Expect [T, H*W*(1 or 2)] after EventToVoxel -> Flatten (bins,H,W,ch)->[T,D]
+                # Default DVS128 params: H=W=128, bins≈200
+                figs[f"dvs_voxels_{split}"] = save_examples_voxel_slices(
+                    selp, class_names, os.path.join(out_dir, "examples_post", f"dvs_voxels_{split}.png"),
+                    H=128, W=128, bins_hint=200
+                )
+
+    # ── 6) Embeddings (post only)
     if tf is not None:
         for split in SPLITS:
             ds_post = split_post[split]
             Z, y = _compute_embeddings(ds_post, per_class=16, class_names=class_names, seed=SEED, max_total=512)
-            figs[f"pca_{split}"] = save_embeddings_scatter(Z, y, class_names, os.path.join(out_dir, "embeddings", f"pca_{split}.png"))
+            figs[f"pca_{split}"] = save_embeddings_scatter(
+                Z, y, class_names, os.path.join(out_dir, "embeddings", f"pca_{split}.png")
+            )
 
-    # 7) Pipeline provenance
+    # ── 7) Pipeline provenance
     pipe_json = save_pipeline_summary(_summarize_pipeline(tf), os.path.join(out_dir, "pipeline_ops.json"))
 
-    # 8) Persist selection + summary
+    # ── 8) Persist selection + summary
     with open(os.path.join(out_dir, "selection.json"), "w", encoding="utf-8") as f:
         json.dump(selection, f, indent=2)
 
     summary = dict(
-        id=ID, dataset=DATASET, splits=SPLITS, data_root=DATA_ROOT, max_samples=MAX_SAMPLES,
-        notes=NOTES, seed=SEED, class_names=class_names,
-        has_transform=tf is not None, output_dir=out_dir, split_sizes=split_sizes,
-        overall_total=int(sum(split_sizes[s] for s in SPLITS)),
-        true_toal=info['true_train_total']+info['true_test_total'],
-        true_train_total=info['true_train_total'],
-        true_test_total=info['true_test_total'],
+        id=ID,
+        dataset=DATASET,
+        splits=SPLITS,
+        data_root=DATA_ROOT,
+        max_samples=MAX_SAMPLES,
+        notes=NOTES,
+        seed=SEED,
+        class_names=class_names,
+        has_transform=tf is not None,
+        output_dir=out_dir,
+        split_sizes=split_sizes,
+        overall_total=int(sum(split_sizes.get(s, 0) for s in SPLITS)),
+        true_total=info.get('true_train_total', 0) + info.get('true_test_total', 0),
+        true_train_total=info.get('true_train_total'),
+        true_test_total=info.get('true_test_total'),
     )
     summary_path = os.path.join(out_dir, "summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:

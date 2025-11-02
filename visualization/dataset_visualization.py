@@ -1,4 +1,4 @@
-# visualization/dataset_viz.py
+# visualization/dataset_vizualization.py
 from __future__ import annotations
 from typing import List, Dict, Any, Optional
 import os
@@ -154,15 +154,31 @@ def save_examples_spike_raster(sub: Subset, class_names: List[str], path: str) -
 def save_embeddings_scatter(Z: np.ndarray, y: np.ndarray, class_names: List[str], path: str) -> str:
     if Z.size == 0:
         return ""
+    # ensure 2D (pad with zeros if rank-1)
+    if Z.ndim == 1:
+        Z = Z.reshape(-1, 1)
+    if Z.shape[1] == 1:
+        Z = np.concatenate([Z, np.zeros((Z.shape[0], 1), dtype=Z.dtype)], axis=1)
+
     fig, ax = plt.subplots(figsize=(7,6), dpi=140)
-    for k in np.unique(y):
-        pts = Z[y==k]
-        ax.scatter(pts[:,0], pts[:,1], s=10, alpha=0.7, label=class_names[int(k)%len(class_names)], color=COLORS[int(k)%len(COLORS)])
+    uniq = np.unique(y)
+    for k in uniq:
+        mask = (y == k)
+        if not np.any(mask):
+            continue
+        pts = Z[mask]
+        ax.scatter(
+            pts[:, 0], pts[:, 1],
+            s=10, alpha=0.7,
+            label=class_names[int(k) % len(class_names)],
+            color=COLORS[int(k) % len(COLORS)]
+        )
     ax.set_xlabel("PC1"); ax.set_ylabel("PC2")
     ax.set_title("PCA (post-pipeline features)")
     ax.grid(True, alpha=0.25)
     ax.legend(markerscale=2, fontsize=8, ncol=2)
-    fig.tight_layout(); fig.savefig(path); plt.close(fig); return path
+    fig.tight_layout()
+    fig.savefig(path); plt.close(fig); return path
 
 def save_pipeline_summary(obj: Dict[str, Any], path: str) -> str:
     with open(path, "w", encoding="utf-8") as f:
@@ -180,3 +196,57 @@ def save_counts_json(counts, class_names, json_path):
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
+
+def save_examples_multichannel_traces(sub: Subset, class_names: List[str], path: str, overlay_segments: bool=False, max_channels: int = 6) -> str:
+    """
+    Generic multi-sensor line plots for [T,D] (or [S,T,D] if overlaying segments).
+    For D large, we only plot the first 'max_channels' dims.
+    """
+    rows, cols = 3, 3
+    fig, axes = plt.subplots(rows, cols, figsize=(10, 8), dpi=140, sharex=False)
+    axes = axes.flatten()
+    i = 0
+    for x, y, _ in _iter_subset(sub, max_items=rows*cols):
+        ax = axes[i]; i += 1
+        if x.dim() == 2:
+            X = x[:, :max_channels].cpu().numpy()
+            ax.plot(X)
+        elif x.dim() == 3:
+            # overlay a few segments
+            S = min(x.shape[0], 5)
+            for s in range(S):
+                X = x[s, :, :max_channels].cpu().numpy()
+                ax.plot(X, alpha=0.7)
+        ax.set_title(class_names[y], fontsize=9)
+        ax.grid(True, alpha=0.2)
+    for k in range(i, len(axes)): axes[k].axis("off")
+    fig.tight_layout()
+    fig.savefig(path); plt.close(fig); return path
+
+
+def save_examples_voxel_slices(sub: Subset, class_names: List[str], path: str, H: int, W: int, bins_hint: int = 200) -> str:
+    """
+    For DVS-Gesture after EventToVoxel: input is typically [T, H*W*2] with T ~= bins.
+    We render a small montage of time slices (sum over polarity channels).
+    """
+    rows, cols = 3, 4
+    fig, axes = plt.subplots(rows, cols, figsize=(12, 7), dpi=140)
+    axes = axes.flatten()
+    i = 0
+    for x, y, info in _iter_subset(sub, max_items=rows*cols):
+        ax = axes[i]; i += 1
+        if x.dim() != 2:
+            ax.axis("off"); continue
+        T, D = x.shape  # D should be H*W*(2 or 1)
+        C = D // (H * W)
+        X = x.cpu().numpy().reshape(T, H, W, C)
+        # collapse polarity channels if present
+        img = X.mean(axis=-1)  # [T, H, W]
+        # pick a representative time slice (median bin)
+        t_idx = min(T // 2, T - 1)
+        im = ax.imshow(img[t_idx], cmap="magma", origin="lower", aspect="auto")
+        ax.set_title(f"{class_names[y]} | t={t_idx}/{T}", fontsize=8)
+        ax.axis("off")
+    for k in range(i, len(axes)): axes[k].axis("off")
+    fig.tight_layout(); fig.savefig(path); plt.close(fig); return path
+
