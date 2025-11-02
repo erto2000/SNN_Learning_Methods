@@ -3,6 +3,13 @@ import torch
 from networks.specs import NetConfig
 
 class BaseLearner(ABC):
+    """
+    Minimal, window-agnostic learner base.
+    Contract:
+      - forward(X) -> [B,K] logits (handles time inside)
+      - train_step(X,y) -> dict with loss/acc
+      - predict_batch(X) -> [B] class indices
+    """
     def __init__(self, net_cfg: NetConfig, meta: dict, device: torch.device):
         self.cfg = net_cfg
         self.meta = meta
@@ -12,14 +19,20 @@ class BaseLearner(ABC):
     @abstractmethod
     def _build_model(self) -> torch.nn.Module: ...
 
-    # Single-batch update: X:[B,T,D], y:[B]
     @abstractmethod
-    def train_step(self, X: torch.Tensor, y: torch.Tensor) -> dict: ...
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        """X:[B,T,D] -> logits:[B,K]."""
+        ...
 
-    # Predict classes for X:[B,T,D] -> LongTensor[B]
     @abstractmethod
-    def predict_batch(self, X: torch.Tensor) -> torch.Tensor: ...
+    def train_step(self, X: torch.Tensor, y: torch.Tensor) -> dict:
+        """Single-batch update. Returns logs like {'loss': float, 'acc': float[%]}."""
+        ...
 
-    # Optional: return [T,B,C] scores (logits or spike counts)
-    def scores_sequence(self, X: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+    @torch.no_grad()
+    def predict_batch(self, X: torch.Tensor) -> torch.Tensor:
+        """Greedy prediction: X:[B,T,D] -> LongTensor[B]."""
+        self.model.eval()
+        X = X.to(self.device)
+        logits = self.forward(X)              # [B,K]
+        return logits.argmax(dim=1)

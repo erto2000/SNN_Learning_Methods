@@ -53,6 +53,7 @@ def get_dataloaders(dataset: str,
                     max_samples: Optional[int] = None,
                     transform: Optional[Transform] = None,
                     num_workers: int = 4,
+                    pin_memory: bool | None = None,
                     **kwargs):
     name = dataset.lower()
     if name not in _REGISTRY:
@@ -63,15 +64,24 @@ def get_dataloaders(dataset: str,
     if transform is not None:
         _maybe_fit_pipeline(train_ds, transform)
         train_ds = MapDataset(train_ds, transform)
-        test_ds  = MapDataset(test_ds,  transform)
+        test_ds = MapDataset(test_ds, transform)
 
-    pin_mem = torch.cuda.is_available()
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              drop_last=False, pin_memory=pin_mem,
-                              num_workers=num_workers, collate_fn=collate_pad)
-    test_loader  = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
-                              drop_last=False, pin_memory=pin_mem,
-                              num_workers=num_workers, collate_fn=collate_pad)
+    pin_mem = torch.cuda.is_available() if pin_memory is None else bool(pin_memory)
+
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True,
+        drop_last=False, pin_memory=pin_mem,
+        num_workers=num_workers,
+        persistent_workers=(num_workers > 0),
+        collate_fn=collate_pad,
+    )
+    test_loader = DataLoader(
+        test_ds, batch_size=batch_size, shuffle=False,
+        drop_last=False, pin_memory=pin_mem,
+        num_workers=num_workers,
+        persistent_workers=(num_workers > 0),
+        collate_fn=collate_pad,
+    )
 
     # probe transformed sample (pre-collate) for input_dim and T
     x0, _, _ = train_ds[0]

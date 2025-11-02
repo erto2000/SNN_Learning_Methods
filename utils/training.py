@@ -25,14 +25,29 @@ def build_cfg(D: int, K: int, g: Dict[str, Any]) -> NetConfig:
     )
 
 @torch.no_grad()
-def eval_epoch(learner, test_loader, device, n_classes) -> Dict[str, float]:
-    acc_sum, nb = 0.0, 0
-    for Xp, yp, sample_ids, B in iter_pieces(test_loader, device):
-        preds = learner.predict_batch(Xp)                 # [N]
-        yb = majority_vote(preds, sample_ids, n_classes, B)
-        acc_sum += (yb == yp.view(B, -1)[:, 0]).float().mean().item()
-        nb += 1
-    return {"sample_acc": 100.0 * acc_sum / max(1, nb)}
+def eval_epoch(learner, test_loader, device, n_classes):
+    learner.model.eval()
+    n_tr, acc_tr_sum = 0, 0.0
+    sample_correct = sample_total = 0
+
+    for Xw, yw, sample_ids, B in iter_pieces(test_loader, device):
+        logits = learner.forward(Xw)        # [Nseg, K]
+        preds_w = logits.argmax(dim=-1)     # [Nseg]
+        acc_tr_sum += (preds_w == yw).float().mean().item()
+        n_tr += 1
+
+        # majority vote per original sample
+        gt_per_sample = torch.empty(B, dtype=torch.long, device=yw.device)
+        gt_per_sample[:] = -1
+        gt_per_sample.index_copy_(0, sample_ids, yw)
+        gt_per_sample = torch.where(gt_per_sample < 0, torch.zeros_like(gt_per_sample), gt_per_sample)
+
+        preds_sample = majority_vote(preds_w, sample_ids, num_classes=n_classes, B=B)
+        sample_correct += (preds_sample == gt_per_sample).sum().item()
+        sample_total   += B
+
+    return {"window_acc": 100 * acc_tr_sum / max(1, n_tr),
+            "sample_acc": 100 * sample_correct / max(1, sample_total)}
 
 def run_train_loop(
     learner, train_loader, test_loader, device, n_classes: int, *,
@@ -60,7 +75,7 @@ def run_train_loop(
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if test_every_epoch:
             stats_te = eval_epoch(learner, test_loader, device, n_classes)
-            print(f"[{ts}] Epoch {epoch:02d} | loss:{loss_avg:.4f} | acc:{acc_avg:.2f}% | test:{stats_te['sample_acc']:.2f}%{aux_msg}")
+            print(f"[{ts}] Epoch {epoch:02d} | loss:{loss_avg:.4f} | acc:{acc_avg:.2f}% | test_sample_acc:{stats_te['sample_acc']:.2f}% | test_window_acc:{stats_te['window_acc']:.2f}%{aux_msg}")
             epoch_log[epoch] = {"loss": loss_avg, "acc": acc_avg, **stats_te, "timestamp": ts}
         else:
             print(f"[{ts}] Epoch {epoch:02d} | loss:{loss_avg:.4f} | acc:{acc_avg:.2f}%{aux_msg}")

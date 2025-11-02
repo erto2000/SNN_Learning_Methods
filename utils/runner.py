@@ -96,7 +96,10 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                 root=g["DATA_ROOT"],
                 batch_size=g["BATCH_SIZE"],
                 max_samples=g["MAX_SAMPLES"],
-                transform=transform,   # may be None or a Compose([...])
+                transform=transform,
+                num_workers=g.get("NUM_WORKERS"),
+                pin_memory=g.get("PIN_MEMORY"),
+                **g.get("DATASET_KW", {}),
             )
 
             # Model + learner
@@ -114,7 +117,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
 
             if not g["TEST_EVERY_EPOCH"]:
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[{ts}] [Final Test] sample_acc:{final_stats['sample_acc']:.2f}%")
+                print(f"[{ts}] [Final Test] sample_acc:{final_stats['sample_acc']:.2f}% | window_acc:{final_stats['window_acc']:.2f}%")
 
             status = "ok"
             error = None

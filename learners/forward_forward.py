@@ -7,10 +7,9 @@ from networks.specs import NetConfig
 
 class FFLearner(BaseLearner):
     """
-    Forward-Forward (greedy, layerwise pretraining), single-batch update.
-    - main() owns batching and epochs; call `on_epoch_end()` at epoch boundary.
+    Forward-Forward (greedy, layerwise). Forward returns class scores (goodness)
+    per sample without exposing temporal internals.
     """
-
     def __init__(
         self,
         net_cfg: NetConfig,
@@ -21,7 +20,7 @@ class FFLearner(BaseLearner):
         lr: float = 1e-3,
         total_epochs: int = 10,
     ):
-        # 1) Bump the first layer input by +K for label channels; ensure no head.
+        # augment first layer input with K label channels
         layers = [dataclasses.replace(net_cfg.layers[0],
                                       dim_in=net_cfg.layers[0].dim_in + meta["n_classes"])]
         layers += net_cfg.layers[1:]
@@ -35,7 +34,6 @@ class FFLearner(BaseLearner):
         L = len(self.model.fcs)
         self.epochs_per_layer = max(1, total_epochs // max(1, L))
 
-        # Build per-layer optimizers; enable grads only for active layer
         self.layer_opts = []
         for i in range(L):
             params = list(self.model.fcs[i].parameters()) + list(self.model.lifs[i].parameters())
@@ -51,7 +49,6 @@ class FFLearner(BaseLearner):
         self.epoch_in_layer = 0
         self._refresh_requires_grad()
 
-    # ---------------- base ----------------
     def _build_model(self):
         return SNNCore(self.cfg, self.meta["n_classes"])
 
@@ -62,7 +59,7 @@ class FFLearner(BaseLearner):
             for p in self.model.fcs[i].parameters(): p.requires_grad = (req and p is self.model.fcs[i].weight)
             for p in self.model.lifs[i].parameters(): p.requires_grad = req
 
-    # ------------- FF utilities -------------
+    # ---------- utilities ----------
     def _normalize_current(self, cur: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
         return cur / (cur.norm(p=2, dim=1, keepdim=True) + eps) * self.gain
 
@@ -73,24 +70,55 @@ class FFLearner(BaseLearner):
         s = x_btD.amax(dim=(1,2)).clamp_min(1e-6)
         hot = hot * s.unsqueeze(1)
         lbl = hot.unsqueeze(1).expand(B,T,C)
-        return torch.cat([x_btD, lbl], dim=-1)
+        return torch.cat([x_btD, lbl], dim=-1)  # [B,T,D+C]
 
     def _ff_step_collect(self, X_t: torch.Tensor, mems: list[torch.Tensor]):
         layer_spikes = []
         new_mems = []
         h = X_t
         for i, (fc, lif) in enumerate(zip(self.model.fcs, self.model.lifs)):
-            pre = fc(h)
-            pre = self._normalize_current(pre)
+            pre = self._normalize_current(fc(h))
             spk, mem = lif(pre, mems[i])
-            new_mems.append(mem)
-            layer_spikes.append(spk)
+            new_mems.append(mem); layer_spikes.append(spk)
             h = spk
         return layer_spikes, new_mems
 
+    def _goodness_scores(self, X_lbl: torch.Tensor) -> torch.Tensor:
+        """
+        Compute class goodness for label-conditioned inputs.
+        Returns [N*C] goodness if X_lbl has N*C batch examples.
+        """
+        B, T, _ = X_lbl.shape
+        device = X_lbl.device
+        L = len(self.model.fcs)
+        mems = [torch.zeros(B, self.model.fcs[i].out_features, device=device, dtype=X_lbl.dtype) for i in range(L)]
+        spk_sums = [torch.zeros(B, self.model.fcs[i].out_features, device=device, dtype=X_lbl.dtype) for i in range(L)]
+        for t in range(T):
+            layer_spikes, mems = self._ff_step_collect(X_lbl[:, t, :], mems)
+            for i in range(L):
+                spk_sums[i] += layer_spikes[i]
+        goodness = sum((s**2).mean(1) for s in spk_sums)  # [B]
+        return goodness
+
+    # ------------ contract ------------
+    @torch.no_grad()
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        """
+        X: [B,T,D] -> class scores [B,K] computed via FF goodness.
+        """
+        N, T, D = X.shape
+        C = self.meta["n_classes"]
+        device = X.device
+        X_rep = X.unsqueeze(1).expand(N, C, T, D).reshape(N*C, T, D)
+        labels = torch.arange(C, device=device).unsqueeze(0).expand(N, C).reshape(-1)
+        X_lbl = self._add_label_channels(X_rep, labels)  # [N*C, T, D+K]
+        scores_flat = self._goodness_scores(X_lbl)       # [N*C]
+        return scores_flat.view(N, C)                    # [B,K]
+
+    # ------------- training -------------
     def _collapsed_input_for_layer(self, X_lbl: torch.Tensor, layer_idx: int) -> torch.Tensor:
         if layer_idx == 0:
-            return X_lbl  # [B,T,D+K]
+            return X_lbl
         B,T,_ = X_lbl.shape
         h = X_lbl
         with torch.no_grad():
@@ -111,32 +139,29 @@ class FFLearner(BaseLearner):
             mem = torch.zeros(B, self.model.fcs[0].out_features, device=X_lbl.device, dtype=X_lbl.dtype)
             spk_sum = torch.zeros_like(mem)
             for t in range(T):
-                pre = self.model.fcs[0](X_lbl[:,t,:])
-                pre = self._normalize_current(pre)
+                pre = self._normalize_current(self.model.fcs[0](X_lbl[:,t,:]))
                 spk, mem = self.model.lifs[0](pre, mem)
                 spk_sum += spk
             return (spk_sum**2).mean(dim=1)
         if X_lbl.dim() == 3:
             X_lbl = self._collapsed_input_for_layer(X_lbl, layer_idx)
         mem = torch.zeros(B, self.model.fcs[layer_idx].out_features, device=X_lbl.device, dtype=X_lbl.dtype)
-        pre = self.model.fcs[layer_idx](X_lbl)
-        pre = self._normalize_current(pre)
+        pre = self._normalize_current(self.model.fcs[layer_idx](X_lbl))
         spk, _ = self.model.lifs[layer_idx](pre, mem)
         return (spk**2).mean(dim=1)
 
-    # ------------- public API -------------
     def train_step(self, X: torch.Tensor, y: torch.Tensor) -> dict:
         layer_idx = self.current_layer
         opt = self.layer_opts[layer_idx]
 
         X, y = X.to(self.device), y.to(self.device)
-        # pos / neg
+        # pos / neg batches
         X_pos = self._add_label_channels(X, y)
         perm  = torch.randperm(y.size(0), device=self.device)
         X_neg = self._add_label_channels(X, y[perm])
 
-        Gpos = self._goodness_for_layer(X_pos, layer_idx)  # [B]
-        Gneg = self._goodness_for_layer(X_neg, layer_idx)  # [B]
+        Gpos = self._goodness_for_layer(X_pos, layer_idx)
+        Gneg = self._goodness_for_layer(X_neg, layer_idx)
         delta = Gpos - Gneg
         loss = F.softplus(-self.alpha * delta).mean()
 
@@ -144,8 +169,7 @@ class FFLearner(BaseLearner):
         loss.backward()
         opt.step()
 
-        # Compute training accuracy for logging: use the model's predict_batch (no_grad)
-        #         # predict_batch expects raw input X of shape [B,T,D]
+        # accuracy via forward()
         with torch.no_grad():
             preds = self.predict_batch(X)
             acc = (preds == y).float().mean().item() * 100.0
@@ -153,10 +177,6 @@ class FFLearner(BaseLearner):
         return {"layer": layer_idx, "loss": loss.item(), "acc": acc}
 
     def on_epoch_end(self):
-        """
-        Call this from main() at the end of each epoch.
-        Advances the greedy layer schedule based on epochs_per_layer.
-        """
         L = len(self.model.fcs)
         state = {"layer": self.current_layer, "layer_advanced": False}
         self.epoch_in_layer += 1
@@ -166,23 +186,3 @@ class FFLearner(BaseLearner):
             self._refresh_requires_grad()
             state.update({"layer": self.current_layer, "layer_advanced": True})
         return state
-
-    @torch.no_grad()
-    def predict_batch(self, X: torch.Tensor) -> torch.Tensor:
-        N,T,D = X.shape
-        C = self.meta["n_classes"]
-        device = X.device
-        X_rep = X.unsqueeze(1).expand(N, C, T, D).reshape(N*C, T, D)
-        labels = torch.arange(C, device=device).unsqueeze(0).expand(N, C).reshape(-1)
-        X_lbl = self._add_label_channels(X_rep, labels)  # [N*C, T, D+K]
-
-        B = X_lbl.size(0)
-        L = len(self.model.fcs)
-        mems = [torch.zeros(B, self.model.fcs[i].out_features, device=device, dtype=X_lbl.dtype) for i in range(L)]
-        spk_sums = [torch.zeros(B, self.model.fcs[i].out_features, device=device, dtype=X_lbl.dtype) for i in range(L)]
-        for t in range(T):
-            layer_spikes, mems = self._ff_step_collect(X_lbl[:,t,:], mems)
-            for i in range(L):
-                spk_sums[i] += layer_spikes[i]
-        goodness = sum((s**2).mean(1) for s in spk_sums)  # [N*C]
-        return goodness.view(N, C).argmax(1)

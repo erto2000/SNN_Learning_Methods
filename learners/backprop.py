@@ -1,4 +1,3 @@
-import dataclasses
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -7,12 +6,10 @@ from networks.snn_core import SNNCore
 
 class BackpropLearner(BaseLearner):
     """
-    Standard rate-code training:
-      - head="logits" (default) or "lif" (spike counts)
-      - aggregation over time is learner-owned: "sum" | "mean" | "last"
-      - train_step updates once for the given batch.
+    Standard backprop with a time-aggregated readout.
+    Aggregation over time: 'mean' | 'sum' | 'last' (default: 'mean').
     """
-    def __init__(self, net_cfg, meta, device, agg: str = "sum", lr: float = 1e-3):
+    def __init__(self, net_cfg, meta, device, agg: str = "mean", lr: float = 1e-3):
         super().__init__(net_cfg, meta, device)
         self.agg = agg
         self.loss = nn.CrossEntropyLoss()
@@ -21,36 +18,35 @@ class BackpropLearner(BaseLearner):
     def _build_model(self):
         return SNNCore(self.cfg, self.meta["n_classes"])
 
-    def _aggregate(self, seq_TNC: torch.Tensor) -> torch.Tensor:  # [T,B,C] -> [B,C]
-        if self.agg == "sum":  return seq_TNC.sum(0)
-        if self.agg == "mean": return seq_TNC.mean(0)
-        if self.agg == "last": return seq_TNC[-1]
+    def _aggregate(self, seq_BTK: torch.Tensor) -> torch.Tensor:
+        # seq_BTK: [B,T,K] -> [B,K]
+        if self.agg == "sum":  return seq_BTK.sum(dim=1)
+        if self.agg == "mean": return seq_BTK.mean(dim=1)
+        if self.agg == "last": return seq_BTK[:, -1, :]
         raise ValueError(f"Unknown agg: {self.agg}")
 
-    def scores_sequence(self, X: torch.Tensor) -> torch.Tensor:
-        B,T,_ = X.shape
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        # X: [B,T,D] -> logits: [B,K]
+        B, T, _ = X.shape
+        X = X.to(self.device)
         state, head_mem = self.model.init_state(B, X.device, X.dtype)
         outs = []
         for t in range(T):
-            _, head_out, state, head_mem, _ , _ = self.model.forward_step(X[:,t,:], state, head_mem)
-            outs.append(head_out)   # [B,C]
-        return torch.stack(outs, 0)
+            _, head_out, state, head_mem, _, _ = self.model.forward_step(X[:, t, :], state, head_mem)
+            outs.append(head_out)                  # [B,K]
+        seq_TBK = torch.stack(outs, dim=0)        # [T,B,K]
+        seq_BTK = seq_TBK.permute(1, 0, 2).contiguous()
+        logits  = self._aggregate(seq_BTK)        # [B,K]
+        assert logits.shape == (B, self.meta["n_classes"])
+        return logits
 
     def train_step(self, X: torch.Tensor, y: torch.Tensor) -> dict:
         self.model.train()
         X, y = X.to(self.device), y.to(self.device)
-        seq = self.scores_sequence(X)          # [T,B,C]
-        scores = self._aggregate(seq)          # [B,C]
-        loss = self.loss(scores, y)
+        logits = self.forward(X)                  # [B,K]
+        loss = self.loss(logits, y)
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
         self.opt.step()
-        acc = (scores.argmax(1) == y).float().mean().item() * 100.0
-        return {"loss": loss.item(), "acc": acc}
-
-    @torch.no_grad()
-    def predict_batch(self, X: torch.Tensor) -> torch.Tensor:
-        self.model.eval()
-        seq = self.scores_sequence(X)
-        scores = self._aggregate(seq)
-        return scores.argmax(1)
+        acc = (logits.argmax(1) == y).float().mean().item() * 100.0
+        return {"loss": float(loss.item()), "acc": acc}
