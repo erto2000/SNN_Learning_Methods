@@ -99,7 +99,7 @@ def build_comparison(base_dir: str, tag: str, run_specs: List[Dict[str, str]]) -
     """
     Orchestrates comparison artifacts. Returns dict of produced files.
     """
-    out_dir = os.path.join(base_dir, "_comparisons", tag)
+    out_dir = os.path.join(base_dir, "comparisons", tag)
     _ensure_dir(out_dir)
 
     runs_info = collect_runs(base_dir, run_specs)

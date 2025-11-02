@@ -10,7 +10,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from utils.common import set_seed, select_device
 from timeseries.registry import get_dataloaders
 from utils.training import build_cfg, run_train_loop
-from utils.registry import LEARNER_REGISTRY
+from learners.registry import LEARNER_REGISTRY
 
 
 # ---------- tiny tee to capture console while echoing ----------

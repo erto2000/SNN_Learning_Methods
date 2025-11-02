@@ -22,7 +22,7 @@ def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_
 
     for r in results:
         run_id = r.get("run_id") or "unknown-run"
-        folder = os.path.join(base_dir, run_id)
+        folder = os.path.join(base_dir, "runs", run_id)
         _safe_mkdir(folder)
 
         payload = {

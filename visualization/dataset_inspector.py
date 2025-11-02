@@ -240,7 +240,7 @@ def build_dataset_viz(
     _set_seed(SEED)
 
     # ── Output folders
-    out_dir = os.path.join(base_dir, "_dataset_visualization", tag, ID)
+    out_dir = os.path.join(base_dir, "dataset_visualization", tag, ID)
     _ensure_dir(out_dir)
     _ensure_dir(os.path.join(out_dir, "corpus"))
     _ensure_dir(os.path.join(out_dir, "examples_raw"))
