@@ -68,50 +68,119 @@ def _read_record(path_no_ext: str):
     return x, fs, rlocs, symbols
 
 
-def _download_record_files(dst_dir: str, rec_str: str, *, max_retries: int = 3, timeout: int = 30):
+def _download_record_files(dst_dir: str, rec_str: str, *, max_retries: int = 5, timeout_connect: int = 10, timeout_read: int = 30):
     """
-    Download {rec}.dat/.hea/.atr from PhysioNet to dst_dir with retries/timeouts.
+    Download {rec}.dat/.hea/.atr from PhysioNet with resume, progress, and retries.
+    Shows progress even on slow links so it never looks "stuck".
     """
+    import sys, time
+    from contextlib import suppress
+
     files = [f"{rec_str}.dat", f"{rec_str}.hea", f"{rec_str}.atr"]
     base_url = "https://physionet.org/files/mitdb/1.0.0/"
 
-    def _download_one(url, outpath):
-        # try requests for streaming, else urllib
-        try:
-            import requests
-            with requests.get(url, stream=True, timeout=timeout) as r:
-                r.raise_for_status()
-                with open(outpath, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            f.write(chunk)
-            return True
-        except Exception:
-            try:
-                import urllib.request
-                req = urllib.request.Request(url, headers={"User-Agent": "python"})
-                with urllib.request.urlopen(req, timeout=timeout) as resp, open(outpath, "wb") as out:
-                    shutil.copyfileobj(resp, out)
-                return True
-            except Exception:
-                return False
-
     os.makedirs(dst_dir, exist_ok=True)
+
+    def _human(n):
+        for u in ["B","KB","MB","GB","TB"]:
+            if n < 1024:
+                return f"{n:.1f}{u}"
+            n /= 1024
+        return f"{n:.1f}PB"
+
+    def _requests_session():
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        s = requests.Session()
+        retry = Retry(
+            total=max_retries,
+            connect=max_retries,
+            read=max_retries,
+            backoff_factor=1.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=frozenset(["GET","HEAD"])
+        )
+        s.mount("https://", HTTPAdapter(max_retries=retry))
+        s.mount("http://",  HTTPAdapter(max_retries=retry))
+        s.headers.update({"User-Agent": "python"})
+        return s
+
+    def _progress_get(url: str, outpath: str) -> bool:
+        """
+        Resume-aware streaming download with visible progress.
+        """
+        import requests
+        s = _requests_session()
+        # discover size (if server provides it)
+        with s.head(url, allow_redirects=True, timeout=(timeout_connect, timeout_read)) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("Content-Length") or 0)
+
+        tmp = outpath + ".part"
+        pos = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+        headers = {"Range": f"bytes={pos}-"} if pos else {}
+
+        chunk = 1024 * 1024
+        t0 = time.time()
+        with s.get(url, stream=True, headers=headers, timeout=(timeout_connect, timeout_read)) as r:
+            if r.status_code not in (200, 206):
+                r.raise_for_status()
+            mode = "ab" if pos else "wb"
+            downloaded = pos
+            with open(tmp, mode) as f:
+                next_tick = 0.0
+                for b in r.iter_content(chunk_size=chunk):
+                    if not b:
+                        continue
+                    f.write(b)
+                    downloaded += len(b)
+                    now = time.time()
+                    if now >= next_tick:
+                        next_tick = now + 0.3
+                        if total:
+                            pct = 100.0 * downloaded / total
+                            rate = downloaded / max(1e-6, (now - t0))
+                            sys.stdout.write(f"\r[MITBIH]   {os.path.basename(outpath):10s}  {pct:5.1f}% "
+                                             f"({_human(downloaded)}/{_human(total)}) at {_human(rate)}/s")
+                        else:
+                            sys.stdout.write(f"\r[MITBIH]   {os.path.basename(outpath):10s}  {_human(downloaded)}")
+                        sys.stdout.flush()
+
+        # finalize
+        if total and os.path.getsize(tmp) < total:
+            return False
+        with suppress(Exception):
+            if os.path.exists(outpath):
+                os.remove(outpath)
+        os.replace(tmp, outpath)
+        sys.stdout.write("\n")
+        return True
 
     for fname in files:
         url = base_url + fname
         out = os.path.join(dst_dir, fname)
         if os.path.isfile(out):
+            print(f"[MITBIH]   {fname:10s} already present")
             continue
+
+        print(f"[MITBIH] Downloading {fname} from PhysioNet...")
         ok = False
+        # retry loop (our requests session already retries on transient errors,
+        # but we also retry the whole transfer if the file remained partial)
         for attempt in range(1, max_retries + 1):
-            if _download_one(url, out):
+            if _progress_get(url, out):
                 ok = True
                 break
-            time.sleep(2 * attempt)
-        if not ok:
-            raise RuntimeError(f"Failed to download {url} to {out}")
+            sleep_s = 1.5 * attempt
+            print(f"[MITBIH]   retrying in {sleep_s:.1f}s (attempt {attempt}/{max_retries})")
+            time.sleep(sleep_s)
 
+        if not ok:
+            # clean partial
+            with suppress(Exception):
+                os.remove(out + ".part")
+            raise RuntimeError(f"Failed to download {url} -> {out}")
 
 def _fetch_record(root: str, rec: int, *, local_only: bool = False):
     """

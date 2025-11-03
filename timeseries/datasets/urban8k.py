@@ -41,67 +41,156 @@ def _safe_extract(tarobj, path="."):
     tarobj.extractall(path)
 
 
-def _download_urban8k(root: str, *, max_retries: int = 3, timeout: int = 60):
+def _download_urban8k(root: str, *, max_retries: int = 5, timeout_connect: int = 15, timeout_read: int = 60):
     """
-    Robust UrbanSound8K download via Zenodo.
-    Falls back to manual instructions if fails.
+    Robust UrbanSound8K download with progress + resume.
+    Primary: Zenodo; Fallback: Kaggle (requires kaggle CLI and credentials).
     """
+    import math, sys
+    from contextlib import suppress
     os.makedirs(root, exist_ok=True)
-    url = "https://zenodo.org/record/1203745/files/UrbanSound8K.tar.gz?download=1"
-    tgz_path = os.path.join(root, "UrbanSound8K.tar.gz")
 
-    def _stream_download() -> bool:
-        try:
-            import requests
-            with requests.get(url, stream=True, timeout=timeout) as r:
+    zenodo_url = "https://zenodo.org/record/1203745/files/UrbanSound8K.tar.gz?download=1"
+    tgz_path   = os.path.join(root, "UrbanSound8K.tar.gz")
+    tmp_path   = tgz_path + ".part"
+
+    def _human(n):  # bytes -> nice string
+        for u in ["B","KB","MB","GB","TB"]:
+            if n < 1024: return f"{n:.1f}{u}"
+            n /= 1024
+        return f"{n:.1f}PB"
+
+    def _requests_session():
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        s = requests.Session()
+        retry = Retry(
+            total=max_retries,
+            connect=max_retries,
+            read=max_retries,
+            backoff_factor=1.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=frozenset(["GET", "HEAD"])
+        )
+        s.mount("https://", HTTPAdapter(max_retries=retry))
+        s.mount("http://",  HTTPAdapter(max_retries=retry))
+        s.headers.update({"User-Agent": "python"})
+        return s
+
+    def _progress_dl(url: str) -> bool:
+        import requests, time
+        s = _requests_session()
+
+        # ask server for size
+        with s.head(url, allow_redirects=True, timeout=(timeout_connect, timeout_read)) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("Content-Length", "0") or 0)
+
+        # resume if tmp exists
+        pos = 0
+        if os.path.exists(tmp_path):
+            pos = os.path.getsize(tmp_path)
+            if total and pos > total:
+                pos = 0  # start fresh if weird
+        headers = {}
+        if pos:
+            headers["Range"] = f"bytes={pos}-"
+
+        chunk = 1024 * 1024  # 1 MB
+        t0 = time.time()
+        with s.get(url, stream=True, headers=headers, timeout=(timeout_connect, timeout_read)) as r:
+            if r.status_code not in (200, 206):
                 r.raise_for_status()
-                with open(tgz_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            f.write(chunk)
-            return True
-        except Exception:
-            return False
+            mode = "ab" if pos else "wb"
+            with open(tmp_path, mode) as f:
+                downloaded = pos
+                # progress every ~0.5s
+                next_tick = 0.0
+                for b in r.iter_content(chunk_size=chunk):
+                    if not b:
+                        continue
+                    f.write(b)
+                    downloaded += len(b)
+                    now = time.time()
+                    if now >= next_tick:
+                        next_tick = now + 0.5
+                        if total:
+                            pct = 100.0 * downloaded / total
+                            rate = downloaded / max(1e-9, (now - t0))
+                            sys.stdout.write(f"\r[Urban8K] Downloading: {pct:5.1f}% "
+                                             f"({_human(downloaded)}/{_human(total)}) "
+                                             f"at {_human(rate)}/s")
+                        else:
+                            sys.stdout.write(f"\r[Urban8K] Downloading: {_human(downloaded)}")
+                        sys.stdout.flush()
+        # finalize
+        if total and os.path.getsize(tmp_path) != total:
+            # some servers omit content-length for Range; accept if >= total
+            if os.path.getsize(tmp_path) < total:
+                return False
+        if os.path.exists(tgz_path):
+            os.remove(tgz_path)
+        os.replace(tmp_path, tgz_path)
+        print("\n[Urban8K] Download complete.")
+        return True
 
-    def _urllib_download() -> bool:
-        try:
-            import urllib.request
-            req = urllib.request.Request(url, headers={"User-Agent": "python"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp, open(tgz_path, "wb") as out:
-                shutil.copyfileobj(resp, out)
-            return True
-        except Exception:
-            return False
+    def _kaggle_fallback() -> bool:
+        """
+        Try Kaggle mirror if available:
+        'urbansound8k' dataset slug varies; commonly 'urbansound8k/urbansound8k'
+        Requires: pip install kaggle && set KAGGLE_USERNAME/KAGGLE_KEY or kaggle.json.
+        """
+        with suppress(Exception):
+            import shutil, subprocess
+            if shutil.which("kaggle") is None:
+                return False
+            # This downloads into current dir; then move/rename
+            print("[Urban8K] Trying Kaggle fallback...")
+            # A common slug is 'urbansound8k/urbansound8k'; adjust if your org mirror differs.
+            cmd = ["kaggle", "datasets", "download", "-d", "urbansound8k/urbansound8k", "-f", "UrbanSound8K.tar.gz", "-p", root]
+            subprocess.check_call(cmd)
+            return os.path.exists(tgz_path)
+        return False
 
-    # Retry logic
-    ok = False
-    for attempt in range(1, max_retries + 1):
-        if _stream_download() or _urllib_download():
-            ok = True
-            break
-        time.sleep(2 * attempt)  # backoff
-
+    # Attempt primary with resume
+    ok = _progress_dl(zenodo_url)
     if not ok:
+        # clean partial if we will try mirror
+        with suppress(Exception):
+            os.remove(tmp_path)
+        ok = _kaggle_fallback()
+    if not ok or not os.path.exists(tgz_path):
         raise RuntimeError(
-            "UrbanSound8K download failed due to network issues.\n"
-            "Please download manually:\n"
-            "  https://zenodo.org/record/1203745/files/UrbanSound8K.tar.gz\n"
-            f"Place it in: {root} and extract so structure is:\n"
-            "UrbanSound8K/\n"
-            "  audio/fold1 ... fold10\n"
-            "  metadata/UrbanSound8K.csv\n"
+            "UrbanSound8K download failed.\n"
+            "Tried Zenodo (with resume) and Kaggle fallback. "
+            "If you're behind a corporate proxy/firewall, try manual download and place the file here:\n"
+            f"  {tgz_path}\n"
         )
 
-    # Extract
+    # Extract with safety + small progress
+    print("[Urban8K] Extracting (this can take a few minutes)...")
     with tarfile.open(tgz_path, mode="r:gz") as tar:
-        _safe_extract(tar, path=root)
+        members = tar.getmembers()
+        total_members = len(members)
+        for i, m in enumerate(members, 1):
+            # path traversal guard
+            member_path = os.path.join(root, m.name)
+            abs_directory = os.path.abspath(root)
+            abs_target = os.path.abspath(member_path)
+            if not os.path.commonprefix([abs_directory, abs_target]) == abs_directory:
+                raise Exception("Attempted Path Traversal in Tar File")
+            tar.extract(m, path=root)
+            if i % 200 == 0 or i == total_members:
+                sys.stdout.write(f"\r[Urban8K] Extracted {i}/{total_members}")
+                sys.stdout.flush()
+    print("\n[Urban8K] Extract done.")
 
     if not _have_urban8k(root):
         raise RuntimeError(
             f"UrbanSound8K extraction incomplete in {root}.\n"
-            "Ensure folder is: UrbanSound8K/audio/fold*/... and metadata/"
+            "Expected: UrbanSound8K/audio/fold*/... and UrbanSound8K/metadata/UrbanSound8K.csv"
         )
-
 
 # ----------------------------------------------------------------------------- #
 # UrbanSound8K Raw Dataset
