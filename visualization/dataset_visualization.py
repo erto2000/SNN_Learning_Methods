@@ -223,11 +223,10 @@ def save_examples_multichannel_traces(sub: Subset, class_names: List[str], path:
     fig.tight_layout()
     fig.savefig(path); plt.close(fig); return path
 
-
 def save_examples_voxel_slices(sub: Subset, class_names: List[str], path: str, H: int, W: int, bins_hint: int = 200) -> str:
     """
-    For DVS-Gesture after EventToVoxel: input is typically [T, H*W*2] with T ~= bins.
-    We render a small montage of time slices (sum over polarity channels).
+    For DVS-Gesture after EventToVoxel(+optional SlidingWindow): input can be
+    [T, H*W*(1 or 2)] or [S, T, H*W*(1 or 2)]. We render a time slice (sum over polarity).
     """
     rows, cols = 3, 4
     fig, axes = plt.subplots(rows, cols, figsize=(12, 7), dpi=140)
@@ -235,18 +234,61 @@ def save_examples_voxel_slices(sub: Subset, class_names: List[str], path: str, H
     i = 0
     for x, y, info in _iter_subset(sub, max_items=rows*cols):
         ax = axes[i]; i += 1
-        if x.dim() != 2:
+
+        if x.dim() == 3:         # [S, T, D] -> use first segment
+            x2 = x[0]
+        elif x.dim() == 2:       # [T, D]
+            x2 = x
+        else:
             ax.axis("off"); continue
-        T, D = x.shape  # D should be H*W*(2 or 1)
-        C = D // (H * W)
-        X = x.cpu().numpy().reshape(T, H, W, C)
-        # collapse polarity channels if present
-        img = X.mean(axis=-1)  # [T, H, W]
-        # pick a representative time slice (median bin)
+
+        T, D = x2.shape
+        C = max(1, D // (H * W))
+        if H * W * C != D:
+            # shape mismatch, skip safely
+            ax.axis("off"); continue
+
+        X = x2.cpu().numpy().reshape(T, H, W, C)
+        img = X.mean(axis=-1)  # collapse polarity if present -> [T,H,W]
         t_idx = min(T // 2, T - 1)
-        im = ax.imshow(img[t_idx], cmap="magma", origin="lower", aspect="auto")
+        ax.imshow(img[t_idx], cmap="magma", origin="lower", aspect="auto")
         ax.set_title(f"{class_names[y]} | t={t_idx}/{T}", fontsize=8)
         ax.axis("off")
+
     for k in range(i, len(axes)): axes[k].axis("off")
     fig.tight_layout(); fig.savefig(path); plt.close(fig); return path
 
+
+def save_examples_dvs_events_raw(sub: Subset, class_names: List[str], path: str, max_points: int = 20_000) -> str:
+    """
+    Show DVS raw events as (t vs y) rasters colored by polarity, with a small x overlay.
+    Expects items to have info['events'] as [N,4] (t,x,y,p) in seconds.
+    """
+    rows, cols = 3, 4
+    fig, axes = plt.subplots(rows, cols, figsize=(12, 7), dpi=140)
+    axes = axes.flatten()
+    i = 0
+    for _, y, info in _iter_subset(sub, max_items=rows*cols):
+        ax = axes[i]; i += 1
+        ev = info.get("events", None)
+        if ev is None or ev.numel() == 0:
+            ax.axis("off"); continue
+        E = ev.cpu()
+        # Subsample for speed if too many points
+        if E.shape[0] > max_points:
+            idx = torch.randint(0, E.shape[0], (max_points,))
+            E = E.index_select(0, idx)
+        t = E[:, 0].numpy()
+        xs = E[:, 1].numpy()
+        ys = E[:, 2].numpy()
+        ps = E[:, 3].numpy()
+        # Raster: time vs y, color by polarity
+        ax.scatter(t, ys, s=0.3, c=np.where(ps > 0.5, "#d62728", "#1f77b4"), alpha=0.6)
+        # Light x overlay to hint spatial spread (projected along a second axis)
+        ax2 = ax.twinx()
+        ax2.scatter(t, xs, s=0.3, c="#7f7f7f", alpha=0.2)
+        ax.set_title(class_names[y], fontsize=8)
+        ax.set_xlabel("time (s)"); ax.set_ylabel("y"); ax.grid(True, alpha=0.1)
+        ax2.set_ylabel("x")
+    for k in range(i, len(axes)): axes[k].axis("off")
+    fig.tight_layout(); fig.savefig(path); plt.close(fig); return path

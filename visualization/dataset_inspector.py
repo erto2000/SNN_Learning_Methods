@@ -18,6 +18,7 @@ from .dataset_visualization import (
     save_examples_mel_specs, save_examples_spike_raster, save_embeddings_scatter,
     save_pipeline_summary, save_counts_json,
     save_examples_multichannel_traces, save_examples_voxel_slices,
+    save_examples_dvs_events_raw,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -338,6 +339,10 @@ def build_dataset_viz(
         elif DATASET == "mitbih":
             figs[f"ecg_{split}"] = save_examples_waveforms(
                 sel, class_names, os.path.join(out_dir, "examples_raw", f"ecg_{split}.png")
+            )
+        elif DATASET == "dvs_gesture":
+            figs[f"dvs_raw_events_{split}"] = save_examples_dvs_events_raw(
+                sel, class_names, os.path.join(out_dir, "examples_raw", f"dvs_events_{split}.png")
             )
         # DVS raw (events) omitted; post handles voxel render
 

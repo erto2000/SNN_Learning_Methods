@@ -11,6 +11,23 @@ try:
 except Exception:
     _HAS_TONIC = False
 
+
+# Canonical DVSGesture names (11 classes, index-aligned)
+_DVS_GESTURE_NAMES: List[str] = [
+    "hand_clap",             # 0
+    "right_hand_wave",       # 1
+    "left_hand_wave",        # 2
+    "right_arm_cw",          # 3
+    "right_arm_ccw",         # 4
+    "left_arm_cw",           # 5
+    "left_arm_ccw",          # 6
+    "right_hand_cw",         # 7
+    "right_hand_ccw",        # 8
+    "left_hand_cw",          # 9
+    "left_hand_ccw",         # 10
+]
+
+
 class DVSGestureRaw(Dataset):
     """
     IO-only for neuromorphic DVS128 Gesture.
@@ -20,9 +37,15 @@ class DVSGestureRaw(Dataset):
     def __init__(self, root: str, train: bool = True):
         assert _HAS_TONIC, "tonic is required: pip install tonic"
         self.ds = tonic.datasets.DVSGesture(save_to=root, train=train)
-        self.class_names = [str(c) for c in range(11)]  # dataset has 11 gesture classes
 
-    def __len__(self): return len(self.ds)
+        # Prefer readable class names; fall back to numeric if mismatch ever occurs.
+        if isinstance(_DVS_GESTURE_NAMES, list) and len(_DVS_GESTURE_NAMES) == 11:
+            self.class_names = list(_DVS_GESTURE_NAMES)
+        else:
+            self.class_names = [str(c) for c in range(11)]
+
+    def __len__(self):
+        return len(self.ds)
 
     def __getitem__(self, i):
         events, y = self.ds[i]  # structured array with fields x,y,t,p
@@ -30,20 +53,27 @@ class DVSGestureRaw(Dataset):
         # SAFE conversions (make contiguous + cast once)
         import numpy as np
         t_us = np.ascontiguousarray(events['t']).astype(np.float32, copy=False)
-        xs = np.ascontiguousarray(events['x']).astype(np.float32, copy=False)
-        ys = np.ascontiguousarray(events['y']).astype(np.float32, copy=False)
-        ps = np.ascontiguousarray(events['p']).astype(np.float32, copy=False)
+        xs   = np.ascontiguousarray(events['x']).astype(np.float32, copy=False)
+        ys   = np.ascontiguousarray(events['y']).astype(np.float32, copy=False)
+        ps   = np.ascontiguousarray(events['p']).astype(np.float32, copy=False)
 
-        t = torch.from_numpy(t_us) / 1e6  # us -> s
-        x = torch.from_numpy(xs)
+        t    = torch.from_numpy(t_us) / 1e6  # us -> s
+        x    = torch.from_numpy(xs)
         ypix = torch.from_numpy(ys)
-        p = torch.from_numpy(ps)
+        p    = torch.from_numpy(ps)
 
         E = torch.stack([t, x, ypix, p], dim=-1)  # [N,4]
 
         x_placeholder = torch.zeros((1, 1), dtype=torch.float32)
-        info = {"id": i, "length": 1, "events": E, "H": 128, "W": 128}
+        info = {
+            "id": i,
+            "length": 1,
+            "events": E,
+            "H": 128,
+            "W": 128,
+        }
         return x_placeholder, int(y), info
+
 
 def build_dvs_gesture_raw(root: str,
                           max_samples: Optional[int] = None,
@@ -72,11 +102,15 @@ def build_dvs_gesture_raw(root: str,
         if te_labels is None:
             te_labels = [int(test[i][1]) for i in range(len(test))]
 
-        tr_idx = stratified_indices_from_labels(list(map(int, tr_labels)),
-                                                max_samples, seed=seed, min_per_class=min_per_class)
-        te_cap = max(1, min(max(max_samples // 4, 2*len(class_names)), len(test)))
-        te_idx = stratified_indices_from_labels(list(map(int, te_labels)),
-                                                te_cap, seed=seed, min_per_class=max(3, min_per_class//2))
+        tr_idx = stratified_indices_from_labels(
+            list(map(int, tr_labels)),
+            max_samples, seed=seed, min_per_class=min_per_class
+        )
+        te_cap = max(1, min(max(max_samples // 4, 2 * len(class_names)), len(test)))
+        te_idx = stratified_indices_from_labels(
+            list(map(int, te_labels)),
+            te_cap, seed=seed, min_per_class=max(3, min_per_class // 2)
+        )
 
         train = Subset(train, tr_idx)
         test  = Subset(test,  te_idx)
