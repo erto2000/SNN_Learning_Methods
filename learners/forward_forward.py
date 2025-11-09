@@ -186,3 +186,15 @@ class FFLearner(BaseLearner):
             self._refresh_requires_grad()
             state.update({"layer": self.current_layer, "layer_advanced": True})
         return state
+
+    def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
+        """
+        Approx: buffers for current layer's activations over time.
+        Greedy / layer-wise: only one layer is "active" for training.
+        """
+        Hs = [fc.out_features for fc in self.model.fcs]
+        max_hidden = max(Hs) if Hs else 0
+
+        # one temporal buffer for current layer
+        elems = batch * time_steps * max_hidden
+        return elems * fp_bytes

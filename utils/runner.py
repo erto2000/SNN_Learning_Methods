@@ -4,6 +4,7 @@ from copy import deepcopy
 import traceback
 import io
 import os
+import torch
 from datetime import datetime
 from contextlib import redirect_stdout, redirect_stderr
 
@@ -26,6 +27,21 @@ class _TeeIO(io.StringIO):
     def flush(self):
         self._real.flush()
         return super().flush()
+
+
+def _infer_fp_bytes(model: torch.nn.Module) -> int:
+    """Infer element size in bytes from model params."""
+    p = next(model.parameters(), None)
+    if p is None:
+        return 4
+    dt = p.dtype
+    if dt == torch.float32:
+        return 4
+    if dt in (torch.float16, torch.bfloat16):
+        return 2
+    if dt == torch.float64:
+        return 8
+    return 4
 
 
 # ---------- registry helpers (unchanged) ----------
@@ -62,6 +78,27 @@ def _print_header(run_id: str, g: Dict[str, Any], meta: Dict[str, Any]) -> None:
         f"[Arch] hidden={g['HIDDEN_SIZES']} | norm={g['NORM']} | base_head={g['HEAD']} | "
         f"recurrent={g['RECURRENT']} | learner={g['LEARNER']}"
     )
+
+
+def _print_memory_info(static_bytes: int,
+                       train_bytes: int | None,
+                       batch_size: int,
+                       time_steps: int | None,
+                       fp_bytes: int) -> None:
+    mb = 1024 ** 2
+    static_mb = static_bytes / mb if static_bytes is not None else float("nan")
+    if train_bytes is not None and time_steps is not None:
+        train_mb = train_bytes / mb
+        print(
+            f"[Memory] dtype={fp_bytes*8}-bit | "
+            f"static={static_mb:.2f} MB | "
+            f"train_batch={train_mb:.2f} MB (B={batch_size}, T={time_steps})"
+        )
+    else:
+        print(
+            f"[Memory] dtype={fp_bytes*8}-bit | "
+            f"static={static_mb:.2f} MB | train_batch=n/a"
+        )
 
 
 # ---------- core ----------
@@ -106,8 +143,27 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
             cfg = build_cfg(meta["input_dim"], meta["n_classes"], g)
             learner = _make_learner(cfg, meta, device, g)
 
+            # Memory estimates (auto: uses meta time_steps and model dtype)
+            fp_bytes = _infer_fp_bytes(learner.model)
+            time_steps = meta.get("time_steps")
+            static_mem_bytes = learner.get_static_memory_bytes(fp_bytes=fp_bytes)
+            train_mem_bytes = None
+            if time_steps is not None:
+                train_mem_bytes = learner.get_training_memory_bytes(
+                    batch=g["BATCH_SIZE"],
+                    time_steps=time_steps,
+                    fp_bytes=fp_bytes,
+                )
+
             # Pretty header
             _print_header(run_id, g, meta)
+            _print_memory_info(
+                static_bytes=static_mem_bytes,
+                train_bytes=train_mem_bytes,
+                batch_size=g["BATCH_SIZE"],
+                time_steps=time_steps,
+                fp_bytes=fp_bytes,
+            )
 
             # Train
             final_stats, epoch_log = run_train_loop(
@@ -144,6 +200,23 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
     duration_seconds = (datetime.fromisoformat(finished_at) - start_dt).total_seconds()
     console_text = tee.getvalue()
 
+    memory_info = {}
+    if status == "ok":
+        # fp_bytes, static_mem_bytes, train_mem_bytes may not exist if exception
+        # so fetch safely from locals()
+        fp_bytes_loc = locals().get("fp_bytes")
+        static_loc = locals().get("static_mem_bytes")
+        train_loc = locals().get("train_mem_bytes")
+        time_steps_loc = locals().get("time_steps")
+        if fp_bytes_loc is not None and static_loc is not None:
+            memory_info = {
+                "fp_bytes": fp_bytes_loc,
+                "static_bytes": static_loc,
+                "training_bytes_per_batch": train_loc,
+                "batch_size": g.get("BATCH_SIZE"),
+                "time_steps": time_steps_loc,
+            }
+
     return {
         "run_id": run_id,
         "config": g,  # note: TRANSFORM removed above (non-serializable)
@@ -157,6 +230,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
         "finished_at": finished_at,
         "duration_seconds": duration_seconds,
         "console_log": console_text,
+        "memory": memory_info,
     }
 
 

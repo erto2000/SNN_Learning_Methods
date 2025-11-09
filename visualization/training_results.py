@@ -1,4 +1,4 @@
-# visualization/results.py
+# visualization/training_results.py
 from __future__ import annotations
 import os, json
 from typing import Dict, Any, List
@@ -38,6 +38,7 @@ def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_
             "final": r.get("final", {}),
             "history": r.get("history", {}),
             "console_log": r.get("console_log", ""),
+            "memory": r.get("memory", {}),
         }
 
         # 1) summary.json

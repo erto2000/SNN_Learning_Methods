@@ -86,3 +86,32 @@ class PepitaLearner(BaseLearner):
 
         acc = (logits.argmax(1) == y).float().mean().item() * 100.0
         return {"acc": acc, "loss": loss.item()}
+
+    def get_static_memory_bytes(self, fp_bytes: int = 4) -> int:
+        """
+        Network params (excluding unused recurrent weights) + feedback matrix F.
+        """
+        base = super().get_static_memory_bytes(fp_bytes=fp_bytes)
+        F_elems = self.F.numel()
+        return base + F_elems * fp_bytes
+
+    def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
+        """
+        Approx:
+
+        - mode='original': first pass stores membrane states over time for all layers;
+          second pass does not store activations.
+        - mode='accum': assume an accumulated variant that only keeps per-layer
+          running states (no T factor).
+        """
+        Hs = [fc.out_features for fc in self.model.fcs]
+        sum_hidden = sum(Hs)
+
+        if self.mode == "accum":
+            # Running stats per layer, no temporal history.
+            elems = batch * sum_hidden
+        else:
+            # 'original' PEPITA: store first-pass activations for all time steps.
+            elems = batch * time_steps * sum_hidden
+
+        return elems * fp_bytes

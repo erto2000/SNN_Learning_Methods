@@ -179,3 +179,23 @@ class EpropLearner(BaseLearner):
         acc = (last_logits.argmax(1) == y).float().mean().item() * 100.0
 
         return {"loss": final_loss, "acc": acc}
+
+    def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
+        """
+        Approx: eligibility traces (feedforward + recurrent).
+        No activation history; ignores tiny state buffers.
+        """
+        Hs = [fc.out_features for fc in self.model.fcs]
+        in_dims = [self.model.fcs[0].in_features] + [fc.out_features for fc in self.model.fcs[:-1]]
+
+        # e_ff: [B, in_l, H_l] per layer
+        e_ff_elems = sum(batch * din * hout for din, hout in zip(in_dims, Hs))
+
+        # e_rec: [B, H_l, H_l] for recurrent layers only
+        e_rec_elems = sum(
+            batch * h * h
+            for flag, h in zip(self.rec_flags, Hs)
+            if flag
+        )
+
+        return (e_ff_elems + e_rec_elems) * fp_bytes
