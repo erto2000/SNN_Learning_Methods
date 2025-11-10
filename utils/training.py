@@ -57,7 +57,7 @@ def run_train_loop(
 
     for epoch in range(1, epochs + 1):
         n_tr, acc_tr_sum, loss_sum, aux_msg = 0, 0.0, 0.0, ""
-        for Xp, yp, _, _ in iter_pieces(train_loader, device):
+        for Xp, yp, _, _ in iter_pieces(train_loader, device, chunk_segments=True):
             stats = learner.train_step(Xp, yp)
             n_tr += 1
             if "acc" in stats:           acc_tr_sum += stats["acc"]
