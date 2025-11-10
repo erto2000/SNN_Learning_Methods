@@ -1,5 +1,5 @@
 # run_training.py
-from utils.runner import run_all, summarize
+from utils.runner import run_one, summarize
 from visualization.training_results import save_results
 import timeseries.transforms as transforms
 
@@ -252,6 +252,9 @@ RUNS = [
 
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    results = run_all(RUNS)
+    results = []
+    for run in RUNS:
+        result = run_one(run)
+        save_results([result])
+        results.append(result)
     summarize(results)
-    save_results(results)

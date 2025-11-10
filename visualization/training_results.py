@@ -35,10 +35,10 @@ def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_
             "duration_seconds": r.get("duration_seconds"),
             "config": r.get("config"),
             "meta": r.get("meta", {}),
+            "memory": r.get("memory", {}),
             "final": r.get("final", {}),
             "history": r.get("history", {}),
             "console_log": r.get("console_log", ""),
-            "memory": r.get("memory", {}),
         }
 
         # 1) summary.json

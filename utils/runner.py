@@ -107,156 +107,147 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
     Runs a single experiment and RETURNS a dict with everything
     (including captured console_log). No file writing here.
     """
-    g = deepcopy(config)
+    run_id = config.get("RUN_ID", f"{config['DATASET']}-{config['LEARNER']}-seed{config['SEED']}")
+    try:
+        g = deepcopy(config)
 
-    # Pull out the transform object (avoid serializing it later)
-    # and deepcopy to ensure per-run state (e.g., ZScore fit stats) are isolated.
-    transform = g.pop("TRANSFORM", None)
-    if transform is not None:
-        from copy import deepcopy as _dc
-        transform = _dc(transform)
+        # Pull out the transform object (avoid serializing it later)
+        # and deepcopy to ensure per-run state (e.g., ZScore fit stats) are isolated.
+        transform = g.pop("TRANSFORM", None)
+        if transform is not None:
+            from copy import deepcopy as _dc
+            transform = _dc(transform)
 
-    run_id = g.get("RUN_ID", f"{g['DATASET']}-{g['LEARNER']}-seed{g['SEED']}")
-    start_dt = datetime.now()
-    started_at = start_dt.isoformat(timespec="seconds")
+        start_dt = datetime.now()
+        started_at = start_dt.isoformat(timespec="seconds")
 
-    tee = _TeeIO(real_stdout=os.sys.stdout)
-    with redirect_stdout(tee), redirect_stderr(tee):
-        try:
-            # Repro + device
-            set_seed(g["SEED"])
-            device = select_device()
+        tee = _TeeIO(real_stdout=os.sys.stdout)
+        with redirect_stdout(tee), redirect_stderr(tee):
+            try:
+                # Repro + device
+                set_seed(g["SEED"])
+                device = select_device()
 
-            # Data
-            train_loader, test_loader, meta = get_dataloaders(
-                g["DATASET"],
-                root=g["DATA_ROOT"],
-                batch_size=g["BATCH_SIZE"],
-                max_samples=g["MAX_SAMPLES"],
-                transform=transform,
-                num_workers=g.get("NUM_WORKERS"),
-                pin_memory=g.get("PIN_MEMORY"),
-                **g.get("DATASET_KW", {}),
-            )
+                # Data
+                train_loader, test_loader, meta = get_dataloaders(
+                    g["DATASET"],
+                    root=g["DATA_ROOT"],
+                    batch_size=g["BATCH_SIZE"],
+                    max_samples=g["MAX_SAMPLES"],
+                    transform=transform,
+                    num_workers=g.get("NUM_WORKERS"),
+                    pin_memory=g.get("PIN_MEMORY"),
+                    **g.get("DATASET_KW", {}),
+                )
 
-            # Model + learner
-            cfg = build_cfg(meta["input_dim"], meta["n_classes"], g)
-            learner = _make_learner(cfg, meta, device, g)
+                # Model + learner
+                cfg = build_cfg(meta["input_dim"], meta["n_classes"], g)
+                learner = _make_learner(cfg, meta, device, g)
 
-            # Memory estimates (auto: uses meta time_steps and model dtype)
-            fp_bytes = _infer_fp_bytes(learner.model)
-            time_steps = meta.get("time_steps")
-            static_mem_bytes = learner.get_static_memory_bytes(fp_bytes=fp_bytes)
-            train_mem_bytes = None
-            if time_steps is not None:
-                train_mem_bytes = learner.get_training_memory_bytes(
-                    batch=g["BATCH_SIZE"],
+                # Memory estimates (auto: uses meta time_steps and model dtype)
+                fp_bytes = _infer_fp_bytes(learner.model)
+                time_steps = meta.get("time_steps")
+                static_mem_bytes = learner.get_static_memory_bytes(fp_bytes=fp_bytes)
+                train_mem_bytes = None
+                if time_steps is not None:
+                    train_mem_bytes = learner.get_training_memory_bytes(
+                        batch=g["BATCH_SIZE"],
+                        time_steps=time_steps,
+                        fp_bytes=fp_bytes,
+                    )
+
+                # Pretty header
+                _print_header(run_id, g, meta)
+                _print_memory_info(
+                    static_bytes=static_mem_bytes,
+                    train_bytes=train_mem_bytes,
+                    batch_size=g["BATCH_SIZE"],
                     time_steps=time_steps,
                     fp_bytes=fp_bytes,
                 )
 
-            # Pretty header
-            _print_header(run_id, g, meta)
-            _print_memory_info(
-                static_bytes=static_mem_bytes,
-                train_bytes=train_mem_bytes,
-                batch_size=g["BATCH_SIZE"],
-                time_steps=time_steps,
-                fp_bytes=fp_bytes,
-            )
+                # Train
+                final_stats, epoch_log = run_train_loop(
+                    learner, train_loader, test_loader, device, meta["n_classes"],
+                    epochs=g["EPOCHS"], test_every_epoch=g["TEST_EVERY_EPOCH"],
+                )
 
-            # Train
-            final_stats, epoch_log = run_train_loop(
-                learner, train_loader, test_loader, device, meta["n_classes"],
-                epochs=g["EPOCHS"], test_every_epoch=g["TEST_EVERY_EPOCH"],
-            )
+                if not g["TEST_EVERY_EPOCH"]:
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    print(f"[{ts}] [Final Test] sample_acc:{final_stats['sample_acc']:.2f}% | window_acc:{final_stats['window_acc']:.2f}%")
 
-            if not g["TEST_EVERY_EPOCH"]:
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[{ts}] [Final Test] sample_acc:{final_stats['sample_acc']:.2f}% | window_acc:{final_stats['window_acc']:.2f}%")
+                status = "ok"
+                error = None
+                tb = None
 
-            status = "ok"
-            error = None
-            tb = None
+            except Exception as e:
+                status = "error"
+                error = f"{type(e).__name__}: {e}"
+                tb = traceback.format_exc()
+                ts_err = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"\n[{ts_err}] [Error] Run '{run_id}' failed:")
+                print(tb)
+                final_stats, epoch_log = {}, {}
+                meta = locals().get("meta", {})
+                # free CUDA for later runs
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
 
-        except Exception as e:
-            status = "error"
-            error = f"{type(e).__name__}: {e}"
-            tb = traceback.format_exc()
-            ts_err = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"\n[{ts_err}] [Error] Run '{run_id}' failed:")
-            print(tb)
-            final_stats, epoch_log = {}, {}
-            meta = locals().get("meta", {})
-            # free CUDA for later runs
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
+        finished_at = datetime.now().isoformat(timespec="seconds")
+        duration_seconds = (datetime.fromisoformat(finished_at) - start_dt).total_seconds()
+        console_text = tee.getvalue()
 
-    finished_at = datetime.now().isoformat(timespec="seconds")
-    duration_seconds = (datetime.fromisoformat(finished_at) - start_dt).total_seconds()
-    console_text = tee.getvalue()
+        memory_info = {}
+        if status == "ok":
+            # fp_bytes, static_mem_bytes, train_mem_bytes may not exist if exception
+            # so fetch safely from locals()
+            fp_bytes_loc = locals().get("fp_bytes")
+            static_loc = locals().get("static_mem_bytes")
+            train_loc = locals().get("train_mem_bytes")
+            time_steps_loc = locals().get("time_steps")
+            if fp_bytes_loc is not None and static_loc is not None:
+                memory_info = {
+                    "fp_bytes": fp_bytes_loc,
+                    "static_bytes": static_loc,
+                    "training_bytes_per_batch": train_loc,
+                    "batch_size": g.get("BATCH_SIZE"),
+                    "time_steps": time_steps_loc,
+                }
 
-    memory_info = {}
-    if status == "ok":
-        # fp_bytes, static_mem_bytes, train_mem_bytes may not exist if exception
-        # so fetch safely from locals()
-        fp_bytes_loc = locals().get("fp_bytes")
-        static_loc = locals().get("static_mem_bytes")
-        train_loc = locals().get("train_mem_bytes")
-        time_steps_loc = locals().get("time_steps")
-        if fp_bytes_loc is not None and static_loc is not None:
-            memory_info = {
-                "fp_bytes": fp_bytes_loc,
-                "static_bytes": static_loc,
-                "training_bytes_per_batch": train_loc,
-                "batch_size": g.get("BATCH_SIZE"),
-                "time_steps": time_steps_loc,
-            }
-
-    return {
-        "run_id": run_id,
-        "config": g,  # note: TRANSFORM removed above (non-serializable)
-        "meta": meta if isinstance(meta, dict) else {},
-        "final": final_stats,
-        "history": epoch_log,
-        "status": status,
-        "error": error,
-        "traceback": tb,
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "duration_seconds": duration_seconds,
-        "console_log": console_text,
-        "memory": memory_info,
-    }
-
-
-def run_all(run_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    results: List[Dict[str, Any]] = []
-    for cfg in run_list:
-        run_id = cfg.get("RUN_ID", f"{cfg.get('DATASET','?')}-{cfg.get('LEARNER','?')}-seed{cfg.get('SEED','?')}")
-        try:
-            out = run_one(cfg)
-            results.append(out)
-        except Exception as e:
-            tb = traceback.format_exc(limit=20)
-            results.append({
-                "run_id": run_id,
-                "config": deepcopy(cfg),
-                "status": "error",
-                "error": str(e),
-                "traceback": tb,
-                "final": {},
-                "history": {},
-                "started_at": None,
-                "finished_at": None,
-                "duration_seconds": None,
-                "console_log": "",
-            })
-    return results
+        return {
+            "run_id": run_id,
+            "config": g,  # note: TRANSFORM removed above (non-serializable)
+            "meta": meta if isinstance(meta, dict) else {},
+            "final": final_stats,
+            "history": epoch_log,
+            "status": status,
+            "error": error,
+            "traceback": tb,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "duration_seconds": duration_seconds,
+            "console_log": console_text,
+            "memory": memory_info,
+        }
+    except Exception as e:
+        tb = traceback.format_exc(limit=20)
+        return {
+            "run_id": run_id,
+            "config": deepcopy(cfg),
+            "status": "error",
+            "error": str(e),
+            "traceback": tb,
+            "final": {},
+            "history": {},
+            "started_at": None,
+            "finished_at": None,
+            "duration_seconds": None,
+            "console_log": "",
+        }
 
 
 def summarize(results: List[Dict[str, Any]]) -> None:
