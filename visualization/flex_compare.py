@@ -16,7 +16,8 @@ def _color_map(run_ids: List[str]):
 
 # ── Filesystem helpers ────────────────────────────────────────────────────────
 def _ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
+    if path:
+        os.makedirs(path, exist_ok=True)
 
 def _load_summary(runs_dir: str, run_id: str) -> Dict[str, Any]:
     path = os.path.join(runs_dir, run_id, "summary.json")
@@ -95,12 +96,10 @@ def _resolve_scalar(run_info: Dict[str,Any], key: str,
         else:
             val = _get_from_path(run_info, key)
 
-    # convert list -> string
     if isinstance(val, (list, tuple)):
         if len(val) == 1:
             return str(val[0])
         return ",".join(str(v) for v in val)
-
     return val
 
 # ── Plotting ─────────────────────────────────────────────────────────────────
@@ -110,7 +109,8 @@ def _render_panels(out_dir: str,
                    name_map: Optional[Dict[str,str]],
                    style: Optional[Dict[str,Any]],
                    custom_funcs: Dict[str, Callable[[Dict[str,Any]], Any]],
-                   color_map: Dict[str,Any]) -> List[str]:
+                   color_map: Dict[str,Any],
+                   out_path_override: Optional[str] = None) -> List[str]:
 
     style = style or {}
     dpi = int(style.get("dpi", 140))
@@ -133,7 +133,6 @@ def _render_panels(out_dir: str,
         if not x_key or not y_key:
             raise ValueError("Each panel must specify both 'x' and 'y'.")
 
-        # -------- PER-EPOCH LINE PLOT --------
         if x_key == "epoch":
             if plot_type and plot_type != "line":
                 print(f"[flex_compare] Warning: Overriding plot='{plot_type}' to 'line' due to x='epoch'.")
@@ -151,10 +150,8 @@ def _render_panels(out_dir: str,
             ax.set_title(title)
             ax.grid(True, alpha=0.25)
 
-        # -------- PER-RUN (SCALAR) PLOTS --------
         else:
-            xs, ys = [], []
-            run_order = []
+            xs, ys, run_order = [], [], []
 
             for r in runs_info:
                 rid = r["id"]
@@ -166,7 +163,6 @@ def _render_panels(out_dir: str,
                 ys.append(yv)
                 run_order.append(rid)
 
-            # ----- BAR -----
             if plot_type == "bar":
                 bar_colors = [color_map[rid] for rid in run_order]
                 ax.bar(run_order, ys, color=bar_colors)
@@ -175,7 +171,6 @@ def _render_panels(out_dir: str,
                 ax.set_title(title)
                 ax.grid(axis="y", alpha=0.25)
 
-            # ----- SCATTER -----
             else:
                 for xv, yv, rid in zip(xs, ys, run_order):
                     ax.scatter([xv], [yv], s=70, color=color_map[rid])
@@ -184,38 +179,30 @@ def _render_panels(out_dir: str,
                 ax.set_title(title)
                 ax.grid(True, alpha=0.25)
 
-    # Remove empty axes if grid > panels
     for j in range(i+1, len(axes)):
         fig.delaxes(axes[j])
 
-    # -------- GLOBAL LEGEND --------
-    handles = []
-    labels = []
+    handles, labels = [], []
     for rid in color_map:
         handles.append(plt.Line2D([0],[0], color=color_map[rid], lw=3, marker='o'))
         labels.append(_label_for_run(rid, name_map))
 
     fig.legend(
-        handles,
-        labels,
-        loc="lower center",
-        bbox_to_anchor=(0.5, -0.01),   # big bottom spacing
-        ncol=min(len(labels), 6),
-        frameon=False,
-        fontsize=10
+        handles, labels, loc="lower center", bbox_to_anchor=(0.5, -0.01),
+        ncol=min(len(labels), 6), frameon=False, fontsize=10
     )
 
-    # Extra space for global legend
     fig.tight_layout(rect=[0, 0.15, 1, 1])
 
     out_name = "panels.png" if n > 1 else f"{panels[0]['y']}_vs_{panels[0]['x']}.png"
-    out_path = os.path.join(out_dir, out_name)
-    fig.savefig(out_path, bbox_inches="tight")  # ensure legend not cut
+    out_path = out_path_override or os.path.join(out_dir, out_name)
+
+    _ensure_dir(os.path.dirname(out_path))
+    fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
 
     img_paths.append(out_path)
     return img_paths
-
 
 # ── CSV helpers ──────────────────────────────────────────────────────────────
 def _iter_rows(runs_info: List[Dict[str,Any]], spread_epochs: bool) -> List[Dict[str,Any]]:
@@ -301,45 +288,62 @@ def _collect_runs(base_dir, selectors, name_map):
     return out
 
 def run_comparisons(base_dir, comparisons, custom_funcs=None):
+    """
+    Run comparison specs. Outputs always go under base_dir/comparisons/
+    No per-comparison folders or input dumps.
+    """
     custom_funcs = custom_funcs or {}
-    results={}
-    for comp in comparisons:
-        comp_name = comp.get("name","comparison")
-        comp_dir = _comparison_dir(base_dir, comp_name)
-        _ensure_dir(comp_dir)
+    results = {}
 
-        selectors = comp.get("runs",[])
-        name_map = comp.get("name_map",{})
+    # compute real output root = base_dir/comparisons
+    root_dir = os.path.join(base_dir, "comparisons")
+    _ensure_dir(root_dir)
+
+    for comp in comparisons:
+        comp_name = comp.get("name", "comparison")
+
+        selectors = comp.get("runs", [])
+        name_map = comp.get("name_map", {})
         runs_info = _collect_runs(base_dir, selectors, name_map)
 
-        # stable colors
+        if not runs_info:
+            print(f"[flex_compare] WARNING: No runs matched for '{comp_name}'")
+            results[comp_name] = {"error": "no runs matched"}
+            continue
+
         run_ids = [r["id"] for r in runs_info]
         color_map = _color_map(run_ids)
 
-        dest = comp.get("dest",{})
+        dest = comp.get("dest", {})
         dtype = dest.get("type")
-        produced={}
+        produced = {}
 
-        inputs_json = os.path.join(comp_dir,"inputs.json")
-        with open(inputs_json,"w",encoding="utf-8") as f:
-            json.dump(comp,f,indent=2)
-        produced["inputs"]=inputs_json
+        # resolve output path relative to results/comparisons
+        out_path = dest.get("out_path")
+        if out_path:
+            out_path = os.path.join(root_dir, out_path)
 
-        if dtype=="plot":
-            panels = dest.get("panels",[])
+        if dtype == "plot":
+            panels = dest.get("panels", [])
             style = dest.get("style")
-            produced["plots"] = _render_panels(comp_dir, panels, runs_info, name_map, style, custom_funcs, color_map)
+            produced["plots"] = _render_panels(
+                root_dir, panels, runs_info, name_map, style, custom_funcs, color_map,
+                out_path_override=out_path
+            )
 
-        elif dtype=="csv":
-            file_stem = dest.get("file_stem","table")
-            out_stem = os.path.join(comp_dir,file_stem)
-            columns = dest.get("columns",[])
-            spread_epochs = bool(dest.get("spread_epochs",False))
+        elif dtype == "csv":
+            if out_path:
+                out_stem = out_path
+            else:
+                file_stem = dest.get("file_stem", "table")
+                out_stem = os.path.join(root_dir, file_stem)
+            columns = dest.get("columns", [])
+            spread_epochs = bool(dest.get("spread_epochs", False))
             produced["csv"] = write_csv(out_stem, columns, runs_info, spread_epochs, custom_funcs)
 
         else:
             produced["error"] = f"Unknown type {dtype}"
 
-        results[comp_name]=produced
+        results[comp_name] = produced
 
     return results
