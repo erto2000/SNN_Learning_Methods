@@ -1,22 +1,31 @@
-from typing import Iterator, Tuple
+from typing import Iterator, Tuple, Optional
 import torch
 import torch.nn.functional as F
 
 @torch.no_grad()
-def iter_pieces(loader, device, *, chunk_segments: bool = False) \
-        -> Iterator[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]:
+def iter_pieces(
+        loader,
+        device,
+        *,
+        chunk_segments: bool = False,
+        dtype: Optional[torch.dtype] = None,
+) -> Iterator[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]:
     """
     Yields:
       Xp:[Nseg,T,D], yp:[Nseg], sample_ids:[Nseg], B:int (original batch size)
 
     Default (chunk_segments=False): old behavior (yields all windows at once).
     Training (chunk_segments=True): windows are yielded in chunks of size B.
+
+    dtype: if not None, cast X to this dtype.
     """
     for X, y, extra in loader:
+        target_dtype = dtype or X.dtype
+
         # ----- No windowing: [B,T,D] -----
         if X.dim() == 3:
             B = X.shape[0]
-            Xp = X.to(device)
+            Xp = X.to(device=device, dtype=target_dtype)
             yp = y.to(device)
             sample_ids = torch.arange(B, device=device, dtype=torch.long)
             yield Xp, yp, sample_ids, B
@@ -33,9 +42,9 @@ def iter_pieces(loader, device, *, chunk_segments: bool = False) \
             if b_idx.numel() == 0:
                 continue
 
-            Xf = X[b_idx, s_idx].to(device)   # [Nseg,T,D]
-            yf = y[b_idx].to(device)          # [Nseg]
-            sid = b_idx.to(device)            # [Nseg]
+            Xf = X[b_idx, s_idx].to(device=device, dtype=target_dtype)  # [Nseg,T,D]
+            yf = y[b_idx].to(device)                                    # [Nseg]
+            sid = b_idx.to(device)                                      # [Nseg]
 
             if not chunk_segments:
                 yield Xf, yf, sid, B

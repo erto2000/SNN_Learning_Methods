@@ -168,8 +168,15 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
 
                 # Train
                 final_stats, epoch_log = run_train_loop(
-                    learner, train_loader, test_loader, device, meta["n_classes"],
-                    epochs=g["EPOCHS"], test_every_epoch=g["TEST_EVERY_EPOCH"],
+                    learner,
+                    train_loader,
+                    test_loader,
+                    device,
+                    meta["n_classes"],
+                    epochs=g["EPOCHS"],
+                    test_every_epoch=g["TEST_EVERY_EPOCH"],
+                    eval_dtype_str=g.get("EVAL_DTYPE", "fp32"),
+                    use_int8_weights=bool(g.get("EVAL_INT8_WEIGHTS", False)),
                 )
 
                 if not g["TEST_EVERY_EPOCH"]:
@@ -191,7 +198,6 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                 meta = locals().get("meta", {})
                 # free CUDA for later runs
                 try:
-                    import torch
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                 except Exception:

@@ -117,7 +117,15 @@ class SNNCore(nn.Module):
             pre = norm(pre)
             if need_pre:
                 pres.append(pre)
+
             spk, mem = lif(pre, state.mems[i])
+
+            # make sure LIF outputs match pre's dtype (important for fp16/bf16 eval)
+            if spk.dtype != pre.dtype:
+                spk = spk.to(pre.dtype)
+            if mem.dtype != pre.dtype:
+                mem = mem.to(pre.dtype)
+
             new_mems.append(mem)
             # preserve last spikes if recurrence is being used for this layer
             new_spks.append(spk if self.Wrec_flags[i] else None)
@@ -134,4 +142,11 @@ class SNNCore(nn.Module):
         else:
             pre_o = self.head(h)
             spk_o, head_mem = self.head_lif(pre_o, head_mem)
+
+            # keep head LIF outputs in same dtype as pre_o
+            if spk_o.dtype != pre_o.dtype:
+                spk_o = spk_o.to(pre_o.dtype)
+            if head_mem.dtype != pre_o.dtype:
+                head_mem = head_mem.to(pre_o.dtype)
+
             return h, spk_o, SNNState(new_mems, new_spks), head_mem, layer_spikes, (pres if need_pre else None)

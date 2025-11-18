@@ -73,14 +73,16 @@ DVS_GESTURE_PIPELINE = transforms.Compose([
 # DEFAULTS (tunable per run)
 DEFAULT = dict(
     # General
-    DATA_ROOT        = "./data",
-    BATCH_SIZE       = 128,
-    EPOCHS           = 8,      # safe default; each run overrides up to max 10
-    MAX_SAMPLES      = None,
-    TEST_EVERY_EPOCH = False,
-    SEED             = 123,
-    NUM_WORKERS      = 0,
-    PIN_MEMORY       = False,
+    DATA_ROOT           = "./data",
+    BATCH_SIZE          = 128,
+    EPOCHS              = 8,      # safe default; each run overrides up to max 10
+    MAX_SAMPLES         = None,
+    TEST_EVERY_EPOCH    = False,
+    EVAL_DTYPE          = "fp32",   # "fp32", "fp16", "bf16" for evaluation,
+    EVAL_INT8_WEIGHTS   = False,    # weight-only int8 for evaluation
+    SEED                = 123,
+    NUM_WORKERS         = 0,
+    PIN_MEMORY          = False,
 
     # Network
     HIDDEN_SIZES     = [128],
