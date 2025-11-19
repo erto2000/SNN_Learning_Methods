@@ -21,7 +21,13 @@ class ESC50Raw(Dataset):
     Will auto-download the dataset (GitHub zip) into:
         {root}/ESC-50-master/{audio,meta}
     """
-    def __init__(self, root: str, folds: List[int], target_sr: int = 16000):
+    def __init__(
+        self,
+        root: str,
+        folds: List[int],
+        target_sr: int = 16000,
+        class_filter: Optional[List[str]] = None,
+    ):
         self.root = root
         self.audio_dir = os.path.join(root, "ESC-50-master", "audio")
         self.meta_path = os.path.join(root, "ESC-50-master", "meta", "esc50.csv")
@@ -50,12 +56,28 @@ class ESC50Raw(Dataset):
 
         df = pd.read_csv(self.meta_path)
         df = df[df["fold"].isin(folds)].reset_index(drop=True)
+
+        # NEW: filter by subset of classes if requested
+        if class_filter is not None:
+            df = df[df["category"].isin(class_filter)].reset_index(drop=True)
+
         if df.empty:
-            raise RuntimeError(f"No files matched folds={folds} in {self.meta_path}")
+            raise RuntimeError(
+                f"No files matched folds={folds}"
+                + ("" if class_filter is None else f" and class_filter={class_filter}")
+                + f" in {self.meta_path}"
+            )
 
         self.rows = df
-        # Build class mapping from the *subset present* (keeps things consistent within run)
-        self.class_names = sorted(df["category"].unique().tolist())
+
+        # Build class mapping; respect class_filter ordering if provided
+        if class_filter is not None:
+            # Keep only classes that actually appear in df, in the order of class_filter
+            present = set(df["category"].unique().tolist())
+            self.class_names = [c for c in class_filter if c in present]
+        else:
+            self.class_names = sorted(df["category"].unique().tolist())
+
         self.class_to_idx = {c: i for i, c in enumerate(self.class_names)}
         self.target_sr = int(target_sr)
 
@@ -125,19 +147,49 @@ class ESC50Raw(Dataset):
         return x, y, info
 
 
-def build_esc50_raw(root: str,
-                    max_samples: Optional[int] = None,
-                    *,
-                    train_folds: List[int] = [1, 2, 3, 4],
-                    test_folds:  List[int] = [5],
-                    target_sr: int = 16000,
-                    seed: int = 123,
-                    min_per_class: int = 3) -> Tuple[Dataset, Dataset, List[str], dict]:
-    train = ESC50Raw(root=root, folds=list(train_folds), target_sr=target_sr)
-    test  = ESC50Raw(root=root, folds=list(test_folds),  target_sr=target_sr)
+def build_esc50_raw(
+    root: str,
+    max_samples: Optional[int] = None,
+    *,
+    train_folds: List[int] = [1, 2, 3, 4],
+    test_folds:  List[int] = [5],
+    target_sr: int = 16000,
+    seed: int = 123,
+    min_per_class: int = 3,
+    class_count: Optional[int] = None,
+) -> Tuple[Dataset, Dataset, List[str], dict]:
+    # If we want to restrict classes, first figure out the global sorted class list
+    class_filter: Optional[List[str]] = None
+    if class_count is not None:
+        # Build a temporary dataset over all folds to get canonical class ordering
+        all_folds = sorted(set(train_folds) | set(test_folds))
+        tmp = ESC50Raw(root=root, folds=all_folds, target_sr=target_sr)
+        all_classes = tmp.class_names  # already sorted
+
+        if class_count > len(all_classes):
+            raise ValueError(
+                f"class_count={class_count} is larger than total classes={len(all_classes)}"
+            )
+
+        # Deterministic subset: first class_count classes
+        class_filter = all_classes[:class_count]
+
+    # Now build train/test using the same class_filter (or None for all)
+    train = ESC50Raw(
+        root=root,
+        folds=list(train_folds),
+        target_sr=target_sr,
+        class_filter=class_filter,
+    )
+    test  = ESC50Raw(
+        root=root,
+        folds=list(test_folds),
+        target_sr=target_sr,
+        class_filter=class_filter,
+    )
 
     # keep a copy BEFORE any Subset wrapping
-    class_names = train.class_names
+    class_names = train.class_names  # either full list or restricted list
 
     info = {
         "true_train_total": len(train),

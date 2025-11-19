@@ -38,11 +38,9 @@ SC_PIPELINE = transforms.Compose([
 
 # Audio (ESC-50 / UrbanSound8K): 4s @16k → log-mel(64)
 AUDIO_SR = 16000
-AUDIO_T  = AUDIO_SR * 4  # 4 seconds
 ESC50_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.Ensure2D(),
-    transforms.RandomTimeCrop(AUDIO_T),
     transforms.ToLogMel(sample_rate=AUDIO_SR, n_mels=64, win_len_ms=25, hop_ms=10),
     transforms.ZScore(),   # auto-fit on train
 ])
@@ -181,9 +179,11 @@ RUNS = [
     #     "LEARNER": "bp",
     #     "EPOCHS": 10,
     #     "BATCH_SIZE": 64,
-    #     "HIDDEN_SIZES": [512, 256],
+    #     "HIDDEN_SIZES": [128],
     #     "TRANSFORM": ESC50_PIPELINE,
-    #     "MAX_SAMPLES": 2000,       # quick subset; requires local dataset
+    #     "DATASET_KW": {
+    #         "class_count": 10,
+    #     },
     # },
 
     # # ── UrbanSound8K (urban audio) ───────────────────────────────────────────
