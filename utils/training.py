@@ -75,15 +75,16 @@ def eval_epoch(
             orig_device = p.device
         learner.model.to(device=device, dtype=eval_dtype)
 
-    n_tr, acc_tr_sum = 0, 0.0
-    sample_correct = sample_total = 0
-
+    correct_windows = 0
+    total_windows   = 0
+    sample_correct  = 0
+    sample_total    = 0
     try:
         for Xw, yw, sample_ids, B in iter_pieces(test_loader, device, dtype=eval_dtype):
             logits = learner.forward(Xw)        # [Nseg, K]
             preds_w = logits.argmax(dim=-1)     # [Nseg]
-            acc_tr_sum += (preds_w == yw).float().mean().item()
-            n_tr += 1
+            correct_windows += (preds_w == yw).sum().item()
+            total_windows   += yw.numel()
 
             # majority vote per original sample
             gt_per_sample = torch.empty(B, dtype=torch.long, device=yw.device)
@@ -95,7 +96,9 @@ def eval_epoch(
                 gt_per_sample,
             )
 
+            # ----- majority vote over windows to get per-sample prediction -----
             preds_sample = majority_vote(preds_w, sample_ids, num_classes=n_classes, B=B)
+
             sample_correct += (preds_sample == gt_per_sample).sum().item()
             sample_total   += B
     finally:
@@ -104,8 +107,8 @@ def eval_epoch(
             learner.model.to(device=orig_device or device, dtype=orig_dtype)
 
     return {
-        "window_acc": 100 * acc_tr_sum / max(1, n_tr),
-        "sample_acc": 100 * sample_correct / max(1, sample_total),
+        "window_acc": 100.0 * correct_windows / max(1, total_windows),
+        "sample_acc": 100.0 * sample_correct  / max(1, sample_total),
     }
 
 def run_train_loop(

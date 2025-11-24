@@ -250,3 +250,30 @@ class EventToVoxel(Transform):
             vox.index_put_((tb, ys, xs, ch0), vals, accumulate=True)
 
         return vox.view(self.bins, -1), y, info
+
+class DownsampleEvents(Transform):
+    """
+    Downsample event coordinates by an integer factor.
+    Assumes info['events'] is [N,4] = (t,x,y,p) and info['H'], info['W'] exist.
+    """
+    def __init__(self, factor: int):
+        self.factor = int(factor)
+
+    def __call__(self, x, y, info):
+        ev = info.get("events", None)
+        if ev is None:
+            return x, y, info
+
+        f = self.factor
+        H = int(info.get("H", 128))
+        W = int(info.get("W", 128))
+        new_H = max(1, H // f)
+        new_W = max(1, W // f)
+
+        ev = ev.clone()
+        # x, y in columns 1,2
+        ev[:, 1] = torch.clamp((ev[:, 1] / f).floor(), 0, new_W - 1)
+        ev[:, 2] = torch.clamp((ev[:, 2] / f).floor(), 0, new_H - 1)
+
+        info = {**info, "events": ev, "H": new_H, "W": new_W}
+        return x, y, info

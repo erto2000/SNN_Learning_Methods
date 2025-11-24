@@ -31,8 +31,7 @@ MNIST_RATE_PIPELINE = transforms.Compose([
 SC_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.Ensure2D(),                                 # waveform -> [T,1]
-    transforms.ToLogMel(sample_rate=16000, n_mels=64,
-                        win_len_ms=25, hop_ms=10),         # -> [F,M]
+    transforms.ToLogMel(sample_rate=16000, n_mels=64, win_len_ms=25, hop_ms=10),         # -> [F,M]
     transforms.ZScore(),
 ])
 
@@ -43,6 +42,7 @@ ESC50_PIPELINE = transforms.Compose([
     transforms.Ensure2D(),
     transforms.ToLogMel(sample_rate=AUDIO_SR, n_mels=64, win_len_ms=25, hop_ms=10),
     transforms.ZScore(),   # auto-fit on train
+    transforms.SlidingWindow(length=128, hop=128),
 ])
 URBAN8K_PIPELINE = ESC50_PIPELINE  # identical defaults
 
@@ -50,7 +50,7 @@ URBAN8K_PIPELINE = ESC50_PIPELINE  # identical defaults
 PAMAP2_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.ZScore(),
-    transforms.SlidingWindow(length=128, hop=64),   # lighter than 256/128
+    transforms.SlidingWindow(length=128, hop=128),
 ])
 
 # MIT-BIH (ECG): 1s@360Hz windows with overlap
@@ -62,9 +62,10 @@ MITBIH_PIPELINE = transforms.Compose([
 
 # DVS128 Gesture (neuromorphic events): events → voxel → short windows
 DVS_GESTURE_PIPELINE = transforms.Compose([
-    transforms.EventToVoxel(H=128, W=128, bins=200, polarity=True),  # -> [T, H*W*2]
+    transforms.DownsampleEvents(factor=4),
+    transforms.EventToVoxel(H=32, W=32, bins=200, polarity=True),
     transforms.ZScore(),
-    transforms.SlidingWindow(length=50, hop=25),
+    # transforms.SlidingWindow(length=50, hop=25),
 ])
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -163,12 +164,15 @@ RUNS = [
     #     "RUN_ID": "sc-bp",
     #     "DATASET": "speech_commands",
     #     "LEARNER": "bp",
-    #     "EPOCHS": 10,              # max allowed
+    #     "EPOCHS": 10,
     #     "BATCH_SIZE": 128,
-    #     "HIDDEN_SIZES": [256, 256],
+    #     "HIDDEN_SIZES": [128],
     #     "BP_LR": 3e-3,
+    #     "MAX_SAMPLES": 10000,
     #     "TRANSFORM": SC_PIPELINE,
-    #     "MAX_SAMPLES": 12000,      # trims runtime; lift for full run
+    #     "DATASET_KW": {
+    #         "class_count": 10,
+    #     },
     # },
 
     # # ── ESC-50 (environmental audio) ─────────────────────────────────────────
@@ -178,7 +182,7 @@ RUNS = [
     #     "DATASET": "esc50",
     #     "LEARNER": "bp",
     #     "EPOCHS": 10,
-    #     "BATCH_SIZE": 64,
+    #     "BATCH_SIZE": 128,
     #     "HIDDEN_SIZES": [128],
     #     "TRANSFORM": ESC50_PIPELINE,
     #     "DATASET_KW": {
@@ -193,10 +197,10 @@ RUNS = [
     #     "DATASET": "urban8k",
     #     "LEARNER": "bp",
     #     "EPOCHS": 10,
-    #     "BATCH_SIZE": 32,
-    #     "HIDDEN_SIZES": [512, 256],
+    #     "BATCH_SIZE": 128,
+    #     "HIDDEN_SIZES": [128],
     #     "TRANSFORM": URBAN8K_PIPELINE,
-    #     "MAX_SAMPLES": 2000,       # quick subset
+    #     # "MAX_SAMPLES": 2000,
     # },
 
     # # ── PAMAP2 (IMU; tuned for 4 GB VRAM) ────────────────────────────────────
@@ -206,14 +210,13 @@ RUNS = [
     #     "DATASET": "pamap2",
     #     "LEARNER": "bp",
     #     "EPOCHS": 10,
-    #     "BATCH_SIZE": 8,           # small to avoid OOM
+    #     "BATCH_SIZE": 128,
     #     "HIDDEN_SIZES": [128],
     #     "TRANSFORM": PAMAP2_PIPELINE,
-    #     "MAX_SAMPLES": None,  # don’t cap; keep more data
     #     "DATASET_KW": {
     #         "train_subjects": [101, 102, 103, 104, 105, 106, 107, 108],
-    #         "test_subjects": [109, 105, 106],  # add a couple to increase test size
-    #         "min_len": 100,  # was 200; lower to admit more sequences
+    #         "test_subjects": [109, 105, 106],
+    #         "min_len": 100,
     #     },
     # },
 
@@ -244,11 +247,10 @@ RUNS = [
     #     "DATASET": "dvs_gesture",
     #     "LEARNER": "bp",
     #     "EPOCHS": 10,
-    #     "BATCH_SIZE": 16,          # event voxels can be heavy
-    #     "HIDDEN_SIZES": [512],
+    #     "BATCH_SIZE": 128,
+    #     "HIDDEN_SIZES": [128],
     #     "BP_LR": 1e-3,
     #     "TRANSFORM": DVS_GESTURE_PIPELINE,
-    #     "MAX_SAMPLES": 200,        # starter subset
     # },
 ]
 
