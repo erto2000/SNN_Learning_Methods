@@ -31,12 +31,18 @@ def _set_seed(seed: Optional[int]) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-def _build_raw(dataset: str, root: str, max_samples: Optional[int]) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset, List[str], dir]:
+def _build_raw(dataset: str, root: str, max_samples: Optional[int], dataset_kwargs: Optional[Dict[str, Any]] = None) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset, List[str], dir]:
     name = dataset.lower()
     if name not in DS_REGISTRY:
         raise ValueError(f"Unknown dataset: {dataset!r}. Registered: {list(DS_REGISTRY)}")
     build_fn = DS_REGISTRY[name]
-    return build_fn(root=root, max_samples=max_samples)
+
+    kwargs = dict(dataset_kwargs or {})
+    # keep existing behaviour by default
+    kwargs.setdefault("root", root)
+    kwargs.setdefault("max_samples", max_samples)
+
+    return build_fn(**kwargs)
 
 def _maybe_fit_pipeline(transform, train_ds) -> Any:
     if transform is None:
@@ -224,6 +230,7 @@ def build_dataset_viz(
     SEED: Optional[int] = 123,
     base_dir: str = "results",
     tag: str = "dataset_viz",
+    DATASET_KWARGS: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Orchestrates a single dataset visualization job.
@@ -249,7 +256,7 @@ def build_dataset_viz(
     _ensure_dir(os.path.join(out_dir, "embeddings"))
 
     # ── 1) Raw datasets
-    train_raw, test_raw, class_names, info = _build_raw(DATASET, DATA_ROOT, MAX_SAMPLES)
+    train_raw, test_raw, class_names, info = _build_raw(DATASET, DATA_ROOT, MAX_SAMPLES, dataset_kwargs=DATASET_KWARGS)
     split_map = {"train": train_raw, "test": test_raw}
 
     # ── 2) Fit/apply pipeline (if provided)
@@ -411,6 +418,7 @@ def build_dataset_viz(
         splits=SPLITS,
         data_root=DATA_ROOT,
         max_samples=MAX_SAMPLES,
+        dataset_kwargs=DATASET_KWARGS or {},
         notes=NOTES,
         seed=SEED,
         class_names=class_names,
