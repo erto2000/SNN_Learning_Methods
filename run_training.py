@@ -12,6 +12,7 @@ H = 64
 HAR_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.Ensure2D(),
+    transforms.ZScore(),
     transforms.SlidingWindow(length=L, hop=H),   # [T,D] -> [S,L,D]
 ])
 
