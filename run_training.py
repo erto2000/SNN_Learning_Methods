@@ -112,7 +112,8 @@ DEFAULT = dict(
     # PEPITA (unused here but kept for completeness)
     PEP_MODE         = "original",
     PEP_LR           = 1e-2,
-    PEP_F_FACTOR     = 0.05,
+    PEP_MAX_REL_STEP = 0.05,
+    PEP_MOD_RATIO    = 0.1,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────

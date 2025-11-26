@@ -62,7 +62,8 @@ def _make_learner(cfg, meta, device, g: Dict[str, Any]):
             drop_diag=g["EP_DROP_DIAG"], weight_clip=g["EP_WEIGHT_CLIP"],
         )
     if name == "pepita":
-        return LearnerCls(cfg, meta, device, mode=g["PEP_MODE"], lr=g["PEP_LR"], f_factor=g["PEP_F_FACTOR"])
+        return LearnerCls(cfg, meta, device, mode=g["PEP_MODE"], lr=g["PEP_LR"], max_rel_step=g["PEP_MAX_REL_STEP"],
+                          target_modulation_ratio=g["PEP_MOD_RATIO"])
     raise ValueError(f"Unhandled learner: {name}")
 
 
