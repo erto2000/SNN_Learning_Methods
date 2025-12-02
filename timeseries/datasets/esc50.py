@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os, io, zipfile
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict, Any
+import random
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
@@ -16,16 +17,16 @@ from ._subsample import stratified_indices_from_labels
 
 class ESC50Raw(Dataset):
     """
-    IO-only: returns waveform x:[T,1] at target_sr (default 16000).
-    Uses official folds 1..5; choose which to train/test in the builder.
-    Will auto-download the dataset (GitHub zip) into:
-        {root}/ESC-50-master/{audio,meta}
+    IO-only ESC-50 dataset: returns waveform x:[T,1] at the *original* sample rate.
+    No resampling is performed.
+
+    This class now always works on the full ESC-50 dataset; we do not select by folds.
+    You can optionally restrict to a subset of classes via `class_filter`.
+    The train/test split is handled in `build_esc50_raw`.
     """
     def __init__(
         self,
         root: str,
-        folds: List[int],
-        target_sr: int = 16000,
         class_filter: Optional[List[str]] = None,
     ):
         self.root = root
@@ -55,16 +56,15 @@ class ESC50Raw(Dataset):
             )
 
         df = pd.read_csv(self.meta_path)
-        df = df[df["fold"].isin(folds)].reset_index(drop=True)
 
-        # NEW: filter by subset of classes if requested
+        # Filter by subset of classes if requested
         if class_filter is not None:
             df = df[df["category"].isin(class_filter)].reset_index(drop=True)
 
         if df.empty:
             raise RuntimeError(
-                f"No files matched folds={folds}"
-                + ("" if class_filter is None else f" and class_filter={class_filter}")
+                "No files matched "
+                + ("" if class_filter is None else f"class_filter={class_filter}")
                 + f" in {self.meta_path}"
             )
 
@@ -79,13 +79,11 @@ class ESC50Raw(Dataset):
             self.class_names = sorted(df["category"].unique().tolist())
 
         self.class_to_idx = {c: i for i, c in enumerate(self.class_names)}
-        self.target_sr = int(target_sr)
 
     def __len__(self) -> int:
         return len(self.rows)
 
     def __getitem__(self, i: int):
-        import math
         row = self.rows.iloc[i]
 
         # ESC-50 audio is flat under ".../audio/"
@@ -120,19 +118,7 @@ class ESC50Raw(Dataset):
         elif wav.dim() == 1:
             wav = wav.unsqueeze(0)
 
-        # Resample to target_sr if needed
-        target_sr = self.target_sr
-        if int(sr) != target_sr:
-            if _HAS_TA:
-                wav = torchaudio.functional.resample(wav, int(sr), target_sr)
-            else:
-                # Minimal linear resample using interpolate
-                T_old = wav.shape[-1]
-                T_new = int(math.ceil(T_old * (target_sr / float(sr))))
-                wav = torch.nn.functional.interpolate(
-                    wav.unsqueeze(0), size=T_new, mode="linear", align_corners=False
-                ).squeeze(0)
-            sr = target_sr
+        # No resampling: keep original sr
 
         # Final tensor: [T,1], float32
         x = wav.squeeze(0).unsqueeze(-1).to(torch.float32)
@@ -142,78 +128,203 @@ class ESC50Raw(Dataset):
             "length": int(x.shape[0]),
             "sample_rate": int(sr),
             "filename": row["filename"],
-            "fold": int(row["fold"]),
+            "fold": int(row["fold"]),  # kept as metadata only
         }
         return x, y, info
+
+
+class ESC50Segmented(Dataset):
+    """
+    Wrapper dataset that turns an ESC50Raw instance into a dataset of
+    non-overlapping time segments.
+
+    Each item corresponds to a (file_idx, offset, length) triple.
+    """
+    def __init__(
+        self,
+        base: ESC50Raw,
+        segments: List[Tuple[int, int, int]],  # (file_idx, offset, length)
+    ):
+        self.base = base
+        self.segments = segments
+
+    def __len__(self) -> int:
+        return len(self.segments)
+
+    def __getitem__(self, idx: int):
+        file_idx, offset, length = self.segments[idx]
+        x_full, y, info = self.base[file_idx]  # x_full: [T,1]
+
+        # Slice non-overlapping segment
+        x_seg = x_full[offset:offset + length]
+
+        seg_info = dict(info)
+        seg_info.update(
+            {
+                "id": int(idx),  # override with segment id
+                "segment_offset": int(offset),
+                "segment_length": int(length),
+                "file_index": int(file_idx),
+            }
+        )
+        return x_seg, y, seg_info
+
+
+def _build_segments(
+    base: ESC50Raw,
+    duration: Optional[float],
+    silence_threshold: float = 1e-4,
+) -> Tuple[List[Tuple[int, int, int]], List[int]]:
+    """
+    Build list of (file_idx, offset, length_in_samples) segments.
+
+    - If duration is None: one segment per file (full length).
+    - Otherwise: segment length = duration * sample_rate (rounded to nearest int)
+    """
+    segments: List[Tuple[int, int, int]] = []
+    labels: List[int] = []
+
+    n_files = len(base)
+    for file_idx in range(n_files):
+        x, y, info = base[file_idx]
+        length = int(info["length"])
+        sr = int(info["sample_rate"])
+
+        if duration is None:
+            segments.append((file_idx, 0, length))
+            labels.append(y)
+            continue
+
+        # Compute number of samples per segment
+        seg_len = int(round(duration * sr))
+        if seg_len <= 0:
+            raise ValueError("duration must be positive.")
+
+        n_segs = length // seg_len
+        if n_segs == 0:
+            continue
+
+        for k in range(n_segs):
+            offset = k * seg_len
+            seg = x[offset:offset + seg_len]
+
+            if seg.abs().max().item() < silence_threshold:
+                continue
+
+            segments.append((file_idx, offset, seg_len))
+            labels.append(y)
+
+    if len(segments) == 0:
+        raise RuntimeError(
+            "No segments were created. This can happen if `duration` is too large "
+            "or segments fall below `silence_threshold`."
+        )
+
+    return segments, labels
 
 
 def build_esc50_raw(
     root: str,
     max_samples: Optional[int] = None,
     *,
-    train_folds: List[int] = [1, 2, 3, 4],
-    test_folds:  List[int] = [5],
-    target_sr: int = 16000,
+    test_ratio: float = 0.2,
     seed: int = 123,
-    min_per_class: int = 3,
+    equal_per_class: bool = False,
     class_count: Optional[int] = None,
+    duration: Optional[float] = None,
 ) -> Tuple[Dataset, Dataset, List[str], dict]:
-    # If we want to restrict classes, first figure out the global sorted class list
-    class_filter: Optional[List[str]] = None
-    if class_count is not None:
-        # Build a temporary dataset over all folds to get canonical class ordering
-        all_folds = sorted(set(train_folds) | set(test_folds))
-        tmp = ESC50Raw(root=root, folds=all_folds, target_sr=target_sr)
-        all_classes = tmp.class_names  # already sorted
 
+    if not (0.0 < test_ratio < 1.0):
+        raise ValueError("test_ratio must be in (0, 1).")
+
+    tmp_all = ESC50Raw(root=root)
+    all_classes = tmp_all.class_names
+
+    if class_count is not None:
         if class_count > len(all_classes):
             raise ValueError(
-                f"class_count={class_count} is larger than total classes={len(all_classes)}"
+                f"class_count={class_count} exceeds total classes {len(all_classes)}"
             )
-
-        # Deterministic subset: first class_count classes
         class_filter = all_classes[:class_count]
+    else:
+        class_filter = None
 
-    # Now build train/test using the same class_filter (or None for all)
-    train = ESC50Raw(
-        root=root,
-        folds=list(train_folds),
-        target_sr=target_sr,
-        class_filter=class_filter,
-    )
-    test  = ESC50Raw(
-        root=root,
-        folds=list(test_folds),
-        target_sr=target_sr,
-        class_filter=class_filter,
-    )
+    base = ESC50Raw(root=root, class_filter=class_filter)
+    class_names = base.class_names
 
-    # keep a copy BEFORE any Subset wrapping
-    class_names = train.class_names  # either full list or restricted list
+    # Build segments using duration instead of time_steps
+    segments, labels = _build_segments(base, duration=duration)
+
+    rng = random.Random(seed)
+
+    num_classes = len(class_names)
+    label_to_indices: Dict[int, List[int]] = {}
+    for idx, y in enumerate(labels):
+        label_to_indices.setdefault(y, []).append(idx)
+
+    for idxs in label_to_indices.values():
+        rng.shuffle(idxs)
+
+    if equal_per_class:
+        min_class_count = min(len(v) for v in label_to_indices.values())
+        if max_samples is not None:
+            max_per_class = max_samples // num_classes
+            n_per_class = min(min_class_count, max_per_class) if max_per_class > 0 else min_class_count
+        else:
+            n_per_class = min_class_count
+
+        selected_indices = []
+        for y, idxs in label_to_indices.items():
+            selected_indices.extend(idxs[:n_per_class])
+    else:
+        if max_samples is not None and max_samples < len(labels):
+            selected_indices = stratified_indices_from_labels(labels, max_samples, seed=seed, min_per_class=1)
+        else:
+            selected_indices = list(range(len(labels)))
+
+    selected_indices = sorted(selected_indices)
+    segments = [segments[i] for i in selected_indices]
+    labels = [labels[i] for i in selected_indices]
+
+    label_to_selected: Dict[int, List[int]] = {}
+    for idx, y in enumerate(labels):
+        label_to_selected.setdefault(y, []).append(idx)
+
+    train_segment_ids = []
+    test_segment_ids = []
+    rng_split = random.Random(seed + 1)
+
+    for y, idxs in label_to_selected.items():
+        rng_split.shuffle(idxs)
+        n = len(idxs)
+        n_test = max(1, int(round(test_ratio * n)))
+        test_segment_ids.extend(idxs[:n_test])
+        train_segment_ids.extend(idxs[n_test:])
+
+    train_segment_ids.sort()
+    test_segment_ids.sort()
+
+    train_segments = [segments[i] for i in train_segment_ids]
+    test_segments = [segments[i] for i in test_segment_ids]
+
+    train = ESC50Segmented(base, train_segments)
+    test = ESC50Segmented(base, test_segments)
+
+    try:
+        _, _, first_info = base[0]
+        sr = first_info.get("sample_rate")
+    except Exception:
+        sr = None
 
     info = {
+        "true_total_segments": len(segments),
         "true_train_total": len(train),
         "true_test_total": len(test),
-        "sample_rate": target_sr,
+        "sample_rate": sr,
         "class_names": class_names,
+        "test_ratio": test_ratio,
+        "equal_per_class": equal_per_class,
+        "duration": duration,
     }
 
-    if max_samples is not None:
-        from torch.utils.data import Subset
-
-        tr_labels = [int(train.class_to_idx[c]) for c in train.rows["category"]]
-        te_labels = [int(test .class_to_idx[c]) for c in test .rows["category"]]
-
-        tr_idx = stratified_indices_from_labels(
-            tr_labels, max_samples, seed=seed, min_per_class=min_per_class
-        )
-        te_cap = max(1, min(max(max_samples // 4, 2 * len(class_names)), len(test)))
-        te_idx = stratified_indices_from_labels(
-            te_labels, te_cap, seed=seed, min_per_class=max(1, min_per_class // 2)
-        )
-
-        train = Subset(train, tr_idx)
-        test  = Subset(test,  te_idx)
-
-    # return the saved class_names, not train.class_names (which may be a Subset)
     return train, test, class_names, info

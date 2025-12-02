@@ -146,8 +146,15 @@ class PAMAP2Raw(Dataset):
     """
     IO-only: each sample is a contiguous segment of a single activity from a subject file.
     Returns x:[T, D=27] (float32), y:int (activity id remapped to 0..C-1), info: dict.
+
+    If time_steps is not None, long segments are split into non-overlapping
+    windows of length time_steps, each becoming one sample.
     """
-    def __init__(self, root: str, split_subjects: List[int], min_len: int = 200):
+    def __init__(self,
+                 root: str,
+                 split_subjects: List[int],
+                 min_len: int = 200,
+                 time_steps: Optional[int] = None):
         data_dir = _ensure_pamap2(root)
         prot_dir = os.path.join(data_dir, "Protocol")
         files = [os.path.join(prot_dir, f) for f in os.listdir(prot_dir)
@@ -155,6 +162,7 @@ class PAMAP2Raw(Dataset):
 
         self.samples: List[Tuple[torch.Tensor, int, Dict]] = []
         present: Dict[int, str] = {}
+        self.time_steps = time_steps
 
         # NaN handling helper
         def _clean_nan(a: np.ndarray) -> np.ndarray:
@@ -187,9 +195,19 @@ class PAMAP2Raw(Dataset):
                 end = start + 1
                 while end < N and int(labels[end]) == y_raw:
                     end += 1
+
                 seg = X[start:end]
-                if seg.shape[0] >= max(1, int(min_len)):
-                    present.setdefault(y_raw, _PAMAP_ACTIVITIES.get(y_raw, f"class_{y_raw}"))
+                seg_len = seg.shape[0]
+
+                # Skip very short segments
+                if seg_len < max(1, int(min_len)):
+                    start = end
+                    continue
+
+                present.setdefault(y_raw, _PAMAP_ACTIVITIES.get(y_raw, f"class_{y_raw}"))
+
+                if self.time_steps is None:
+                    # Original behavior: whole contiguous segment is one sample
                     t = torch.from_numpy(seg).to(torch.float32)  # [T,27]
                     info = {
                         "id": len(self.samples),
@@ -198,6 +216,28 @@ class PAMAP2Raw(Dataset):
                         "activity_raw": y_raw
                     }
                     self.samples.append((t, y_raw, info))
+                else:
+                    # New behavior: split into equal-length windows
+                    T = int(self.time_steps)
+                    if T <= 0:
+                        raise ValueError("time_steps must be positive if not None.")
+
+                    num_chunks = seg_len // T  # drop remainder by default
+                    for k in range(num_chunks):
+                        chunk = seg[k * T:(k + 1) * T]
+                        if chunk.shape[0] != T:
+                            continue  # safety check; should be exact
+
+                        t = torch.from_numpy(chunk).to(torch.float32)  # [T,27]
+                        info = {
+                            "id": len(self.samples),
+                            "subject": sid,
+                            "length": int(t.shape[0]),
+                            "activity_raw": y_raw,
+                            "segment_index": k,  # index within this contiguous run
+                        }
+                        self.samples.append((t, y_raw, info))
+
                 start = end
 
         # Finalize class mapping
@@ -216,50 +256,175 @@ class PAMAP2Raw(Dataset):
 
 # ---------------------------------- Factory ------------------------------------
 
-def build_pamap2_raw(root: str,
-                     max_samples: Optional[int] = None,
-                     *,
-                     # Use REAL protocol IDs by default
-                     train_subjects: List[int] = [101,102,103,104,105,106,107,108],
-                     test_subjects:  List[int] = [109],
-                     min_len: int = 200,
-                     seed: int = 123,
-                     min_per_class: int = 3) -> Tuple[Dataset, Dataset, List[str], dict]:
+def build_pamap2_raw(
+    root: str,
+    max_samples: Optional[int] = None,
+    *,
+    min_len: int = 100,
+    seed: int = 123,
+    equal_per_class: bool = False,
+    time_steps: Optional[int] = None,
+    test_ratio: float = 0.2,
+) -> Tuple[Dataset, Dataset, List[str], dict]:
+    """
+    Build PAMAP2 train/test datasets from a single unified pool of all subjects.
 
-    # Normalize subjects in case user passes 1..9
+    - The dataset is first built over *all* available subjects in the Protocol folder.
+    - Then it is split into train/test using `test_ratio`.
+
+    If equal_per_class is True:
+      - A single full dataset is built.
+      - Exactly 'per_class' samples per class are chosen globally (optionally capped by max_samples).
+      - For each class, samples are split into train/test according to 'test_ratio'.
+      - Both train and test are balanced over classes (up to rounding).
+
+    If equal_per_class is False:
+      - A single full dataset is built.
+      - Optionally, a stratified subsample of size max_samples is selected.
+      - This pool is then split into train/test according to 'test_ratio'.
+    """
+
+    if not (0.0 < test_ratio < 1.0):
+        raise ValueError("test_ratio must be in (0, 1).")
+
+    rng = np.random.default_rng(seed)
+
+    # Discover all available subject IDs under PAMAP2_Dataset/Protocol
     base_dir = os.path.join(root, _PAMAP_ROOTFOLDER) if _have_pamap2(root) else root
-    available = _discover_subject_ids(base_dir) if os.path.isdir(os.path.join(base_dir, "Protocol")) else []
-    train_subjects = _maybe_map_subjects(list(train_subjects), available)
-    test_subjects  = _maybe_map_subjects(list(test_subjects),  available)
+    prot_dir = os.path.join(base_dir, "Protocol")
+    available = _discover_subject_ids(base_dir) if os.path.isdir(prot_dir) else []
 
-    train = PAMAP2Raw(root=root, split_subjects=train_subjects, min_len=min_len)
-    test  = PAMAP2Raw(root=root, split_subjects=test_subjects,  min_len=min_len)
-
-    # Guard against empty splits (prevents ZScore.fit crash)
-    if len(train) == 0:
+    if not available:
         raise RuntimeError(
-            "PAMAP2 train split is empty. "
-            "Check subject IDs (use 101–109 for Protocol) and/or lower min_len."
+            "No PAMAP2 subjects found. Make sure the dataset is extracted to:\n"
+            f"  {root}/{_PAMAP_ROOTFOLDER}/Protocol/subject*.dat"
         )
 
-    class_names = getattr(train, "class_names", [])
+    # Build a single unified dataset over all subjects
+    full = PAMAP2Raw(
+        root=root,
+        split_subjects=available,
+        min_len=min_len,
+        time_steps=time_steps,
+    )
+
+    if len(full) == 0:
+        raise RuntimeError(
+            "PAMAP2 dataset is empty. "
+            "Try lowering min_len or checking that subject .dat files are valid."
+        )
+
+    # Labels over the full dataset (in remapped space 0..C-1)
+    all_labels = np.array([int(full[i][1]) for i in range(len(full))], dtype=int)
+    classes = np.unique(all_labels)
+    if classes.size == 0:
+        raise RuntimeError("No classes found in dataset.")
+
+    num_classes = int(classes.size)
+    class_names = getattr(full, "class_names", [])
+
+    from torch.utils.data import Subset
+
+    # -------------------------------------------------------------------------
+    # Path 1: equal_per_class == True -> balanced per class, then split
+    # -------------------------------------------------------------------------
+    if equal_per_class:
+        # Determine per-class budget, possibly capped by max_samples
+        class_counts = [int(np.sum(all_labels == c)) for c in classes]
+        if max_samples is None:
+            # Use all data but capped by the smallest class
+            per_class = min(class_counts)
+        else:
+            if max_samples < num_classes:
+                raise RuntimeError(
+                    f"max_samples={max_samples} is too small to allocate at least "
+                    f"one sample per class for {num_classes} classes."
+                )
+            budget_per_class = max_samples // num_classes
+            per_class = min(budget_per_class, *class_counts)
+
+        if per_class <= 0:
+            raise RuntimeError(
+                "Not enough samples per class to enforce equal_per_class "
+                "with the given data and max_samples."
+            )
+
+        train_idx: List[int] = []
+        test_idx: List[int] = []
+
+        for c in classes:
+            c_idx = np.where(all_labels == c)[0]
+            # guaranteed per_class <= len(c_idx)
+            chosen = rng.choice(c_idx, size=per_class, replace=False)
+            rng.shuffle(chosen)
+
+            # How many test samples for this class?
+            n_test = int(round(test_ratio * per_class))
+            if n_test <= 0 and per_class > 1:
+                n_test = 1
+            if n_test >= per_class and per_class > 1:
+                n_test = per_class - 1
+
+            test_idx.extend(chosen[:n_test].tolist())
+            train_idx.extend(chosen[n_test:].tolist())
+
+        rng.shuffle(train_idx)
+        rng.shuffle(test_idx)
+
+        train = Subset(full, train_idx)
+        test = Subset(full, test_idx)
+
+        info = {
+            "true_total": len(full),
+            "true_train_total": len(train),
+            "true_test_total": len(test),
+            "input_dim": 27,
+            "class_names": class_names,
+            "per_class": per_class,
+            "test_ratio": test_ratio,
+        }
+        return train, test, class_names, info
+
+    # -------------------------------------------------------------------------
+    # Path 2: equal_per_class == False -> optionally stratified subsample, then split
+    # -------------------------------------------------------------------------
+
+    # If max_samples is specified, choose a stratified subset of the full dataset.
+    if max_samples is not None:
+        from ._subsample import stratified_indices_from_labels
+
+        total = min(max_samples, len(full))
+        if total <= 0:
+            raise RuntimeError("max_samples is too small (no samples would be selected).")
+
+        chosen = stratified_indices_from_labels(all_labels.tolist(), total, seed=seed)
+        chosen = np.array(chosen, dtype=int)
+    else:
+        chosen = np.arange(len(full), dtype=int)
+
+    # Shuffle chosen indices and split by test_ratio
+    rng.shuffle(chosen)
+    n_total = len(chosen)
+    n_test = int(round(test_ratio * n_total))
+    if n_test <= 0 and n_total > 1:
+        n_test = 1
+    if n_test >= n_total and n_total > 1:
+        n_test = n_total - 1
+
+    test_idx = chosen[:n_test]
+    train_idx = chosen[n_test:]
+
+    train = Subset(full, train_idx.tolist())
+    test = Subset(full, test_idx.tolist())
 
     info = {
+        "true_total": len(full),
         "true_train_total": len(train),
         "true_test_total": len(test),
         "input_dim": 27,
-        "class_names": class_names
+        "class_names": class_names,
+        "test_ratio": test_ratio,
+        "max_samples_used": len(chosen),
     }
-
-    # Optional stratified subsample (fast via prebuilt samples list)
-    if max_samples is not None:
-        from torch.utils.data import Subset
-        tr_labels = [int(train[i][1]) for i in range(len(train))]
-        te_labels = [int(test[i][1])  for i in range(len(test))]
-        tr_idx = stratified_indices_from_labels(tr_labels, max_samples, seed=seed, min_per_class=min_per_class)
-        te_cap = max(1, min(max(max_samples // 4, 2*len(class_names)), len(test)))
-        te_idx = stratified_indices_from_labels(te_labels, te_cap, seed=seed, min_per_class=max(1, min_per_class//2))
-        train = Subset(train, tr_idx)
-        test  = Subset(test,  te_idx)
 
     return train, test, class_names, info

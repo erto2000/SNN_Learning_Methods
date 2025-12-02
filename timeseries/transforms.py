@@ -2,6 +2,7 @@
 from __future__ import annotations
 from typing import Dict, Any, Sequence, Optional, List
 import torch
+import math
 
 try:
     import torchaudio
@@ -114,10 +115,14 @@ class ToLogMel(Transform):
     def __init__(self, sample_rate: int, n_mels: int = 64, win_len_ms: int = 25, hop_ms: int = 10):
         assert _HAS_TA, "torchaudio required for ToLogMel."
         self.sr = int(sample_rate)
+        self.win_length = int(win_len_ms * self.sr / 1000)
+        self.hop_length = int(hop_ms * self.sr / 1000)
+        self.n_fft = 2 ** math.ceil(math.log2(self.win_length))
         self.melspec = torchaudio.transforms.MelSpectrogram(
-            sample_rate=self.sr, n_fft=1024,
-            win_length=int(win_len_ms * self.sr / 1000),
-            hop_length=int(hop_ms * self.sr / 1000),
+            sample_rate=self.sr,
+            n_fft=self.n_fft,
+            win_length=self.win_length,
+            hop_length=self.hop_length,
             n_mels=int(n_mels)
         )
         self.amplog = torchaudio.transforms.AmplitudeToDB()

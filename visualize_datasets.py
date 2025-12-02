@@ -11,13 +11,11 @@ SEED = 123
 # ──────────────────────────────────────────────────────────────────────────────
 # PIPELINES — match exactly what we use in run_training.py
 
-# HAR: fixed windows
-L = 128
-H = 64
+# HAR
 HAR_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.Ensure2D(),
-    transforms.SlidingWindow(length=L, hop=H),   # [T,D] -> [S,L,D]
+    transforms.ZScore(),
 ])
 
 # MNIST: static image to temporal sequence
@@ -32,46 +30,47 @@ MNIST_RATE_PIPELINE = transforms.Compose([
     transforms.DeterministicSpikes(gain=0.7, T=20, base_seed=0),  # [1,784] -> [20,784]
 ])
 
-# Speech Commands: waveform → log-mel → z-score
+# Speech Commands
 SC_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.Ensure2D(),                                 # waveform -> [T,1]
-    transforms.ToLogMel(sample_rate=16000, n_mels=64,
-                        win_len_ms=25, hop_ms=10),         # -> [F,M]
+    transforms.ToLogMel(sample_rate=16000, n_mels=64, win_len_ms=25, hop_ms=10),         # -> [F,M]
     transforms.ZScore(),
 ])
 
-# Audio (ESC-50 / UrbanSound8K): 4s @16k → log-mel(64)
-AUDIO_SR = 16000
-AUDIO_T  = AUDIO_SR * 4  # 4 seconds
+# ESC-50: 5s @44100Hz → log-mel(64)
 ESC50_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.Ensure2D(),
-    transforms.RandomTimeCrop(AUDIO_T),
-    transforms.ToLogMel(sample_rate=AUDIO_SR, n_mels=64, win_len_ms=25, hop_ms=10),
-    transforms.ZScore(),   # auto-fit on train
+    transforms.ToLogMel(sample_rate=44100, n_mels=64, win_len_ms=25, hop_ms=10),
+    transforms.ZScore(),
 ])
-URBAN8K_PIPELINE = ESC50_PIPELINE  # identical defaults
 
-# PAMAP2 (IMU): shorter windows to keep VRAM low
+# UrbanSound8K: 1s-4s @44100Hz → log-mel(64)
+URBAN8K_PIPELINE = transforms.Compose([
+    transforms.ToFloat32(),
+    transforms.Ensure2D(),
+    transforms.ToLogMel(sample_rate=44100, n_mels=64, win_len_ms=25, hop_ms=10),
+    transforms.ZScore(),
+])
+
+# PAMAP2 (IMU)
 PAMAP2_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.ZScore(),
-    transforms.SlidingWindow(length=128, hop=64),   # lighter than 256/128
 ])
 
-# MIT-BIH (ECG): 1s@360Hz windows with overlap
+# MIT-BIH (ECG)
 MITBIH_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.ZScore(),
-    transforms.SlidingWindow(length=360, hop=180),
 ])
 
-# DVS128 Gesture (neuromorphic events): events → voxel → short windows
+# DVS128 Gesture (neuromorphic events)
 DVS_GESTURE_PIPELINE = transforms.Compose([
-    transforms.EventToVoxel(H=128, W=128, bins=200, polarity=True),  # -> [T, H*W*2]
+    transforms.DownsampleEvents(factor=4),
+    transforms.EventToVoxel(H=32, W=32, bins=200, polarity=True),
     transforms.ZScore(),
-    transforms.SlidingWindow(length=50, hop=25),
 ])
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -101,29 +100,47 @@ VIS = [
     #      MAX_SAMPLES=4000, TRANSFORM=SC_PIPELINE, NOTES="Speech Commands log-mel + ZScore", SEED=SEED),
     #
     # # ── ESC-50 (environmental audio)
-    # dict(ID="esc50-post-mels64",
+    # dict(ID="esc50",
     #      DATASET="esc50", SPLITS=["train","test"], DATA_ROOT="./data",
-    #      MAX_SAMPLES=2000, TRANSFORM=ESC50_PIPELINE, NOTES="ESC-50 4s crops → log-mel(64) + ZScore", SEED=SEED),
-    #
+    #      MAX_SAMPLES=2000,
+    #      TRANSFORM=ESC50_PIPELINE,
+    #      DATASET_KW={"class_count": 10, "equal_per_class": True, "time_steps": 44100},
+    #      NOTES="ESC-50 5s crops → log-mel(64)",
+    #      SEED=SEED),
+
     # # ── UrbanSound8K (urban audio)
-    # dict(ID="urban8k-post-mels64",
-    #      DATASET="urban8k", SPLITS=["train","test"], DATA_ROOT="./data",
-    #      MAX_SAMPLES=2000, TRANSFORM=URBAN8K_PIPELINE, NOTES="Urban8K 4s crops → log-mel(64) + ZScore", SEED=SEED),
+    # dict(ID="urban8k",
+    #      DATASET="urban8k",
+    #      SPLITS=["train","test"],
+    #      DATA_ROOT="./data",
+    #      MAX_SAMPLES=2000,
+    #      TRANSFORM=URBAN8K_PIPELINE,
+    #      DATASET_KW={"equal_per_class": True},
+    #      NOTES="Urban8K 1s-4s crops → log-mel(64)",
+    #      SEED=SEED),
     #
     # # ── PAMAP2 (IMU)
-    # dict(ID="pamap2-post",
-    #      DATASET="pamap2", SPLITS=["train","test"], DATA_ROOT="./data",
-    #      MAX_SAMPLES=None, TRANSFORM=PAMAP2_PIPELINE,
+    # dict(ID="pamap2",
+    #      DATASET="pamap2",
+    #      SPLITS=["train","test"],
+    #      DATA_ROOT="./data",
+    #      MAX_SAMPLES=None,
+    #      TRANSFORM=PAMAP2_PIPELINE,
     #      NOTES="PAMAP2 ZScore + SlidingWindow(128,64)",
+    #      DATASET_KW={"equal_per_class": True, "time_steps": 128},
     #      SEED=SEED),
     #
     # # ── MIT-BIH (ECG)
-    # dict(ID="mitbih-post",
-    #      DATASET="mitbih", SPLITS=["train","test"], DATA_ROOT="./data",
-    #      MAX_SAMPLES=2000, TRANSFORM=MITBIH_PIPELINE,
+    # dict(ID="mitbih",
+    #      DATASET="mitbih",
+    #      SPLITS=["train","test"],
+    #      DATA_ROOT="./data",
+    #      MAX_SAMPLES=10000,
+    #      TRANSFORM=MITBIH_PIPELINE,
+    #      DATASET_KW={"two_class": True, "equal_per_class": True},
     #      NOTES="MIT-BIH ZScore + 1s windows (360) hop 180",
     #      SEED=SEED),
-    #
+
     # # ── DVS128 Gesture (neuromorphic)
     # dict(ID="dvs-post",
     #      DATASET="dvs_gesture", SPLITS=["train","test"], DATA_ROOT="./data",
@@ -143,7 +160,12 @@ def main():
         # Split out optional DATASET_KW (build_dataset_viz ignores unknown kwargs)
         dataset_kw = job.pop("DATASET_KW", None)
         if dataset_kw:
-            artifacts = build_dataset_viz(base_dir=BASE_DIR, tag=TAG, **job, **dataset_kw)
+            artifacts = build_dataset_viz(
+                base_dir=BASE_DIR,
+                tag=TAG,
+                DATASET_KWARGS=dataset_kw,
+                **job,
+            )
         else:
             artifacts = build_dataset_viz(base_dir=BASE_DIR, tag=TAG, **job)
 

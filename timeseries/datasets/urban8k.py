@@ -1,8 +1,9 @@
 from __future__ import annotations
-import os, pandas as pd, shutil, tarfile, time, io
+import os, pandas as pd, tarfile, random
 from typing import Optional, Tuple, List
 import torch
-from torch.utils.data import Dataset
+import torch.nn.functional as F
+from torch.utils.data import Dataset, Subset
 
 try:
     import torchaudio
@@ -198,10 +199,12 @@ def _download_urban8k(root: str, *, max_retries: int = 5, timeout_connect: int =
 
 class Urban8KRaw(Dataset):
     """
-    IO-only: UrbanSound8K. Returns waveform x:[T,1] at target_sr.
-    Folds 1–8 train, 9–10 test by default.
+    IO-only: UrbanSound8K.
+
+    Returns waveform x:[T,1] at the original dataset sample rate (no resampling).
+    Optional `duration` (in seconds) will center-crop or zero-pad each clip.
     """
-    def __init__(self, root: str, folds: List[int], target_sr: int = 16000):
+    def __init__(self, root: str, folds: List[int], duration: Optional[float] = None):
         assert _HAS_TA, "torchaudio required for UrbanSound8K."
 
         # Download/prepare dataset if missing
@@ -212,14 +215,14 @@ class Urban8KRaw(Dataset):
         self.root = root
         self.audio_root = os.path.join(root, "UrbanSound8K", "audio")
         self.meta_path  = os.path.join(root, "UrbanSound8K", "metadata", "UrbanSound8K.csv")
+        self.duration = duration
 
         df = pd.read_csv(self.meta_path)
         df = df[df["fold"].isin(folds)].reset_index(drop=True)
         self.rows = df
 
-        classes = df[["classID","class"]].drop_duplicates().sort_values("classID")
+        classes = df[["classID", "class"]].drop_duplicates().sort_values("classID")
         self.class_names = classes["class"].tolist()
-        self.target_sr = int(target_sr)
 
     def __len__(self):
         return len(self.rows)
@@ -227,60 +230,152 @@ class Urban8KRaw(Dataset):
     def __getitem__(self, i):
         r = self.rows.iloc[i]
         fpath = os.path.join(self.audio_root, f"fold{int(r['fold'])}", r["slice_file_name"])
-        wav, sr = torchaudio.load(fpath)
-        wav = wav.mean(dim=0, keepdim=True)  # mono
+        wav, sr = torchaudio.load(fpath)       # [C, T]
+        wav = wav.mean(dim=0, keepdim=True)    # mono -> [1, T]
 
-        if sr != self.target_sr:
-            wav = torchaudio.functional.resample(wav, sr, self.target_sr)
+        # Optional fixed duration in seconds
+        if self.duration is not None:
+            num_samples = int(round(self.duration * sr))
+            if num_samples > 0:
+                T = wav.shape[1]
+                if T > num_samples:
+                    # Center crop
+                    start = (T - num_samples) // 2
+                    wav = wav[:, start:start + num_samples]
+                elif T < num_samples:
+                    # Zero-pad at the end
+                    pad = num_samples - T
+                    wav = F.pad(wav, (0, pad))
 
         x = wav.squeeze(0).unsqueeze(-1).to(torch.float32)  # [T,1]
         y = int(r["classID"])
         info = {
-            "id": i, "length": x.shape[0], "sample_rate": self.target_sr,
-            "filename": r["slice_file_name"], "fold": int(r["fold"])
+            "id": i,
+            "length": x.shape[0],
+            "sample_rate": sr,               # original file sample rate
+            "filename": r["slice_file_name"],
+            "fold": int(r["fold"]),
         }
         return x, y, info
-
 
 # ----------------------------------------------------------------------------- #
 # Factory
 # ----------------------------------------------------------------------------- #
 
-def build_urban8k_raw(root: str,
-                      max_samples: Optional[int] = None,
-                      *,
-                      train_folds: List[int] = list(range(1,9)),
-                      test_folds:  List[int] = [9,10],
-                      target_sr: int = 16000,
-                      seed: int = 123,
-                      min_per_class: int = 3) -> Tuple[Dataset, Dataset, List[str], dict]:
+def build_urban8k_raw(
+    root: str,
+    max_samples: Optional[int] = None,
+    *,
+    test_ratio: float = 0.2,
+    seed: int = 123,
+    equal_per_class: bool = False,
+    duration: Optional[float] = None,
+) -> Tuple[Dataset, Dataset, List[str], dict]:
+    """
+    Build UrbanSound8K datasets from a single combined pool (folds 1–10).
 
-    train = Urban8KRaw(root=root, folds=list(train_folds), target_sr=target_sr)
-    test  = Urban8KRaw(root=root, folds=list(test_folds),  target_sr=target_sr)
+    When equal_per_class=True:
+        - For each class, we select the same number of samples (if possible),
+        - Then split *within that class* into train/test with test_ratio.
+        => Both train and test end up balanced across classes (up to rounding).
+    """
 
-    # capture BEFORE any Subset wrapping
-    class_names = train.class_names
+    full = Urban8KRaw(root=root, folds=list(range(1, 11)), duration=duration)
 
+    class_names = full.class_names
+    num_classes = len(class_names)
+    n_total = len(full)
+    labels = [int(c) for c in full.rows["classID"]]
+
+    rng = random.Random(seed)
+
+    # ------------------------------------------------------------------ #
+    # equal_per_class=True  → class-wise balancing + class-wise split
+    # ------------------------------------------------------------------ #
+    if equal_per_class:
+        # Build per-class index lists
+        indices_per_class: dict[int, List[int]] = {cid: [] for cid in range(num_classes)}
+        for idx, lab in enumerate(labels):
+            if lab in indices_per_class:
+                indices_per_class[lab].append(idx)
+
+        # Decide how many per class
+        if max_samples is not None:
+            per_class_target = max_samples // num_classes
+            per_class_target = max(1, per_class_target)
+        else:
+            # Use the minimum class count so all classes can contribute equally
+            per_class_target = min(len(v) for v in indices_per_class.values())
+
+        train_indices: List[int] = []
+        test_indices:  List[int] = []
+
+        for cid, idxs in indices_per_class.items():
+            if not idxs:
+                continue
+            idxs = idxs[:]         # copy
+            rng.shuffle(idxs)
+
+            k = min(per_class_target, len(idxs))
+            selected = idxs[:k]
+
+            if k <= 1:
+                # If only one sample, put it in train
+                train_indices.extend(selected)
+                continue
+
+            n_test = int(round(test_ratio * k))
+            n_test = max(1, min(k - 1, n_test))  # keep at least one in each split
+
+            test_indices.extend(selected[:n_test])
+            train_indices.extend(selected[n_test:])
+
+        used_indices = sorted(set(train_indices) | set(test_indices))
+
+    # ------------------------------------------------------------------ #
+    # equal_per_class=False → stratified subset, then global split
+    # ------------------------------------------------------------------ #
+    else:
+        all_indices = list(range(n_total))
+
+        if max_samples is not None and max_samples < n_total:
+            subset_indices = stratified_indices_from_labels(
+                labels,
+                max_samples,
+                seed=seed,
+                min_per_class=1,
+            )
+            all_indices = subset_indices
+
+        used_indices = all_indices[:]
+        rng.shuffle(used_indices)
+
+        if len(used_indices) <= 1:
+            train_indices = used_indices
+            test_indices = []
+        else:
+            n_test = int(round(test_ratio * len(used_indices)))
+            n_test = max(1, min(len(used_indices) - 1, n_test))
+            test_indices = used_indices[:n_test]
+            train_indices = used_indices[n_test:]
+
+    # Build datasets
+    train_ds = Subset(full, train_indices)
+    test_ds  = Subset(full, test_indices)
+
+    # Info (UrbanSound8K original SR)
     info = {
-        "true_train_total": len(train),
-        "true_test_total": len(test),
-        "sample_rate": target_sr,
+        "total_examples": n_total,
+        "used_examples": len(used_indices),
+        "num_train": len(train_indices),
+        "num_test": len(test_indices),
+        "test_ratio": test_ratio,
         "class_names": class_names,
+        "num_classes": num_classes,
+        "sample_rate": 44_100,
+        "duration": duration,
+        "max_samples": max_samples,
+        "equal_per_class": equal_per_class,
     }
 
-    if max_samples is not None:
-        from torch.utils.data import Subset
-        tr_labels = [int(c) for c in train.rows["classID"]]
-        te_labels = [int(c) for c in test.rows["classID"]]
-
-        tr_idx = stratified_indices_from_labels(tr_labels, max_samples,
-                                                seed=seed, min_per_class=min_per_class)
-        te_cap = max(1, min(max(max_samples // 4, 2*len(class_names)), len(test)))
-        te_idx = stratified_indices_from_labels(te_labels, te_cap,
-                                                seed=seed, min_per_class=max(1, min_per_class//2))
-
-        train = Subset(train, tr_idx)
-        test  = Subset(test,  te_idx)
-
-    # return the captured class_names, not train.class_names
-    return train, test, class_names, info
+    return train_ds, test_ds, class_names, info

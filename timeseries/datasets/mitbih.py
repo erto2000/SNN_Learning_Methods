@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from ._subsample import stratified_indices_from_labels
+from ._subsample import stratified_indices_from_labels  # still available if needed elsewhere
 
 # Requires: pip install wfdb
 try:
@@ -40,7 +40,7 @@ for s in ['B','x','|','p','t','u','~','*','D','S','T','+','!','[',']','"','@','=
     _AAMI_MAP.setdefault(s, 'Q')
 
 _AAMI_NAMES = ['N','S','V','F','Q']
-_AAMI_TO_INT = {c:i for i,c in enumerate(_AAMI_NAMES)}
+_AAMI_TO_INT = {c: i for i, c in enumerate(_AAMI_NAMES)}
 
 # Keep everything for this dataset under a dedicated subfolder
 _MITBIH_DIR = "mitbih"   # -> {root}/mitbih/
@@ -68,7 +68,8 @@ def _read_record(path_no_ext: str):
     return x, fs, rlocs, symbols
 
 
-def _download_record_files(dst_dir: str, rec_str: str, *, max_retries: int = 5, timeout_connect: int = 10, timeout_read: int = 30):
+def _download_record_files(dst_dir: str, rec_str: str, *, max_retries: int = 5,
+                           timeout_connect: int = 10, timeout_read: int = 30):
     """
     Download {rec}.dat/.hea/.atr from PhysioNet with resume, progress, and retries.
     Shows progress even on slow links so it never looks "stuck".
@@ -82,7 +83,7 @@ def _download_record_files(dst_dir: str, rec_str: str, *, max_retries: int = 5, 
     os.makedirs(dst_dir, exist_ok=True)
 
     def _human(n):
-        for u in ["B","KB","MB","GB","TB"]:
+        for u in ["B", "KB", "MB", "GB", "TB"]:
             if n < 1024:
                 return f"{n:.1f}{u}"
             n /= 1024
@@ -99,10 +100,10 @@ def _download_record_files(dst_dir: str, rec_str: str, *, max_retries: int = 5, 
             read=max_retries,
             backoff_factor=1.5,
             status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=frozenset(["GET","HEAD"])
+            allowed_methods=frozenset(["GET", "HEAD"])
         )
         s.mount("https://", HTTPAdapter(max_retries=retry))
-        s.mount("http://",  HTTPAdapter(max_retries=retry))
+        s.mount("http://", HTTPAdapter(max_retries=retry))
         s.headers.update({"User-Agent": "python"})
         return s
 
@@ -141,10 +142,14 @@ def _download_record_files(dst_dir: str, rec_str: str, *, max_retries: int = 5, 
                         if total:
                             pct = 100.0 * downloaded / total
                             rate = downloaded / max(1e-6, (now - t0))
-                            sys.stdout.write(f"\r[MITBIH]   {os.path.basename(outpath):10s}  {pct:5.1f}% "
-                                             f"({_human(downloaded)}/{_human(total)}) at {_human(rate)}/s")
+                            sys.stdout.write(
+                                f"\r[MITBIH]   {os.path.basename(outpath):10s}  {pct:5.1f}% "
+                                f"({_human(downloaded)}/{_human(total)}) at {_human(rate)}/s"
+                            )
                         else:
-                            sys.stdout.write(f"\r[MITBIH]   {os.path.basename(outpath):10s}  {_human(downloaded)}")
+                            sys.stdout.write(
+                                f"\r[MITBIH]   {os.path.basename(outpath):10s}  {_human(downloaded)}"
+                            )
                         sys.stdout.flush()
 
         # finalize
@@ -182,15 +187,16 @@ def _download_record_files(dst_dir: str, rec_str: str, *, max_retries: int = 5, 
                 os.remove(out + ".part")
             raise RuntimeError(f"Failed to download {url} -> {out}")
 
-def _fetch_record(root: str, rec: int, *, local_only: bool = False):
+
+def _fetch_record(root: str, rec: int):
     """
-    Locate or (optionally) download record files for `rec`, returning waveform/ann.
+    Locate or download record files for `rec`, returning waveform/ann.
     Priority:
       1) {root}/mitbih/
       2) {root}/mitbih/1.0.0/
       3) {root}/mitbih/mitdb/    (backward compat)
       4) {root}/                  (legacy fallback if previously dumped into root)
-      5) Remote read (if not local_only)
+      5) Remote read (if local files not found)
     New downloads are ALWAYS placed into {root}/mitbih/.
     """
     if not _HAS_WFDB:
@@ -211,13 +217,7 @@ def _fetch_record(root: str, rec: int, *, local_only: bool = False):
         if _have_files(d, rec_str):
             return _read_record(os.path.join(d, rec_str))
 
-    # 2) Download into {root}/mitbih (unless local_only)
-    if local_only:
-        raise FileNotFoundError(
-            f"Record {rec_str} not found locally under {base}. "
-            "Set local_only=False to allow downloading."
-        )
-
+    # 2) Download into {root}/mitbih
     os.makedirs(base, exist_ok=True)
     _download_record_files(base, rec_str)
 
@@ -252,70 +252,167 @@ class MITBIHRaw(Dataset):
     """
     IO-only: beat-centered windows x:[T,1] around R-peaks, label=AAMI class (0..4).
     """
-    def __init__(self, root: str, records: List[int], win_samples: int = 360, *, local_only: bool = False):
+    def __init__(self, root: str, records: List[int], win_samples: int = 360):
         if not _HAS_WFDB:
             raise RuntimeError("wfdb is required: pip install wfdb")
 
-        self.samples: List[Tuple[torch.Tensor,int,Dict]] = []
+        self.samples: List[Tuple[torch.Tensor, int, Dict]] = []
         self.win_left = win_samples // 2
         self.win_right = win_samples - self.win_left
 
         for rec in records:
-            x, fs, rlocs, syms = _fetch_record(root, rec, local_only=local_only)
+            x, fs, rlocs, syms = _fetch_record(root, rec)
             beats = _beats_from_record(x, fs, rlocs, syms, self.win_left, self.win_right)
             for i, (seg, y) in enumerate(beats):
-                info = {"id": len(self.samples), "record": rec, "length": int(seg.shape[0]), "fs": fs}
+                info = {
+                    "id": len(self.samples),
+                    "record": rec,
+                    "length": int(seg.shape[0]),
+                    "fs": fs,
+                }
                 self.samples.append((seg, y, info))
 
-        self.class_names = _AAMI_NAMES
+        # By default, 5-class AAMI
+        self.class_names = list(_AAMI_NAMES)
 
-    def __len__(self): return len(self.samples)
+    def __len__(self):
+        return len(self.samples)
 
     def __getitem__(self, i):
         x, y, info = self.samples[i]
         return x.to(torch.float32), int(y), info
 
 
-def build_mitbih_raw(root: str,
-                     max_samples: Optional[int] = None,
-                     *,
-                     train_records: List[int] = _DS1,
-                     test_records:  List[int] = _DS2,
-                     win_samples: int = 360,
-                     seed: int = 123,
-                     min_per_class: int = 50,
-                     local_only: bool = False) -> Tuple[Dataset, Dataset, List[str], dict]:
+def build_mitbih_raw(
+    root: str,
+    max_samples: Optional[int] = None,
+    *,
+    records: Optional[List[int]] = None,
+    test_ratio: float = 0.2,
+    win_samples: int = 360,
+    seed: int = 123,
+    two_class: bool = False,
+    equal_per_class: bool = False,
+) -> Tuple[Dataset, Dataset, List[str], dict]:
     """
     Factory:
-      - Builds MITBIHRaw for train/test using record lists.
+      - Builds a single MITBIHRaw dataset from given records (or all DS1+DS2 by default).
+      - Splits it into train/test according to `test_ratio` using stratified splitting.
+      - Optionally:
+          * `two_class=True`: collapse to 2 classes: 0 = normal (N), 1 = others (S,V,F,Q).
+          * `equal_per_class=True`: use the same number of samples per class (balanced),
+            then perform stratified split so train/test remain class-balanced.
       - Stores/reads data under {root}/mitbih/.
-      - If local_only=True, will error if records are missing locally (no download).
     """
-    train = MITBIHRaw(root=root, records=list(train_records),
-                      win_samples=win_samples, local_only=local_only)
-    test  = MITBIHRaw(root=root, records=list(test_records),
-                      win_samples=win_samples, local_only=local_only)
+    rng = np.random.RandomState(seed)
+
+    # Use all standard DS1+DS2 records by default
+    if records is None:
+        records = sorted(set(_DS1 + _DS2))
+
+    # 1) Build full dataset
+    full = MITBIHRaw(root=root, records=list(records), win_samples=win_samples)
+
+    # 2) Two-class conversion (normal vs others) if requested
+    if two_class:
+        new_samples = []
+        for seg, y, info in full.samples:
+            # 0 = N (normal), 1 = others (S,V,F,Q)
+            new_y = 0 if y == _AAMI_TO_INT['N'] else 1
+            # Optionally keep original label info (not strictly necessary)
+            info = dict(info)
+            info["orig_aami_label"] = _AAMI_NAMES[y]
+            new_samples.append((seg, new_y, info))
+        full.samples = new_samples
+        full.class_names = ['N', 'O']  # normal vs others
+    else:
+        full.class_names = list(_AAMI_NAMES)
+
+    num_classes = len(full.class_names)
+
+    # 3) Prepare labels and per-class indices
+    labels = [int(y) for (_, y, _) in full.samples]
+    indices_by_class: Dict[int, List[int]] = {c: [] for c in range(num_classes)}
+    for idx, y in enumerate(labels):
+        if y in indices_by_class:
+            indices_by_class[y].append(idx)
+        else:
+            # In case some unexpected label sneaks in, put it into "others"
+            # but this should not normally happen.
+            last_cls = num_classes - 1
+            indices_by_class.setdefault(last_cls, []).append(idx)
+
+    # Shuffle indices within each class
+    for c in indices_by_class:
+        rng.shuffle(indices_by_class[c])
+
+    # 4) Optional subsampling with/without equal_per_class
+    if equal_per_class:
+        # Same number of samples per class overall
+        min_count = min(len(v) for v in indices_by_class.values() if len(v) > 0)
+        if max_samples is not None:
+            # Target per class from max_samples
+            target_per_class = max(1, max_samples // num_classes)
+            per_class = min(min_count, target_per_class)
+        else:
+            per_class = min_count
+
+        base_indices: List[int] = []
+        for c, idxs in indices_by_class.items():
+            take = min(per_class, len(idxs))
+            base_indices.extend(idxs[:take])
+    else:
+        # Use all samples, or a random subset of full dataset if max_samples is given
+        all_indices = list(range(len(full)))
+        rng.shuffle(all_indices)
+        if max_samples is not None:
+            base_indices = all_indices[:max_samples]
+        else:
+            base_indices = all_indices
+
+    # 5) Stratified train/test split from base_indices
+    per_class_base: Dict[int, List[int]] = {c: [] for c in range(num_classes)}
+    for idx in base_indices:
+        y = labels[idx]
+        if y not in per_class_base:
+            # again, safeguard
+            y = num_classes - 1
+        per_class_base[y].append(idx)
+
+    train_indices: List[int] = []
+    test_indices: List[int] = []
+
+    for c, idxs in per_class_base.items():
+        if not idxs:
+            continue
+        rng.shuffle(idxs)
+        n_c = len(idxs)
+        # number of test samples from this class
+        n_test_c = int(round(test_ratio * n_c))
+        # Ensure at least 1 test if possible and at least 1 train if class has >1 sample
+        if n_test_c <= 0 and n_c > 1:
+            n_test_c = 1
+        if n_test_c >= n_c and n_c > 1:
+            n_test_c = n_c - 1
+
+        test_indices.extend(idxs[:n_test_c])
+        train_indices.extend(idxs[n_test_c:])
+
+    # 6) Build Subset datasets
+    from torch.utils.data import Subset
+    train = Subset(full, train_indices)
+    test = Subset(full, test_indices)
 
     info = {
-        "true_train_total": len(train),
-        "true_test_total": len(test),
+        "total_samples": len(full),
+        "train_samples": len(train),
+        "test_samples": len(test),
         "sample_rate": 360,
         "window": win_samples,
-        "class_names": train.class_names
+        "class_names": list(full.class_names),
+        "two_class": two_class,
+        "equal_per_class": equal_per_class,
+        "test_ratio": test_ratio,
     }
 
-    if max_samples is not None:
-        from torch.utils.data import Subset
-        tr_labels = [int(train[i][1]) for i in range(len(train))]
-        te_labels = [int(test[i][1])  for i in range(len(test))]
-
-        tr_idx = stratified_indices_from_labels(tr_labels, max_samples,
-                                                seed=seed, min_per_class=min_per_class)
-        te_cap = max(1, min(max(max_samples // 4, 5*len(train.class_names)), len(test)))
-        te_idx = stratified_indices_from_labels(te_labels, te_cap,
-                                                seed=seed, min_per_class=max(5, min_per_class//2))
-
-        train = Subset(train, tr_idx)
-        test  = Subset(test,  te_idx)
-
-    return train, test, _AAMI_NAMES, info
+    return train, test, list(full.class_names), info
