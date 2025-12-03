@@ -17,11 +17,11 @@ except Exception:
 
 class SpeechCommandsRaw(Dataset):
     """
-    IO-only: returns waveform [T,1] at 16k, padded/truncated to max_seconds.
+    IO-only: returns waveform [T,1] at the original Speech Commands sampling rate
+    (16 kHz), padded/truncated to max_seconds.
     No log-mel, no z-score here.
 
     Optional class control:
-      - classes: explicit list of class names to keep (case-insensitive).
       - class_count: randomly choose this many classes (from all available).
     """
     def __init__(
@@ -30,13 +30,15 @@ class SpeechCommandsRaw(Dataset):
         root: str,
         max_seconds: float = 1.0,
         include_silence: bool = True,
-        classes: Optional[List[str]] = None,
         class_count: Optional[int] = None,
         class_seed: int = 0,
     ):
         assert _HAS_TA, "torchaudio is required for Speech Commands."
         self.ds = SPEECHCOMMANDS(root=root, download=True, subset=subset)
+
+        # Original SpeechCommands sampling rate is 16 kHz
         self.sample_rate = 16000
+
         self.max_len = int(max_seconds * self.sample_rate)
         self.include_silence = bool(include_silence)
 
@@ -60,18 +62,8 @@ class SpeechCommandsRaw(Dataset):
             labels.append("silence")
 
         # --------- Class subset selection ---------
-        # 1) Explicit list of classes (case-insensitive filter)
-        if classes is not None:
-            wanted = {c.lower() for c in classes}
-            labels = [l for l in labels if l.lower() in wanted]
-            if not labels:
-                raise ValueError(
-                    "No classes remain after applying 'classes' filter. "
-                    f"Requested: {classes}"
-                )
-
-        # 2) Or a random subset via class_count
-        elif class_count is not None and class_count > 0 and class_count < len(labels):
+        # Random subset via class_count
+        if class_count is not None and class_count > 0 and class_count < len(labels):
             rng = random.Random(class_seed)
             # sample from labels as they are (directory names), then sort for stability
             labels = sorted(rng.sample(labels, class_count))
@@ -101,10 +93,9 @@ class SpeechCommandsRaw(Dataset):
                     for nf in glob.glob(os.path.join(noise_dir, "*.wav")):
                         wav, nsr = torchaudio.load(nf)
                         wav = wav.mean(dim=0, keepdim=True)
+                        # Do NOT resample. Only keep if sampling rate matches.
                         if nsr != self.sample_rate:
-                            wav = torchaudio.functional.resample(
-                                wav, nsr, self.sample_rate
-                            )
+                            continue
                         self._silence_bank.append(wav.squeeze(0).clone())
                 if self._silence_bank:
                     # extend indices with -1 entries (each maps to a synthetic silence sample)
@@ -135,11 +126,10 @@ class SpeechCommandsRaw(Dataset):
             return x, y, info
 
         waveform, sr, label, *_ = self.ds[idx]
-        if sr != self.sample_rate:
-            waveform = torchaudio.functional.resample(waveform, sr, self.sample_rate)
+        # No resampling – assume SpeechCommands is already at 16 kHz.
         x = self._prepare(waveform)
         y = self.word_to_idx.get(label.lower(), 0)
-        info = {"id": idx, "length": x.shape[0], "sample_rate": self.sample_rate}
+        info = {"id": idx, "length": x.shape[0], "sample_rate": sr}
         return x, y, info
 
 
@@ -149,10 +139,8 @@ def build_sc_raw(
     include_silence: bool = False,
     *,
     seed: int = 123,
-    min_per_class: int = 6,
-    classes: Optional[List[str]] = None,
     class_count: Optional[int] = None,
-    class_seed: int = 0,
+    equal_per_class: bool = False,
 ) -> Tuple[Dataset, Dataset, List[str], dict]:
     """
     Returns:
@@ -160,37 +148,37 @@ def build_sc_raw(
       - test: official testing split
     Both are optionally subsampled STRATIFIED (not head-sliced) using only label lists.
 
-    Additional options:
-      - classes: explicit list of class names to keep (case-insensitive).
+    Options:
       - class_count: pick a random subset of that many classes.
+      - equal_per_class: if True, return train and test with the same number of
+        samples per class (balanced). When this is enabled, max_samples is ignored.
     """
     os.makedirs(root, exist_ok=True)
+    # Use 'seed' also as class_seed for reproducible class selection
     train = SpeechCommandsRaw(
         "training",
         root=root,
         include_silence=include_silence,
-        classes=classes,
         class_count=class_count,
-        class_seed=class_seed,
+        class_seed=seed,
     )
     valid = SpeechCommandsRaw(
         "validation",
         root=root,
         include_silence=include_silence,
-        classes=classes,
         class_count=class_count,
-        class_seed=class_seed,
+        class_seed=seed,
     )
     test = SpeechCommandsRaw(
         "testing",
         root=root,
         include_silence=include_silence,
-        classes=classes,
         class_count=class_count,
-        class_seed=class_seed,
+        class_seed=seed,
     )
 
     from torch.utils.data import ConcatDataset, Subset
+    from collections import defaultdict
 
     full_train = ConcatDataset([train, valid])
 
@@ -199,6 +187,53 @@ def build_sc_raw(
         "true_test_total": len(test),
     }
 
+    # ------- FAST label derivation without loading audio -------
+    def _labels_sc_split(ds: SpeechCommandsRaw) -> List[int]:
+        word_to_idx = ds.word_to_idx
+        silence_idx = word_to_idx.get("silence", None)
+        out: List[int] = []
+        for idx in ds._indices:
+            if idx == -1:
+                # synthetic silence sample
+                if silence_idx is not None:
+                    out.append(int(silence_idx))
+            else:
+                label = ds._file_labels[idx]
+                out.append(int(word_to_idx[label]))
+        return out
+
+    # labels for ConcatDataset([train, valid]) == concatenate lists
+    tr_labels = _labels_sc_split(train) + _labels_sc_split(valid)
+    te_labels = _labels_sc_split(test)
+
+    # ---------- Equal-per-class balancing (ignores max_samples) ----------
+    if equal_per_class:
+        def _balanced_indices(labels: List[int], seed: int) -> List[int]:
+            rng = random.Random(seed)
+            per_class = defaultdict(list)
+            for i, y in enumerate(labels):
+                per_class[y].append(i)
+            # Same number of samples per class
+            n_per_class = min(len(v) for v in per_class.values())
+            idxs: List[int] = []
+            for _, inds in per_class.items():
+                rng.shuffle(inds)
+                idxs.extend(inds[:n_per_class])
+            idxs.sort()
+            return idxs
+
+        tr_idx = _balanced_indices(tr_labels, seed)
+        te_idx = _balanced_indices(te_labels, seed + 1)
+
+        full_train = Subset(full_train, tr_idx)
+        test = Subset(test, te_idx)
+
+        info["balanced_train_per_class"] = len(tr_idx) // len(train.class_names)
+        info["balanced_test_per_class"] = len(te_idx) // len(train.class_names)
+
+        return full_train, test, train.class_names, info
+
+    # ---------- Stratified subsampling with max_samples ----------
     if max_samples is not None:
         max_tr = max(1, min(max_samples, len(full_train)))
         # keep test smaller but ensure at least a few per class (handles silence too)
@@ -210,34 +245,18 @@ def build_sc_raw(
             ),
         )
 
-        # ------- FAST label derivation without loading audio -------
-        # Use the dataset's own indices and cached labels to map to class ids.
-        def _labels_sc_split(ds: SpeechCommandsRaw) -> List[int]:
-            word_to_idx = ds.word_to_idx
-            silence_idx = word_to_idx.get("silence", None)
-            out: List[int] = []
-            for idx in ds._indices:
-                if idx == -1:
-                    # synthetic silence sample
-                    if silence_idx is not None:
-                        out.append(int(silence_idx))
-                else:
-                    label = ds._file_labels[idx]
-                    out.append(int(word_to_idx[label]))
-            return out
-
-        # labels for ConcatDataset([train, valid]) == concatenate lists
-        tr_labels = _labels_sc_split(train) + _labels_sc_split(valid)
-        te_labels = _labels_sc_split(test)
+        # Use a fixed internal min_per_class (no user-facing arg any more)
+        internal_min_per_class_train = 6
+        internal_min_per_class_test = 3
 
         tr_idx = stratified_indices_from_labels(
-            tr_labels, max_tr, seed=seed, min_per_class=min_per_class
+            tr_labels, max_tr, seed=seed, min_per_class=internal_min_per_class_train
         )
         te_idx = stratified_indices_from_labels(
             te_labels,
             max_te,
             seed=seed,
-            min_per_class=max(3, min_per_class // 2),
+            min_per_class=internal_min_per_class_test,
         )
 
         full_train = Subset(full_train, tr_idx)

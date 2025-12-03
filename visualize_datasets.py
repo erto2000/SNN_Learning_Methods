@@ -94,11 +94,17 @@ VIS = [
     #      DATASET="mnist", SPLITS=["train","test"], DATA_ROOT="./data",
     #      MAX_SAMPLES=2000, TRANSFORM=MNIST_RATE_PIPELINE, NOTES="MNIST rate-coded spikes", SEED=SEED),
     #
-    # # ── Speech Commands
-    # dict(ID="sc-post-mels64",
-    #      DATASET="speech_commands", SPLITS=["train","test"], DATA_ROOT="./data",
-    #      MAX_SAMPLES=4000, TRANSFORM=SC_PIPELINE, NOTES="Speech Commands log-mel + ZScore", SEED=SEED),
-    #
+    # ── Speech Commands
+    # dict(ID="sc",
+    #      DATASET="speech_commands",
+    #      SPLITS=["train","test"],
+    #      DATA_ROOT="./data",
+    #      MAX_SAMPLES=2000,
+    #      TRANSFORM=SC_PIPELINE,
+    #      DATASET_KW={"class_count":10, "equal_per_class":True},
+    #      NOTES="Speech Commands log-mel + ZScore",
+    #      SEED=SEED),
+
     # # ── ESC-50 (environmental audio)
     # dict(ID="esc50",
     #      DATASET="esc50", SPLITS=["train","test"], DATA_ROOT="./data",

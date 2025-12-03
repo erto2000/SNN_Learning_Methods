@@ -168,6 +168,7 @@ RUNS = [
         #     "TRANSFORM": SC_PIPELINE,
         #     "DATASET_KW": {
         #         "class_count": 10,
+        #         "equal_per_class":True,
         #     },
         # },
         #
