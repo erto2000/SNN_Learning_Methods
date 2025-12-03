@@ -166,19 +166,33 @@ class PepitaLearner(BaseLearner):
         h_mod_seq = sp["h_seq"]      # list of [T,B,H_l]
 
         # ----- Layer 0 update -----
-        diff0 = h_seq[0] - h_mod_seq[0]             # [T,B,H0]
-        x_mod_T = X_mod.permute(1, 0, 2)            # [T,B,D]
-        mult0 = diff0.unsqueeze(3) * x_mod_T.unsqueeze(2)  # [T,B,H0,D]
-        dW0 = -mult0.sum(dim=(0, 1)) / max(1, B * T)       # [H0,D]
+        diff0 = h_seq[0] - h_mod_seq[0]  # [T,B,H0]
+        x_mod_T = X_mod.permute(1, 0, 2)  # [T,B,D0]
+
+        T_, B_, H0 = diff0.shape
+        D0 = x_mod_T.shape[-1]
+
+        # Flatten time & batch, then use matmul
+        diff0_2d = diff0.reshape(T_ * B_, H0)  # [TB, H0]
+        x_mod_2d = x_mod_T.reshape(T_ * B_, D0)  # [TB, D0]
+
+        dW0 = -(diff0_2d.t() @ x_mod_2d) / max(1, B_ * T_)  # [H0, D0]
 
         self._apply_update(self.model.fcs[0].weight.data, dW0)
 
         # ----- Deeper layers -----
         for l in range(1, L):
-            pre = h_mod_seq[l - 1]                  # [T,B,H_{l-1}]
-            diff = h_seq[l] - h_mod_seq[l]          # [T,B,H_l]
-            mult = diff.unsqueeze(3) * pre.unsqueeze(2)     # [T,B,H_l,H_{l-1}]
-            dWl = -mult.sum(dim=(0, 1)) / max(1, B * T)     # [H_l,H_{l-1}]
+            pre = h_mod_seq[l - 1]  # [T,B,H_{l-1}]
+            diff = h_seq[l] - h_mod_seq[l]  # [T,B,H_l]
+
+            T_, B_, H_l = diff.shape
+            H_prev = pre.shape[-1]
+
+            diff_2d = diff.reshape(T_ * B_, H_l)  # [TB,H_l]
+            pre_2d = pre.reshape(T_ * B_, H_prev)  # [TB,H_{l-1}]
+
+            dWl = -(diff_2d.t() @ pre_2d) / max(1, B_ * T_)  # [H_l, H_{l-1}]
+
             self._apply_update(self.model.fcs[l].weight.data, dWl)
 
         # ----- Readout layer update -----

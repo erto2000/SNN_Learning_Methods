@@ -131,6 +131,30 @@ RUNS = [
         #     "TRANSFORM": HAR_PIPELINE,
         # },
         #
+        # # ── MNIST (static repeated frames) ───────────────────────────────────────
+        # {
+        #     **DEFAULT,
+        #     "RUN_ID": "mnist-static-bp",
+        #     "DATASET": "mnist",
+        #     "LEARNER": "bp",
+        #     "EPOCHS": 10,
+        #     "BATCH_SIZE": 128,
+        #     "HIDDEN_SIZES": [128],
+        #     "TRANSFORM": MNIST_STATIC_PIPELINE,
+        # },
+        #
+        # # ── MNIST (rate-coded spikes)  ────────────────────────────────
+        # {
+        #     **DEFAULT,
+        #     "RUN_ID": "mnist-rate-bp",
+        #     "DATASET": "mnist",
+        #     "LEARNER": "bp",
+        #     "EPOCHS": 10,
+        #     "BATCH_SIZE": 128,
+        #     "HIDDEN_SIZES": [128],
+        #     "TRANSFORM": MNIST_RATE_PIPELINE,
+        # },
+        #
         # # ── Speech Commands ────────────────────────────────────────
         # {
         #     **DEFAULT,
