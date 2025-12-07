@@ -8,11 +8,42 @@ from snntorch import surrogate
 from .specs import NetConfig, LayerSpec
 
 def _resolve_surrogate(name: str, slope: float):
-    return {
+
+    table = {
+        # Common surrogates
         "fast_sigmoid": surrogate.fast_sigmoid(slope),
-        "atan": surrogate.atan(),
         "sigmoid": surrogate.sigmoid(),
-    }.get(name, surrogate.fast_sigmoid(slope))
+        "atan": surrogate.atan(),
+        "triangular": surrogate.triangular(),
+
+        # STE variants
+        "ste": surrogate.straight_through_estimator(),
+        "straight_through_estimator": surrogate.straight_through_estimator(),
+
+        # Spike rate / escape noise
+        "spike_rate_escape": surrogate.spike_rate_escape(),
+        "SpikeRateEscape": surrogate.SpikeRateEscape(),
+
+        # Sparse options
+        "sparse_fast_sigmoid": surrogate.SparseFastSigmoid(slope),
+        "SparseFastSigmoid": surrogate.SparseFastSigmoid(slope),
+
+        # Operators
+        "lso": surrogate.LSO(),
+        "LSO": surrogate.LSO(),
+        "sso": surrogate.SSO(),
+        "SSO": surrogate.SSO(),
+        "sfs": surrogate.SFS(),
+        "SFS": surrogate.SFS(),
+        "leaky_spike_operator": surrogate.LeakySpikeOperator(),
+        "LeakySpikeOperator": surrogate.LeakySpikeOperator(),
+
+        # Stochastic
+        "stochastic": surrogate.StochasticSpikeOperator(),
+        "StochasticSpikeOperator": surrogate.StochasticSpikeOperator(),
+    }
+
+    return table.get(name.lower(), surrogate.fast_sigmoid(slope))
 
 class SNNState:
     def __init__(self, mems: List[torch.Tensor], spikes: List[Optional[torch.Tensor]]):
@@ -77,6 +108,14 @@ class SNNCore(nn.Module):
                     init.xavier_normal_(m.weight)
                 elif cfg.init == "normal":
                     init.normal_(m.weight, mean=0.0, std=0.02)
+                elif cfg.init == "uniform":
+                    init.uniform_(m.weight, a=-0.1, b=0.1)
+                elif cfg.init == "constant":
+                    init.constant_(m.weight, 0.01)
+                elif cfg.init == "orthogonal":
+                    init.orthogonal_(m.weight, gain=1.0)
+                elif cfg.init == "sparse":
+                    init.sparse_(m.weight, sparsity=0.1, std=0.01)
                 else:
                     raise ValueError(f"Unknown init: {cfg.init}")
                 if m.bias is not None:
