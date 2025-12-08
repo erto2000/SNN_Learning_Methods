@@ -76,7 +76,7 @@ class SNNCore(nn.Module):
                 self.norms.append(nn.BatchNorm1d(ls.dim_out, affine=True))
             else:
                 self.norms.append(nn.Identity())
-            self.lifs.append(snn.Leaky(beta=cfg.beta, spike_grad=sg))
+            self.lifs.append(snn.Leaky(beta=cfg.beta, spike_grad=sg, threshold=cfg.threshold))
 
             # Recurrence tensor (manual updates by learners if they choose)
             self.Wrec_flags.append(ls.recurrent)
@@ -89,7 +89,7 @@ class SNNCore(nn.Module):
             self.head_lif = None
         elif cfg.head == "lif":
             self.head = nn.Linear(last_dim, n_classes, bias=False)
-            self.head_lif = snn.Leaky(beta=cfg.beta, spike_grad=sg)
+            self.head_lif = snn.Leaky(beta=cfg.beta, spike_grad=sg, threshold=cfg.threshold)
         else:
             self.head = None
             self.head_lif = None

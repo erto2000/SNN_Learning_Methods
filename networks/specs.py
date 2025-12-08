@@ -17,7 +17,7 @@ class NetConfig:
     layers: List[LayerSpec]
     beta: float = 0.9
     spike_grad: str = "fast_sigmoid"
-    slope: float = 25.0        # used by learners when they need surrogate dσ/dx
-    threshold: float = 1.0     # used by lerners (e.g., E-Prop) for u = pre - v_tha
+    slope: float = 25.0
+    threshold: float = 1.0
     head: Optional[HeadType] = "logits"  # "logits" | "lif" | None
     init: str = "default"
