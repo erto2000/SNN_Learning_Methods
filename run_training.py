@@ -103,9 +103,9 @@ DEFAULT = dict(
     FF_LR            = 2e-3,
 
     # E-Prop
-    EP_LR_IN         = 6e-4,
-    EP_LR_REC        = 6e-4,
-    EP_LR_OUT        = 1e-3,
+    EP_LR_IN         = 1e-3,
+    EP_LR_REC        = 1e-3,
+    EP_LR_OUT        = 2e-3,
     EP_DROP_DIAG     = True,
     EP_WEIGHT_CLIP   = 1.5,
 
