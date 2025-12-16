@@ -232,31 +232,56 @@ def save_examples_voxel_slices(sub: Subset, class_names: List[str], path: str, H
     fig, axes = plt.subplots(rows, cols, figsize=(12, 7), dpi=140)
     axes = axes.flatten()
     i = 0
-    for x, y, info in _iter_subset(sub, max_items=rows*cols):
+    """
+    For DVS-Gesture after EventToVoxel(+optional SlidingWindow):
+    input can be [T, H*W*(1 or 2)] or [S, T, H*W*(1 or 2)].
+    Renders a single time slice (sum over polarity).
+    """
+    rows, cols = 3, 4
+    fig, axes = plt.subplots(rows, cols, figsize=(12, 7), dpi=140)
+    axes = axes.flatten()
+    i = 0
+
+    for x, y, info in _iter_subset(sub, max_items=rows * cols):
         ax = axes[i]; i += 1
 
-        if x.dim() == 3:         # [S, T, D] -> use first segment
+        # unwrap segments if present
+        if x.dim() == 3:        # [S, T, D]
             x2 = x[0]
-        elif x.dim() == 2:       # [T, D]
+        elif x.dim() == 2:      # [T, D]
             x2 = x
         else:
-            ax.axis("off"); continue
+            ax.axis("off")
+            continue
+
+        # --- FIX: get H/W from info if available ---
+        H_ = int(info.get("H", H if H is not None else 128))
+        W_ = int(info.get("W", W if W is not None else 128))
 
         T, D = x2.shape
-        C = max(1, D // (H * W))
-        if H * W * C != D:
-            # shape mismatch, skip safely
-            ax.axis("off"); continue
+        C = max(1, D // (H_ * W_))
 
-        X = x2.cpu().numpy().reshape(T, H, W, C)
-        img = X.mean(axis=-1)  # collapse polarity if present -> [T,H,W]
+        if H_ * W_ * C != D:
+            ax.axis("off")
+            continue
+
+        X = x2.cpu().numpy().reshape(T, H_, W_, C)
+
+        # collapse polarity/channel
+        img = X.sum(axis=-1)   # [T, H, W]
+
         t_idx = min(T // 2, T - 1)
-        ax.imshow(img[t_idx], cmap="magma", origin="lower", aspect="auto")
+        ax.imshow(img[t_idx], cmap="magma", origin="lower")
         ax.set_title(f"{class_names[y]} | t={t_idx}/{T}", fontsize=8)
         ax.axis("off")
 
-    for k in range(i, len(axes)): axes[k].axis("off")
-    fig.tight_layout(); fig.savefig(path); plt.close(fig); return path
+    for k in range(i, len(axes)):
+        axes[k].axis("off")
+
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return path
 
 
 def save_examples_dvs_events_raw(sub: Subset, class_names: List[str], path: str, max_points: int = 20_000) -> str:
