@@ -3,17 +3,19 @@ import torch.nn as nn
 import torch.optim as optim
 from .base import BaseLearner
 from networks.snn_core import SNNCore
+from utils.time_gating import make_time_weights
 
 class BackpropLearner(BaseLearner):
     """
     Standard backprop with a time-aggregated readout.
     Aggregation over time: 'mean' | 'sum' | 'last' (default: 'mean').
     """
-    def __init__(self, net_cfg, meta, device, agg: str = "mean", lr: float = 1e-3):
+    def __init__(self, net_cfg, meta, device, agg: str = "mean", lr: float = 1e-3, time_gating: dict = None):
         super().__init__(net_cfg, meta, device)
         self.agg = agg
         self.loss = nn.CrossEntropyLoss()
         self.opt = optim.Adam(self.model.parameters(), lr=lr)
+        self.time_gating = time_gating or {"enabled": False}
 
     def _build_model(self):
         return SNNCore(self.cfg, self.meta["n_classes"])
@@ -26,18 +28,46 @@ class BackpropLearner(BaseLearner):
         raise ValueError(f"Unknown agg: {self.agg}")
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
-        # X: [B,T,D] -> logits: [B,K]
         B, T, _ = X.shape
         X = X.to(self.device)
         state, head_mem = self.model.init_state(B, X.device, X.dtype)
+
         outs = []
         for t in range(T):
             _, head_out, state, head_mem, _, _ = self.model.forward_step(X[:, t, :], state, head_mem)
-            outs.append(head_out)                  # [B,K]
-        seq_TBK = torch.stack(outs, dim=0)        # [T,B,K]
-        seq_BTK = seq_TBK.permute(1, 0, 2).contiguous()
-        logits  = self._aggregate(seq_BTK)        # [B,K]
-        assert logits.shape == (B, self.meta["n_classes"])
+            outs.append(head_out)  # [B,K]
+
+        seq_TBK = torch.stack(outs, dim=0)  # [T,B,K]
+        seq_BTK = seq_TBK.permute(1, 0, 2)  # [B,T,K]
+
+        # --- time gating here ---
+        if self.time_gating.get("enabled", False):
+            w = make_time_weights(
+                T,
+                device=seq_BTK.device,
+                dtype=seq_BTK.dtype,
+                start_u=self.time_gating.get("start_u", 0.5),
+                mode=self.time_gating.get("mode", "hard"),
+                ramp_u=self.time_gating.get("ramp_u", 0.0),
+                sharpness=self.time_gating.get("sharpness", 20.0),
+            )  # [T]
+            w = w.view(1, T, 1)  # broadcast to [B,T,K]
+
+            if self.agg in ("mean", "sum"):
+                weighted = seq_BTK * w
+                if self.agg == "sum":
+                    logits = weighted.sum(dim=1)
+                else:
+                    denom = w.sum(dim=1).clamp_min(1e-8)
+                    logits = weighted.sum(dim=1) / denom
+            elif self.agg == "last":
+                # last doesn't really need gating; but you could choose last after start
+                logits = seq_BTK[:, -1, :]
+            else:
+                raise ValueError(f"Unknown agg: {self.agg}")
+        else:
+            logits = self._aggregate(seq_BTK)
+
         return logits
 
     def train_step(self, X: torch.Tensor, y: torch.Tensor) -> dict:

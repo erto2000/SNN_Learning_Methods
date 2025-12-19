@@ -51,21 +51,41 @@ def _make_learner(cfg, meta, device, g: Dict[str, Any]):
     if LearnerCls is None:
         raise ValueError(f"Unknown learner: {name}")
 
+    tg = dict(
+        enabled=g.get("TIME_GATING_ENABLED", False),
+        start_u=g.get("TIME_GATING_START_U", 0.5),
+        mode=g.get("TIME_GATING_MODE", "hard"),
+        ramp_u=g.get("TIME_GATING_RAMP_U", 0.0),
+        sharpness=g.get("TIME_GATING_SHARP", 20.0),
+    )
+
     if name == "bp":
-        return LearnerCls(cfg, meta, device, agg=g["BP_AGG"], lr=g["BP_LR"])
+        return LearnerCls(cfg, meta, device, agg=g["BP_AGG"], lr=g["BP_LR"], time_gating=tg)
+
     if name == "ff":
-        return LearnerCls(cfg, meta, device, alpha=g["FF_ALPHA"], lr=g["FF_LR"], total_epochs=g["EPOCHS"])
+        return LearnerCls(
+            cfg, meta, device,
+            alpha=g["FF_ALPHA"], lr=g["FF_LR"], total_epochs=g["EPOCHS"],
+            time_gating=tg
+        )
+
     if name == "eprop":
         return LearnerCls(
             cfg, meta, device,
             lr_in=g["EP_LR_IN"], lr_rec=g["EP_LR_REC"], lr_out=g["EP_LR_OUT"],
             drop_diag=g["EP_DROP_DIAG"], weight_clip=g["EP_WEIGHT_CLIP"],
+            time_gating=tg
         )
-    if name == "pepita":
-        return LearnerCls(cfg, meta, device, mode=g["PEP_MODE"], lr=g["PEP_LR"], max_rel_step=g["PEP_MAX_REL_STEP"],
-                          target_modulation_ratio=g["PEP_MOD_RATIO"])
-    raise ValueError(f"Unhandled learner: {name}")
 
+    if name == "pepita":
+        return LearnerCls(
+            cfg, meta, device,
+            mode=g["PEP_MODE"], lr=g["PEP_LR"], max_rel_step=g["PEP_MAX_REL_STEP"],
+            target_modulation_ratio=g["PEP_MOD_RATIO"],
+            time_gating=tg
+        )
+
+    raise ValueError(f"Unhandled learner: {name}")
 
 def _print_header(run_id: str, g: Dict[str, Any], meta: Dict[str, Any]) -> None:
     print(f"\n=== Run: {run_id} ===")

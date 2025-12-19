@@ -94,6 +94,13 @@ DEFAULT = dict(
     INIT_TYPE        = "default",
     NORM             = None,
 
+    # Time gating
+    TIME_GATING_ENABLED = False,
+    TIME_GATING_START_U = 0.5,          # normalized 0..1
+    TIME_GATING_MODE    = "hard",       # hard|linear|sigmoid|cosine
+    TIME_GATING_RAMP_U  = 0.0,
+    TIME_GATING_SHARP   = 20.0,
+
     # Backprop
     BP_AGG           = "mean",
     BP_LR            = 2e-3,
@@ -172,27 +179,136 @@ RUNS = [
         #     },
         # },
         #
-        # # ── ESC-50 (environmental audio) ─────────────────────────────────────────
-        # {
-        #     **DEFAULT,
-        #     "RUN_ID": "esc50-bp",
-        #     "DATASET": "esc50",
-        #     "LEARNER": "bp",
-        #     "EPOCHS": 10,
-        #     "BATCH_SIZE": 128,
-        #     "HIDDEN_SIZES": [512],
-        #     "TRANSFORM": ESC50_PIPELINE,
-        #     "DATASET_KW": {
-        #         "class_count": 10,
-        #         "equal_per_class": True,
-        #         "duration": 1
-        #     },
-        # },
+        # ── ESC-50 (environmental audio) ─────────────────────────────────────────
+        {
+            **DEFAULT,
+            "RUN_ID": "esc50-bp",
+            "DATASET": "esc50",
+            "LEARNER": "bp",
+            "EPOCHS": 10,
+            "BATCH_SIZE": 128,
+            "HIDDEN_SIZES": [512],
+            "TRANSFORM": ESC50_PIPELINE,
+            "DATASET_KW": {
+                "class_count": 10,
+                "equal_per_class": True,
+                "duration": 1
+            },
+        },
+        {
+            **DEFAULT,
+            "RUN_ID": "esc50-bp-timegate",
+            "DATASET": "esc50",
+            "LEARNER": "bp",
+            "EPOCHS": 10,
+            "BATCH_SIZE": 128,
+            "HIDDEN_SIZES": [512],
+            "TRANSFORM": ESC50_PIPELINE,
+            "DATASET_KW": {
+                "class_count": 10,
+                "equal_per_class": True,
+                "duration": 1
+            },
+            "TIME_GATING_ENABLED": True,
+        },
+        {
+            **DEFAULT,
+            "RUN_ID": "esc50-eprop",
+            "DATASET": "esc50",
+            "LEARNER": "eprop",
+            "EPOCHS": 10,
+            "BATCH_SIZE": 128,
+            "HIDDEN_SIZES": [512],
+            "TRANSFORM": ESC50_PIPELINE,
+            "DATASET_KW": {
+                "class_count": 10,
+                "equal_per_class": True,
+                "duration": 1
+            },
+        },
+        {
+            **DEFAULT,
+            "RUN_ID": "esc50-eprop-timegate",
+            "DATASET": "esc50",
+            "LEARNER": "eprop",
+            "EPOCHS": 10,
+            "BATCH_SIZE": 128,
+            "HIDDEN_SIZES": [512],
+            "TRANSFORM": ESC50_PIPELINE,
+            "DATASET_KW": {
+                "class_count": 10,
+                "equal_per_class": True,
+                "duration": 1
+            },
+            "TIME_GATING_ENABLED": True,
+        },
+        {
+            **DEFAULT,
+            "RUN_ID": "esc50-ff",
+            "DATASET": "esc50",
+            "LEARNER": "ff",
+            "EPOCHS": 10,
+            "BATCH_SIZE": 128,
+            "HIDDEN_SIZES": [512],
+            "TRANSFORM": ESC50_PIPELINE,
+            "DATASET_KW": {
+                "class_count": 10,
+                "equal_per_class": True,
+                "duration": 1
+            },
+        },
+        {
+            **DEFAULT,
+            "RUN_ID": "esc50-ff-timegate",
+            "DATASET": "esc50",
+            "LEARNER": "ff",
+            "EPOCHS": 10,
+            "BATCH_SIZE": 128,
+            "HIDDEN_SIZES": [512],
+            "TRANSFORM": ESC50_PIPELINE,
+            "DATASET_KW": {
+                "class_count": 10,
+                "equal_per_class": True,
+                "duration": 1
+            },
+            "TIME_GATING_ENABLED": True,
+        },
+        {
+            **DEFAULT,
+            "RUN_ID": "esc50-pepita",
+            "DATASET": "esc50",
+            "LEARNER": "pepita",
+            "EPOCHS": 10,
+            "BATCH_SIZE": 128,
+            "HIDDEN_SIZES": [512],
+            "TRANSFORM": ESC50_PIPELINE,
+            "DATASET_KW": {
+                "class_count": 10,
+                "equal_per_class": True,
+                "duration": 1
+            },
+        },
+        {
+            **DEFAULT,
+            "RUN_ID": "esc50-pepita-timegate",
+            "DATASET": "esc50",
+            "LEARNER": "pepita",
+            "EPOCHS": 10,
+            "BATCH_SIZE": 128,
+            "HIDDEN_SIZES": [512],
+            "TRANSFORM": ESC50_PIPELINE,
+            "DATASET_KW": {
+                "class_count": 10,
+                "equal_per_class": True,
+                "duration": 1
+            },
+            "TIME_GATING_ENABLED": True,
+        },
         #
         # # ── UrbanSound8K (urban audio) ───────────────────────────────────────────
         # {
         #     **DEFAULT,
-        #     "RUN_ID": "urban8k-bp",
+        #     "RUN_ID": "urban8k-bp-timegate",
         #     "DATASET": "urban8k",
         #     "LEARNER": "bp",
         #     "EPOCHS": 10,
@@ -201,7 +317,10 @@ RUNS = [
         #     "TRANSFORM": URBAN8K_PIPELINE,
         #     "DATASET_KW": {
         #         "equal_per_class": True,
-        #     }
+        #     },
+        #     "TIME_GATING_ENABLED": True,
+        #     "TIME_GATING_START_U": 0.2,
+        #     "TIME_GATING_MODE": "linear",
         # },
         #
         # # ── PAMAP2 (physical activity) ────────────────────────────────────
