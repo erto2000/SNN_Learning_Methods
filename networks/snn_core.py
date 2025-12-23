@@ -74,6 +74,8 @@ class SNNCore(nn.Module):
                 self.norms.append(nn.LayerNorm(ls.dim_out))
             elif ls.norm == "batchnorm":
                 self.norms.append(nn.BatchNorm1d(ls.dim_out, affine=True))
+            elif ls.norm == "rmsnorm":
+                self.norms.append(nn.RMSNorm(ls.dim_out))
             else:
                 self.norms.append(nn.Identity())
             self.lifs.append(snn.Leaky(beta=cfg.beta, spike_grad=sg, threshold=cfg.threshold))
