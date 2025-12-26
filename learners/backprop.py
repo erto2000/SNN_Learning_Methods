@@ -53,8 +53,7 @@ class BackpropLearner(BaseLearner):
 
     def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
         """
-        Approx: store membrane states for all hidden layers across time
-        + head outputs per time step.
+        Approx: store membrane states for all hidden layers across time.
         """
         Hs = [fc.out_features for fc in self.model.fcs]
         total_hidden = sum(Hs)
@@ -62,7 +61,4 @@ class BackpropLearner(BaseLearner):
         # mem for hidden layers over time
         mem_hidden = batch * time_steps * total_hidden
 
-        # head outputs at each step (logits)
-        mem_head = batch * time_steps * self.meta["n_classes"]
-
-        return (mem_hidden + mem_head) * fp_bytes
+        return mem_hidden * fp_bytes

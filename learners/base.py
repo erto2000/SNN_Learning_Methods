@@ -33,24 +33,37 @@ class BaseLearner(ABC):
     # --------- memory estimates ---------
     def get_static_memory_bytes(self, fp_bytes: int = 4) -> int:
         """
-        Theoretical static memory for network parameters (and, if overridden, algorithm
-        state). Excludes recurrent weights for layers where recurrence is disabled.
+        Theoretical static memory for network
         """
-        param_count = 0
+        # ----- read dims from the actual network -----
+        fcs = getattr(self.model, "fcs", None)
+        if fcs is None or len(fcs) == 0:
+            return 0
 
-        # figure out which recurrent weight tensors to exclude
-        exclude_ids = set()
-        if hasattr(self.model, "Wrecs") and hasattr(self.model, "Wrec_flags"):
-            for flag, W in zip(self.model.Wrec_flags, self.model.Wrecs):
-                if not flag:
-                    exclude_ids.add(id(W))
+        # layer widths
+        d0 = fcs[0].in_features
+        d = [fc.out_features for fc in fcs]  # [d1..dL]
+        L = len(d)
 
-        for p in self.model.parameters():
-            if id(p) in exclude_ids:
-                continue
-            param_count += p.numel()
+        # recurrence flags
+        r_flags = getattr(self.model, "Wrec_flags", [False] * L)
+        r_flags = list(r_flags)
 
-        return param_count * fp_bytes
+        # number of classes C (prefer meta, fall back to model.n_classes)
+        C = int(self.meta.get("n_classes", getattr(self.model, "n_classes", 0)))
+
+        # ----- theoretical param counts -----
+        # feedforward weights: sum d_l d_{l-1}
+        Nf = d[0] * d0 + sum(d[l] * d[l - 1] for l in range(1, L))
+
+        # recurrent weights: sum r_l d_l^2
+        Nr = sum((d[l] * d[l]) for l in range(L) if r_flags[l])
+
+        # output head weights: C d_L if head exists
+        Nout = C * d[-1] if getattr(self.model, "head", None) is not None else 0
+
+        Nstatic = Nf + Nr + Nout
+        return Nstatic * fp_bytes
 
     def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
         """
