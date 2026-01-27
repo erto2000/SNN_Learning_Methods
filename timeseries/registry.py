@@ -54,12 +54,13 @@ def get_dataloaders(dataset: str,
                     transform: Optional[Transform] = None,
                     num_workers: int = 4,
                     pin_memory: bool | None = None,
+                    seed: Optional[int] = None,
                     **kwargs):
     name = dataset.lower()
     if name not in _REGISTRY:
         raise ValueError(f"Unknown dataset: {dataset!r}. Registered: {list(_REGISTRY)}")
 
-    train_ds, test_ds, class_names, info = _REGISTRY[name](root=root, max_samples=max_samples, **kwargs)
+    train_ds, test_ds, class_names, info = _REGISTRY[name](root=root, max_samples=max_samples, seed=seed, **kwargs)
 
     if transform is not None:
         _maybe_fit_pipeline(train_ds, transform)

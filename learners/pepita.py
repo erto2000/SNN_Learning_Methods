@@ -50,7 +50,7 @@ class PepitaLearner(BaseLearner):
 
         # Initialize F with approximately orthogonal rows/cols.
         F_mat = torch.empty(K, D0, device=device)
-        nn.init.orthogonal_(F_mat)
+        nn.init.uniform_(F_mat, a=-1.0, b=1.0)
         self.F = F_mat  # kept as a plain tensor; updated only via calibration
 
         # Will be set after first batch using real (X, e)

@@ -36,6 +36,8 @@ class SpeechCommandsRaw(Dataset):
         assert _HAS_TA, "torchaudio is required for Speech Commands."
         self.ds = SPEECHCOMMANDS(root=root, download=True, subset=subset)
 
+        self._rng = random.Random(class_seed)
+
         # Original SpeechCommands sampling rate is 16 kHz
         self.sample_rate = 16000
 
@@ -119,7 +121,7 @@ class SpeechCommandsRaw(Dataset):
     def __getitem__(self, i):
         idx = self._indices[i]
         if idx == -1 and self._silence_bank:
-            wav = random.choice(self._silence_bank)
+            wav = self._rng.choice(self._silence_bank)
             x = self._prepare(wav)
             y = self.word_to_idx["silence"]
             info = {"id": i, "length": x.shape[0], "sample_rate": self.sample_rate}

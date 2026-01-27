@@ -138,6 +138,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                     transform=transform,
                     num_workers=g.get("NUM_WORKERS"),
                     pin_memory=g.get("PIN_MEMORY"),
+                    seed=g["SEED"],
                     **g.get("DATASET_KW", {}),
                 )
 
