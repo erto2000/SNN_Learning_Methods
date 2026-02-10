@@ -282,3 +282,174 @@ class DownsampleEvents(Transform):
 
         info = {**info, "events": ev, "H": new_H, "W": new_W}
         return x, y, info
+
+
+class AdaptiveSlidingWindow(Transform):
+    """
+    GLOBAL adaptive windowing based on autocorrelation.
+
+    fit(): estimates ONE global L/hop from training data (prints once, optional plot)
+    __call__(): uses fixed L/hop for all samples
+
+    Output: [S, L, D]
+    """
+
+    def __init__(
+        self,
+        L_min: int = 10,
+        L_max: int = 1000,
+        hop_ratio: float = 0.5,
+        summary: str = "energy",          # "energy" | "absmean" | "mean"
+        downsample_to: int = 1024,
+        plot_examples: bool = True,
+        fit_samples: int = 256,           # how many train samples to estimate global params
+        eps: float = 1e-8,
+    ):
+        self.L_min = int(L_min)
+        self.L_max = int(L_max)
+        self.hop_ratio = float(hop_ratio)
+        self.summary = str(summary)
+        self.downsample_to = int(downsample_to) if downsample_to is not None else None
+        self.plot_examples = bool(plot_examples)
+        self.fit_samples = int(fit_samples)
+        self.eps = float(eps)
+
+        self.L_global: int | None = None
+        self.hop_global: int | None = None
+
+        assert self.L_min > 0 and self.L_max >= self.L_min
+        assert 0.0 < self.hop_ratio <= 1.0
+        assert self.summary in ("energy", "absmean", "mean")
+
+    # Compose.fit() will call this
+    def needs_fit(self) -> bool:
+        return True
+
+    # ---------------- helpers ----------------
+    def _summary_signal(self, x: torch.Tensor) -> torch.Tensor:
+        if self.summary == "energy":
+            return (x * x).mean(dim=1)
+        if self.summary == "absmean":
+            return x.abs().mean(dim=1)
+        return x.mean(dim=1)
+
+    def _downsample(self, s: torch.Tensor) -> torch.Tensor:
+        if self.downsample_to is None:
+            return s
+        if s.numel() <= self.downsample_to:
+            return s
+        stride = max(1, s.numel() // self.downsample_to)
+        return s[::stride]
+
+    def _acf(self, s: torch.Tensor) -> torch.Tensor:
+        # normalized autocorrelation, r[0]=1
+        s = s.to(torch.float32)
+        s = s - s.mean()
+        n = s.numel()
+        nfft = 1 << (2 * n - 1).bit_length()
+        S = torch.fft.rfft(s, n=nfft)
+        P = S * torch.conj(S)
+        r = torch.fft.irfft(P, n=nfft)[:n].real
+        r = r / (r[0] + self.eps)
+        return r
+
+    # ---------------- fit (global) ----------------
+    @torch.no_grad()
+    def fit(self, iterator, pre_ops=None):
+        Ls: list[int] = []
+        Hs: list[int] = []
+        acfs_to_plot: list[torch.Tensor] = []
+
+        max_samples = self.fit_samples
+
+        for i, (x, _, _) in enumerate(iterator):
+            if i >= max_samples:
+                break
+            if not isinstance(x, torch.Tensor) or x.dim() != 2:
+                continue
+
+            T = int(x.shape[0])
+
+            s = self._summary_signal(x)
+            s_ds = self._downsample(s)
+            r = self._acf(s_ds)
+
+            # ---- simple period estimate ----
+            # first peak after lag 8 with r>0.25, else decay to <=0.15
+            lag = None
+            for j in range(8, max(9, len(r) - 1)):
+                if r[j] > 0.25 and r[j] > r[j - 1] and r[j] >= r[j + 1]:
+                    lag = int(j)
+                    break
+            if lag is None:
+                hits = (r <= 0.15).nonzero(as_tuple=False)
+                lag = int(hits[0].item()) if hits.numel() > 0 else max(1, len(r) // 4)
+
+            # map ds-lag back to original units
+            stride = max(1, T // int(s_ds.numel()))
+            L = int(max(self.L_min, min(self.L_max, 2 * lag * stride, T)))
+            hop = int(max(1, min(L, int(round(self.hop_ratio * L)))))
+
+            Ls.append(L)
+            Hs.append(hop)
+
+            if self.plot_examples and len(acfs_to_plot) < 6:
+                acfs_to_plot.append(r.detach().cpu())
+
+        if not Ls:
+            # fallback
+            self.L_global = self.L_min
+            self.hop_global = max(1, int(round(self.hop_ratio * self.L_global)))
+            print("\n=== AdaptiveWindow GLOBAL PARAMETERS (fallback) ===")
+            print(f"L_global = {self.L_global}")
+            print(f"hop_global = {self.hop_global}")
+            return self
+
+        # FIX: compute mean in float space
+        L_mean = sum(Ls) / float(len(Ls))
+        H_mean = sum(Hs) / float(len(Hs))
+        self.L_global = int(round(L_mean))
+        self.hop_global = int(round(H_mean))
+
+        print("\n=== AdaptiveWindow GLOBAL PARAMETERS ===")
+        print(f"L_global = {self.L_global}")
+        print(f"hop_global = {self.hop_global}")
+
+        if self.plot_examples and acfs_to_plot:
+            import matplotlib.pyplot as plt
+            plt.figure(figsize=(7, 4))
+            for r in acfs_to_plot:
+                plt.plot(r.numpy(), alpha=0.7)
+            plt.axvline(max(1, self.L_global // max(1, (Ls[0] // max(1, (len(acfs_to_plot[0]) if acfs_to_plot else 1))))), color="r", alpha=0.3)
+            plt.title("Example autocorrelations (fit samples)")
+            plt.xlabel("Lag (downsampled)")
+            plt.ylabel("ACF")
+            plt.tight_layout()
+            plt.show()
+
+        return self
+
+    # ---------------- apply fixed window ----------------
+    def __call__(self, x, y, info):
+        assert x.dim() == 2, f"AdaptiveSlidingWindow expects [T,D], got {tuple(x.shape)}"
+        assert self.L_global is not None and self.hop_global is not None, \
+            "AdaptiveSlidingWindow not fit. Ensure it's inside Compose(...) so Compose.fit() runs."
+
+        L = int(self.L_global)
+        hop = int(self.hop_global)
+
+        T, D = x.shape
+        segs = []
+        start = 0
+        while start < T:
+            seg = x[start:start + L]
+            if seg.shape[0] < L:
+                pad = x.new_zeros((L, D))
+                pad[:seg.shape[0]] = seg
+                seg = pad
+            segs.append(seg)
+            start += hop
+
+        X = torch.stack(segs, dim=0) if segs else x.new_zeros((1, L, D))
+        info = {**info, "adaptive_L": L, "adaptive_hop": hop}
+        return X, y, info
