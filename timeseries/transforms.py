@@ -301,7 +301,7 @@ class AdaptiveSlidingWindow(Transform):
         hop_ratio: float = 0.5,
         summary: str = "energy",          # "energy" | "absmean" | "mean"
         downsample_to: int = 1024,
-        plot_examples: bool = True,
+        plot_examples: bool = False,
         fit_samples: int = 256,           # how many train samples to estimate global params
         eps: float = 1e-8,
     ):
