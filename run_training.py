@@ -6,7 +6,7 @@ import timeseries.transforms as transforms
 # ──────────────────────────────────────────────────────────────────────────────
 # DATASET PIPELINES
 
-# HAR
+# HAR (128 timesteps, 9 channels)
 HAR_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.Ensure2D(),
@@ -25,7 +25,7 @@ MNIST_RATE_PIPELINE = transforms.Compose([
     transforms.DeterministicSpikes(gain=0.7, T=20, base_seed=0),  # [1,784] -> [20,784]
 ])
 
-# Speech Commands
+# Speech Commands (101 timesteps, 64 channels)
 SC_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.Ensure2D(),                                 # waveform -> [T,1]
@@ -33,7 +33,7 @@ SC_PIPELINE = transforms.Compose([
     transforms.ZScore(),
 ])
 
-# ESC-50: 5s @44100Hz → log-mel(64)
+# ESC-50: 5s @44100Hz → log-mel(64) (101 timesteps, 64 channels)
 ESC50_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.Ensure2D(),
@@ -41,7 +41,7 @@ ESC50_PIPELINE = transforms.Compose([
     transforms.ZScore(),
 ])
 
-# UrbanSound8K: 1s-4s @44100Hz → log-mel(64)
+# UrbanSound8K: 1s-4s @44100Hz → log-mel(64) (436 timesteps, 64 channels)
 URBAN8K_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.Ensure2D(),
@@ -49,19 +49,19 @@ URBAN8K_PIPELINE = transforms.Compose([
     transforms.ZScore(),
 ])
 
-# PAMAP2 (IMU)
+# PAMAP2 (IMU) (128 timesteps, 27 channels)
 PAMAP2_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.ZScore(),
 ])
 
-# MIT-BIH (ECG)
+# MIT-BIH (ECG) (360 timesteps, 1 channel)
 MITBIH_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.ZScore(),
 ])
 
-# DVS128 Gesture (neuromorphic events)
+# DVS128 Gesture (neuromorphic events) (200 timesteps, 2048 channels)
 DVS_GESTURE_PIPELINE = transforms.Compose([
     transforms.DownsampleEvents(factor=4),
     transforms.EventToVoxel(H=32, W=32, bins=200, polarity=True),
