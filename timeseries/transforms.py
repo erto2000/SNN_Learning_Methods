@@ -303,7 +303,7 @@ class AdaptiveSlidingWindow(Transform):
         downsample_to: int = 1024,
         plot_examples: bool = False,
         fit_samples: int = 256,           # how many train samples to estimate global params
-        eps: float = 1e-8,
+        L_factor: float = 1.0,            # <-- was hardcoded as 2.0 via 2*lag*stride
     ):
         self.L_min = int(L_min)
         self.L_max = int(L_max)
@@ -312,7 +312,7 @@ class AdaptiveSlidingWindow(Transform):
         self.downsample_to = int(downsample_to) if downsample_to is not None else None
         self.plot_examples = bool(plot_examples)
         self.fit_samples = int(fit_samples)
-        self.eps = float(eps)
+        self.L_factor = float(L_factor)
 
         self.L_global: int | None = None
         self.hop_global: int | None = None
@@ -320,6 +320,7 @@ class AdaptiveSlidingWindow(Transform):
         assert self.L_min > 0 and self.L_max >= self.L_min
         assert 0.0 < self.hop_ratio <= 1.0
         assert self.summary in ("energy", "absmean", "mean")
+        assert self.L_factor > 0.0
 
     # Compose.fit() will call this
     def needs_fit(self) -> bool:
@@ -342,7 +343,7 @@ class AdaptiveSlidingWindow(Transform):
         return s[::stride]
 
     def _acf(self, s: torch.Tensor) -> torch.Tensor:
-        # normalized autocorrelation, r[0]=1
+        # normalized autocorrelation, r[0]=1 (when possible)
         s = s.to(torch.float32)
         s = s - s.mean()
         n = s.numel()
@@ -350,7 +351,11 @@ class AdaptiveSlidingWindow(Transform):
         S = torch.fft.rfft(s, n=nfft)
         P = S * torch.conj(S)
         r = torch.fft.irfft(P, n=nfft)[:n].real
-        r = r / (r[0] + self.eps)
+
+        denom = r[0]
+        if torch.isfinite(denom) and denom.abs() > 0:
+            r = r / denom
+        # else: leave unnormalized; downstream logic still works
         return r
 
     # ---------------- fit (global) ----------------
@@ -387,7 +392,11 @@ class AdaptiveSlidingWindow(Transform):
 
             # map ds-lag back to original units
             stride = max(1, T // int(s_ds.numel()))
-            L = int(max(self.L_min, min(self.L_max, 2 * lag * stride, T)))
+
+            # <-- changed: replace hardcoded 2* with configurable factor (default 1.0)
+            L_raw = int(round(self.L_factor * lag * stride))
+
+            L = int(max(self.L_min, min(self.L_max, L_raw, T)))
             hop = int(max(1, min(L, int(round(self.hop_ratio * L)))))
 
             Ls.append(L)
@@ -405,11 +414,9 @@ class AdaptiveSlidingWindow(Transform):
             print(f"hop_global = {self.hop_global}")
             return self
 
-        # FIX: compute mean in float space
-        L_mean = sum(Ls) / float(len(Ls))
-        H_mean = sum(Hs) / float(len(Hs))
-        self.L_global = int(round(L_mean))
-        self.hop_global = int(round(H_mean))
+        # compute mean in float space
+        self.L_global = int(round(sum(Ls) / float(len(Ls))))
+        self.hop_global = int(round(sum(Hs) / float(len(Hs))))
 
         print("\n=== AdaptiveWindow GLOBAL PARAMETERS ===")
         print(f"L_global = {self.L_global}")
@@ -420,7 +427,6 @@ class AdaptiveSlidingWindow(Transform):
             plt.figure(figsize=(7, 4))
             for r in acfs_to_plot:
                 plt.plot(r.numpy(), alpha=0.7)
-            plt.axvline(max(1, self.L_global // max(1, (Ls[0] // max(1, (len(acfs_to_plot[0]) if acfs_to_plot else 1))))), color="r", alpha=0.3)
             plt.title("Example autocorrelations (fit samples)")
             plt.xlabel("Lag (downsampled)")
             plt.ylabel("ACF")
