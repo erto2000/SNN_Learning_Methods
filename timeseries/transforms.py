@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, Any, Sequence, Optional, List
 import torch
 import math
+import random
 
 try:
     import torchaudio
@@ -288,10 +289,10 @@ class AdaptiveSlidingWindow(Transform):
     """
     GLOBAL adaptive windowing based on autocorrelation.
 
-    fit(): estimates ONE global L/hop from training data (prints once, optional plot)
-    __call__(): uses fixed L/hop for all samples
-
-    Output: [S, L, D]
+    Plot shows:
+        - Full ACF curves (random examples)
+        - Grey dashed lines: individual window sizes
+        - Red line: global window size
     """
 
     def __init__(
@@ -299,20 +300,27 @@ class AdaptiveSlidingWindow(Transform):
         L_min: int = 10,
         L_max: int = 1000,
         hop_ratio: float = 0.5,
-        summary: str = "energy",          # "energy" | "absmean" | "mean"
-        downsample_to: int = 1024,
+        summary: str = "energy",
         plot_examples: bool = False,
-        fit_samples: int = 256,           # how many train samples to estimate global params
-        L_factor: float = 1.0,            # <-- was hardcoded as 2.0 via 2*lag*stride
+        max_plot_examples: int = 3,
+        fit_samples: int = 256,
+        L_factor: float = 1.0,
+        min_lag: int = 10,
+        peak_thr: float = 0.25,
+        decay_thr: float = 0.15,
     ):
         self.L_min = int(L_min)
         self.L_max = int(L_max)
         self.hop_ratio = float(hop_ratio)
         self.summary = str(summary)
-        self.downsample_to = int(downsample_to) if downsample_to is not None else None
         self.plot_examples = bool(plot_examples)
         self.fit_samples = int(fit_samples)
         self.L_factor = float(L_factor)
+
+        self.min_lag = int(min_lag)
+        self.peak_thr = float(peak_thr)
+        self.decay_thr = float(decay_thr)
+        self.max_plot_examples = int(max_plot_examples)
 
         self.L_global: int | None = None
         self.hop_global: int | None = None
@@ -322,7 +330,6 @@ class AdaptiveSlidingWindow(Transform):
         assert self.summary in ("energy", "absmean", "mean")
         assert self.L_factor > 0.0
 
-    # Compose.fit() will call this
     def needs_fit(self) -> bool:
         return True
 
@@ -334,19 +341,13 @@ class AdaptiveSlidingWindow(Transform):
             return x.abs().mean(dim=1)
         return x.mean(dim=1)
 
-    def _downsample(self, s: torch.Tensor) -> torch.Tensor:
-        if self.downsample_to is None:
-            return s
-        if s.numel() <= self.downsample_to:
-            return s
-        stride = max(1, s.numel() // self.downsample_to)
-        return s[::stride]
-
     def _acf(self, s: torch.Tensor) -> torch.Tensor:
-        # normalized autocorrelation, r[0]=1 (when possible)
         s = s.to(torch.float32)
         s = s - s.mean()
-        n = s.numel()
+        n = int(s.numel())
+        if n <= 1:
+            return torch.ones((n,), dtype=torch.float32, device=s.device)
+
         nfft = 1 << (2 * n - 1).bit_length()
         S = torch.fft.rfft(s, n=nfft)
         P = S * torch.conj(S)
@@ -355,46 +356,57 @@ class AdaptiveSlidingWindow(Transform):
         denom = r[0]
         if torch.isfinite(denom) and denom.abs() > 0:
             r = r / denom
-        # else: leave unnormalized; downstream logic still works
         return r
 
-    # ---------------- fit (global) ----------------
+    def _pick_lag(self, r: torch.Tensor) -> int:
+        n = int(r.numel())
+        if n <= 2:
+            return 1
+
+        start = min(self.min_lag, n - 2)
+
+        for j in range(start, n - 1):
+            if r[j] >= self.peak_thr and r[j] > r[j - 1] and r[j] >= r[j + 1]:
+                return int(j)
+
+        hits = (r <= self.decay_thr).nonzero(as_tuple=False)
+        if hits.numel() > 0:
+            return int(hits[0].item())
+
+        return max(1, n // 4)
+
+    def _reservoir_add(self, reservoir, item, seen, k):
+        if k <= 0:
+            return
+        if len(reservoir) < k:
+            reservoir.append(item)
+            return
+        j = random.randrange(seen)
+        if j < k:
+            reservoir[j] = item
+
+    # ---------------- fit ----------------
     @torch.no_grad()
     def fit(self, iterator, pre_ops=None):
-        Ls: list[int] = []
-        Hs: list[int] = []
-        acfs_to_plot: list[torch.Tensor] = []
+        Ls = []
+        Hs = []
 
-        max_samples = self.fit_samples
+        plot_items = []
+        seen_valid = 0
 
         for i, (x, _, _) in enumerate(iterator):
-            if i >= max_samples:
+            if i >= self.fit_samples:
                 break
             if not isinstance(x, torch.Tensor) or x.dim() != 2:
                 continue
 
-            T = int(x.shape[0])
+            T, _ = x.shape
 
             s = self._summary_signal(x)
-            s_ds = self._downsample(s)
-            r = self._acf(s_ds)
+            r = self._acf(s)
 
-            # ---- simple period estimate ----
-            # first peak after lag 8 with r>0.25, else decay to <=0.15
-            lag = None
-            for j in range(8, max(9, len(r) - 1)):
-                if r[j] > 0.25 and r[j] > r[j - 1] and r[j] >= r[j + 1]:
-                    lag = int(j)
-                    break
-            if lag is None:
-                hits = (r <= 0.15).nonzero(as_tuple=False)
-                lag = int(hits[0].item()) if hits.numel() > 0 else max(1, len(r) // 4)
-
-            # map ds-lag back to original units
-            stride = max(1, T // int(s_ds.numel()))
-
-            # <-- changed: replace hardcoded 2* with configurable factor (default 1.0)
-            L_raw = int(round(self.L_factor * lag * stride))
+            lag = self._pick_lag(r)
+            L_raw = int(round(self.L_factor * lag))
 
             L = int(max(self.L_min, min(self.L_max, L_raw, T)))
             hop = int(max(1, min(L, int(round(self.hop_ratio * L)))))
@@ -402,51 +414,80 @@ class AdaptiveSlidingWindow(Transform):
             Ls.append(L)
             Hs.append(hop)
 
-            if self.plot_examples and len(acfs_to_plot) < 6:
-                acfs_to_plot.append(r.detach().cpu())
+            if self.plot_examples:
+                seen_valid += 1
+                item = {"r": r.detach().cpu(), "L": L}
+                self._reservoir_add(plot_items, item, seen_valid, self.max_plot_examples)
 
         if not Ls:
-            # fallback
             self.L_global = self.L_min
             self.hop_global = max(1, int(round(self.hop_ratio * self.L_global)))
-            print("\n=== AdaptiveWindow GLOBAL PARAMETERS (fallback) ===")
-            print(f"L_global = {self.L_global}")
-            print(f"hop_global = {self.hop_global}")
             return self
 
-        # compute mean in float space
         self.L_global = int(round(sum(Ls) / float(len(Ls))))
         self.hop_global = int(round(sum(Hs) / float(len(Hs))))
 
-        print("\n=== AdaptiveWindow GLOBAL PARAMETERS ===")
+        print("\n=== AdaptiveSlidingWindow GLOBAL PARAMETERS ===")
         print(f"L_global = {self.L_global}")
         print(f"hop_global = {self.hop_global}")
 
-        if self.plot_examples and acfs_to_plot:
+        # ---------------- plot full ACF ----------------
+        if self.plot_examples and plot_items:
             import matplotlib.pyplot as plt
-            plt.figure(figsize=(7, 4))
-            for r in acfs_to_plot:
-                plt.plot(r.numpy(), alpha=0.7)
-            plt.title("Example autocorrelations (fit samples)")
-            plt.xlabel("Lag (downsampled)")
-            plt.ylabel("ACF")
+
+            plt.figure(figsize=(9, 5))
+
+            for item in plot_items:
+                r = item["r"].numpy()
+                plt.plot(r, alpha=0.8)
+
+                if item["L"] < len(r):
+                    plt.axvline(
+                        item["L"],
+                        color="grey",
+                        linestyle="--",
+                        alpha=0.5,
+                        label="_nolegend_",
+                    )
+
+            # one legend entry for grey lines
+            plt.axvline(
+                plot_items[0]["L"],
+                color="grey",
+                linestyle="--",
+                alpha=0.5,
+                label="Individual window sizes",
+            )
+
+            # global window size (red)
+            plt.axvline(
+                self.L_global,
+                color="red",
+                linewidth=2,
+                label=f"Global window size = {self.L_global}",
+            )
+
+            plt.title("Autocorrelation and Selected Window Sizes")
+            plt.xlabel("Window Size (samples)")
+            plt.ylabel("Normalized ACF")
+            plt.legend()
             plt.tight_layout()
             plt.show()
 
         return self
 
-    # ---------------- apply fixed window ----------------
+    # ---------------- apply window ----------------
     def __call__(self, x, y, info):
-        assert x.dim() == 2, f"AdaptiveSlidingWindow expects [T,D], got {tuple(x.shape)}"
-        assert self.L_global is not None and self.hop_global is not None, \
-            "AdaptiveSlidingWindow not fit. Ensure it's inside Compose(...) so Compose.fit() runs."
+        assert x.dim() == 2
+        assert self.L_global is not None and self.hop_global is not None
 
-        L = int(self.L_global)
-        hop = int(self.hop_global)
+        L = self.L_global
+        hop = self.hop_global
 
         T, D = x.shape
         segs = []
         start = 0
+
         while start < T:
             seg = x[start:start + L]
             if seg.shape[0] < L:
@@ -458,4 +499,5 @@ class AdaptiveSlidingWindow(Transform):
 
         X = torch.stack(segs, dim=0) if segs else x.new_zeros((1, L, D))
         info = {**info, "adaptive_L": L, "adaptive_hop": hop}
+
         return X, y, info
