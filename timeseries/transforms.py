@@ -308,6 +308,7 @@ class AdaptiveSlidingWindow(Transform):
         min_lag: int = 10,
         peak_thr: float = 0.25,
         decay_thr: float = 0.15,
+        aggregate: str = "mean",
     ):
         self.L_min = int(L_min)
         self.L_max = int(L_max)
@@ -322,6 +323,8 @@ class AdaptiveSlidingWindow(Transform):
         self.decay_thr = float(decay_thr)
         self.max_plot_examples = int(max_plot_examples)
 
+        self.aggregate = str(aggregate).lower()  # <-- NEW
+
         self.L_global: int | None = None
         self.hop_global: int | None = None
 
@@ -329,6 +332,7 @@ class AdaptiveSlidingWindow(Transform):
         assert 0.0 < self.hop_ratio <= 1.0
         assert self.summary in ("energy", "absmean", "mean")
         assert self.L_factor > 0.0
+        assert self.aggregate in ("mean", "median"), "aggregate must be 'mean' or 'median'"
 
     def needs_fit(self) -> bool:
         return True
@@ -385,11 +389,28 @@ class AdaptiveSlidingWindow(Transform):
         if j < k:
             reservoir[j] = item
 
+    def _aggregate_ints(self, xs: list[int]) -> int:
+        """
+        Aggregate a list of ints using mean or median (rounded to nearest int).
+        """
+        if not xs:
+            return 0
+        if self.aggregate == "mean":
+            return int(round(sum(xs) / float(len(xs))))
+        # median
+        xs_sorted = sorted(xs)
+        n = len(xs_sorted)
+        mid = n // 2
+        if n % 2 == 1:
+            return int(xs_sorted[mid])
+        # even count: average middle two, round to nearest int
+        return int(round(0.5 * (xs_sorted[mid - 1] + xs_sorted[mid])))
+
     # ---------------- fit ----------------
     @torch.no_grad()
     def fit(self, iterator, pre_ops=None):
-        Ls = []
-        Hs = []
+        Ls: list[int] = []
+        Hs: list[int] = []
 
         plot_items = []
         seen_valid = 0
@@ -424,10 +445,12 @@ class AdaptiveSlidingWindow(Transform):
             self.hop_global = max(1, int(round(self.hop_ratio * self.L_global)))
             return self
 
-        self.L_global = int(round(sum(Ls) / float(len(Ls))))
-        self.hop_global = int(round(sum(Hs) / float(len(Hs))))
+        # ---- NEW: mean/median aggregation ----
+        self.L_global = self._aggregate_ints(Ls)
+        self.hop_global = self._aggregate_ints(Hs)
 
         print("\n=== AdaptiveSlidingWindow GLOBAL PARAMETERS ===")
+        print(f"aggregate = {self.aggregate}")
         print(f"L_global = {self.L_global}")
         print(f"hop_global = {self.hop_global}")
 
