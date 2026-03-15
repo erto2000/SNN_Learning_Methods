@@ -157,26 +157,36 @@ class RepeatStatic(Transform):
 class SlidingWindow(Transform):
     """
     [T,D] -> [S, L, D] with stride 'hop'.
-    Place AFTER any ops that expect unsegmented [T,D] (e.g., ZScore).
+
+    Behavior:
+      - if T < L: return exactly one padded window
+      - if T >= L: keep only FULL windows that fit completely
+                    (no trailing partial padded window)
     """
     def __init__(self, length: int, hop: Optional[int] = None):
         self.L = int(length)
         self.hop = int(hop) if hop and hop > 0 else int(length)
+
     def __call__(self, x, y, info):
         T, D = x.shape
-        segs = []
-        start = 0
-        while start < T:
-            segs.append(x[start:start+self.L])
-            start += self.hop
-        Lmax = max(s.shape[0] for s in segs) if segs else self.L
-        out = []
-        for s in segs:
-            if s.shape[0] == Lmax:
-                out.append(s)
-            else:
-                pad = s.new_zeros((Lmax, D)); pad[:s.shape[0]] = s; out.append(pad)
-        X = torch.stack(out, dim=0) if out else x.new_zeros((1, self.L, D))
+
+        # shorter than window -> one padded window
+        if T < self.L:
+            out = x.new_zeros((1, self.L, D))
+            out[0, :T] = x
+            return out, y, info
+
+        # full windows only
+        starts = range(0, T - self.L + 1, self.hop)
+        segs = [x[s:s + self.L] for s in starts]
+
+        # safety fallback (should not happen when T >= L)
+        if not segs:
+            out = x.new_zeros((1, self.L, D))
+            out[0, :min(T, self.L)] = x[:self.L]
+            return out, y, info
+
+        X = torch.stack(segs, dim=0)
         return X, y, info
 
 class Resample(Transform):
@@ -508,19 +518,25 @@ class AdaptiveSlidingWindow(Transform):
         hop = self.hop_global
 
         T, D = x.shape
-        segs = []
-        start = 0
 
-        while start < T:
-            seg = x[start:start + L]
-            if seg.shape[0] < L:
-                pad = x.new_zeros((L, D))
-                pad[:seg.shape[0]] = seg
-                seg = pad
-            segs.append(seg)
-            start += hop
+        # shorter than window -> one padded window
+        if T < L:
+            out = x.new_zeros((1, L, D))
+            out[0, :T] = x
+            info = {**info, "adaptive_L": L, "adaptive_hop": hop}
+            return out, y, info
 
-        X = torch.stack(segs, dim=0) if segs else x.new_zeros((1, L, D))
+        # full windows only
+        starts = range(0, T - L + 1, hop)
+        segs = [x[s:s + L] for s in starts]
+
+        # safety fallback
+        if not segs:
+            out = x.new_zeros((1, L, D))
+            out[0, :min(T, L)] = x[:L]
+            info = {**info, "adaptive_L": L, "adaptive_hop": hop}
+            return out, y, info
+
+        X = torch.stack(segs, dim=0)
         info = {**info, "adaptive_L": L, "adaptive_hop": hop}
-
         return X, y, info

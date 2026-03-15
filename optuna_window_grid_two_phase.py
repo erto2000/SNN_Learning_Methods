@@ -17,6 +17,7 @@ Run:
 """
 
 from __future__ import annotations
+
 from copy import deepcopy
 import os
 import math
@@ -31,9 +32,9 @@ from visualization.training_results import save_results
 import timeseries.transforms as transforms
 
 
-# -----------------------------
+# =========================================================
 # Pipeline helpers
-# -----------------------------
+# =========================================================
 def _as_compose(pipeline) -> transforms.Compose:
     if pipeline is None:
         return transforms.Compose([])
@@ -43,6 +44,10 @@ def _as_compose(pipeline) -> transforms.Compose:
 
 
 def remove_window_ops(pipeline) -> transforms.Compose:
+    """
+    Remove any existing SlidingWindow / AdaptiveSlidingWindow ops from a pipeline.
+    This ensures Optuna controls windowing and nothing else changes.
+    """
     base = _as_compose(pipeline)
     ops = [
         op for op in base.ops
@@ -52,16 +57,50 @@ def remove_window_ops(pipeline) -> transforms.Compose:
 
 
 def append_sliding_window(pipeline, *, L: int, hop: int) -> transforms.Compose:
+    """
+    Append one SlidingWindow op at the end of the existing non-window pipeline.
+    """
     base = _as_compose(pipeline)
     ops = list(base.ops)
     ops.append(transforms.SlidingWindow(length=int(L), hop=int(hop)))
     return transforms.Compose(ops)
 
 
-# -----------------------------
-# Dataset hints (from your comments)
-# These guide sensible L ranges so Optuna isn't wasting trials.
-# -----------------------------
+# =========================================================
+# Baseline config alignment
+# =========================================================
+def get_base_run_config_by_dataset(dataset: str) -> Dict[str, Any]:
+    """
+    Pull the exact per-dataset baseline config from run_training.RUNS.
+
+    This keeps Optuna aligned with the classic training script:
+      - same HIDDEN_SIZES
+      - same MAX_SAMPLES
+      - same DATASET_KW
+      - same TRANSFORM
+      - same all other defaults/overrides
+
+    Then Optuna only modifies:
+      - LEARNER
+      - EPOCHS
+      - TEST_EVERY_EPOCH
+      - TRANSFORM (window search)
+      - optionally MAX_SAMPLES override
+    """
+    from run_training import RUNS
+
+    dataset = dataset.lower()
+    for r in RUNS:
+        if r["DATASET"].lower() == dataset:
+            return deepcopy(r)
+
+    raise ValueError(f"No base run config found for dataset={dataset!r} in run_training.RUNS")
+
+
+# =========================================================
+# Dataset length hints
+# Used only to define a sensible search range for window L.
+# =========================================================
 DATASET_T_HINT = {
     "har": 128,
     "speech_commands": 101,
@@ -74,43 +113,39 @@ DATASET_T_HINT = {
 
 
 def _step_for_T(T: int) -> int:
-    # Reasonable step so search is not too granular
-    # T=101 -> step ~ 8, T=128 -> 8/16, T=360 -> 16/32, T=436 -> 16/32
+    """
+    Reasonable grid step for L so search is not too granular.
+    """
     raw = max(4, T // 16)
-    # round to power-of-two-ish
     p = 2 ** int(round(math.log2(raw)))
     return int(max(4, min(p, max(8, T // 8))))
 
 
 def bounds_phase1(dataset: str) -> Tuple[int, int, int]:
     """
-    Phase 1 broad bounds for L and step.
+    Broad search for phase 1.
     """
     T = int(DATASET_T_HINT.get(dataset.lower(), 256))
     L_min = max(10, int(round(T * 0.10)))
     L_max = max(L_min, int(round(T * 1.0)))
     step = _step_for_T(T)
-    # clamp to make sure min/max align to step reasonably
     return L_min, L_max, step
 
 
 def bounds_phase2_from_best(dataset: str, best_L: int) -> Tuple[int, int, int]:
     """
-    Phase 2 narrower bounds centered around best_L from phase 1.
+    Narrower search around phase-1 best L.
     """
     T = int(DATASET_T_HINT.get(dataset.lower(), 256))
     step = _step_for_T(T)
 
-    # +/- 25% neighborhood (clamped)
     lo = int(round(best_L * 0.75))
     hi = int(round(best_L * 1.25))
 
-    # clamp to sensible absolute bounds for that dataset
     abs_lo, abs_hi, _ = bounds_phase1(dataset)
     lo = max(abs_lo, lo)
     hi = min(abs_hi, hi)
 
-    # ensure lo <= hi and at least one step
     if hi < lo:
         lo, hi = abs_lo, abs_hi
 
@@ -119,7 +154,10 @@ def bounds_phase2_from_best(dataset: str, best_L: int) -> Tuple[int, int, int]:
 
 def suggest_L_hop(trial: optuna.Trial, *, L_min: int, L_max: int, step: int) -> Tuple[int, int, float]:
     """
-    Suggest (L, hop, hop_ratio). Hop derived from hop_ratio for stability.
+    Suggest:
+      - win_L: integer window length
+      - hop_ratio: float in [0.25, 1.0]
+      - hop = round(L * hop_ratio)
     """
     L = trial.suggest_int("win_L", int(L_min), int(L_max), step=int(step))
     hop_ratio = trial.suggest_float("hop_ratio", 0.25, 1.0)
@@ -128,16 +166,28 @@ def suggest_L_hop(trial: optuna.Trial, *, L_min: int, L_max: int, step: int) -> 
     return L, hop, hop_ratio
 
 
-# -----------------------------
+# =========================================================
 # Persistence helpers
-# -----------------------------
+# =========================================================
 def ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
+    if path:
+        os.makedirs(path, exist_ok=True)
 
 
 def export_study_csv(study: optuna.Study, out_csv: str) -> None:
     ensure_dir(os.path.dirname(out_csv))
-    fieldnames = ["study", "trial", "state", "value", "win_L", "hop_ratio", "hop", "run_id", "status", "error"]
+    fieldnames = [
+        "study",
+        "trial",
+        "state",
+        "value",
+        "win_L",
+        "hop_ratio",
+        "hop",
+        "run_id",
+        "status",
+        "error",
+    ]
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
@@ -158,15 +208,28 @@ def export_study_csv(study: optuna.Study, out_csv: str) -> None:
 
 def export_best_json(study: optuna.Study, out_json: str) -> None:
     ensure_dir(os.path.dirname(out_json))
-    payload = {
-        "study_name": study.study_name,
-        "direction": str(study.direction),
-        "n_trials": len(study.trials),
-        "best_value": study.best_value if len(study.trials) else None,
-        "best_params": study.best_params if len(study.trials) else None,
-        "best_trial": study.best_trial.number if len(study.trials) else None,
-        "best_user_attrs": dict(study.best_trial.user_attrs) if len(study.trials) else None,
-    }
+
+    if len(study.trials) == 0:
+        payload = {
+            "study_name": study.study_name,
+            "direction": str(study.direction),
+            "n_trials": 0,
+            "best_value": None,
+            "best_params": None,
+            "best_trial": None,
+            "best_user_attrs": None,
+        }
+    else:
+        payload = {
+            "study_name": study.study_name,
+            "direction": str(study.direction),
+            "n_trials": len(study.trials),
+            "best_value": study.best_value,
+            "best_params": study.best_params,
+            "best_trial": study.best_trial.number,
+            "best_user_attrs": dict(study.best_trial.user_attrs),
+        }
+
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
@@ -175,9 +238,9 @@ def completed_trials(study: optuna.Study) -> int:
     return sum(t.state == optuna.trial.TrialState.COMPLETE for t in study.trials)
 
 
-# -----------------------------
+# =========================================================
 # Objective factory
-# -----------------------------
+# =========================================================
 def make_objective(
     base_cfg: Dict[str, Any],
     base_pipeline,
@@ -193,10 +256,13 @@ def make_objective(
 ):
     """
     Each trial:
-      - sample L/hop
-      - pipeline = base_pipeline + SlidingWindow(L, hop)
-      - run_one + save_results
-      - return metric
+      - samples L / hop_ratio / hop
+      - keeps the exact dataset baseline config
+      - removes old window ops from the baseline pipeline
+      - appends trial SlidingWindow(L, hop)
+      - runs training
+      - saves trial result
+      - returns metric for Optuna
     """
     assert metric in ("sample_acc", "window_acc")
 
@@ -205,7 +271,12 @@ def make_objective(
 
         L, hop, hop_ratio = suggest_L_hop(trial, L_min=L_min, L_max=L_max, step=step)
 
-        cfg["WINDOW"] = {"type": "sliding", "L": int(L), "hop": int(hop), "hop_ratio": float(hop_ratio)}
+        cfg["WINDOW"] = {
+            "type": "sliding",
+            "L": int(L),
+            "hop": int(hop),
+            "hop_ratio": float(hop_ratio),
+        }
 
         pipe0 = remove_window_ops(base_pipeline)
         cfg["TRANSFORM"] = append_sliding_window(pipe0, L=L, hop=hop)
@@ -225,14 +296,15 @@ def make_objective(
             trial.set_user_attr("error", err)
             raise optuna.TrialPruned(err)
 
-        return float(result.get("final", {}).get(metric, 0.0))
+        value = float(result.get("final", {}).get(metric, 0.0))
+        return value
 
     return objective
 
 
-# -----------------------------
-# Main runner
-# -----------------------------
+# =========================================================
+# Main two-phase runner
+# =========================================================
 def run_all_two_phase(
     *,
     results_dir: str = "results",
@@ -242,68 +314,58 @@ def run_all_two_phase(
     phase1_epochs: int = 5,
     phase2_trials: int = 10,
     phase2_epochs: int = 10,
-    max_samples_override: Optional[int] = 8000,
+    max_samples_override: Optional[int] = None,
 ):
     """
-    Runs all combos in order, resumable.
+    Runs all dataset x learner combinations in two phases.
 
-    Phase 1: broad L bounds
-    Phase 2: narrow around Phase 1 best L
+    Phase 1:
+      - broad search on L / hop_ratio
+      - fewer epochs
 
-    NOTE: We intentionally separate Phase 1 and Phase 2 into different studies,
-    because epochs differ (objective distribution shifts). That keeps Optuna’s
-    modeling clean and makes results easier to interpret.
+    Phase 2:
+      - refine around the best phase-1 L
+      - more epochs
+
+    Important alignment behavior:
+      - Each dataset starts from the exact config in run_training.RUNS
+      - Only windowing / learner / epochs are changed
     """
     ensure_dir(os.path.dirname(db_path))
     storage = f"sqlite:///{db_path}"
 
-    # import your pipelines + defaults
-    from run_training import (
-        DEFAULT,
-        HAR_PIPELINE,
-        SC_PIPELINE,
-        ESC50_PIPELINE,
-        URBAN8K_PIPELINE,
-        PAMAP2_PIPELINE,
-        MITBIH_PIPELINE,
-        DVS_GESTURE_PIPELINE,
-    )
-
-    dataset_to_pipeline = {
-        "har": HAR_PIPELINE,
-        "speech_commands": SC_PIPELINE,
-        "esc50": ESC50_PIPELINE,
-        "urban8k": URBAN8K_PIPELINE,
-        "pamap2": PAMAP2_PIPELINE,
-        "mitbih": MITBIH_PIPELINE,
-        "dvs_gesture": DVS_GESTURE_PIPELINE,
-    }
-
-    datasets = ["har", "speech_commands", "esc50", "urban8k", "pamap2", "mitbih", "dvs_gesture"]
+    datasets = [
+        "har",
+        "speech_commands",
+        "esc50",
+        "urban8k",
+        "pamap2",
+        "mitbih",
+        "dvs_gesture",
+    ]
     learners = ["bp", "eprop", "ff", "pepita"]
 
     for ds in datasets:
-        base_pipeline = dataset_to_pipeline[ds]
+        base_run_cfg = get_base_run_config_by_dataset(ds)
+        base_pipeline = deepcopy(base_run_cfg["TRANSFORM"])
 
         for learner in learners:
-            print(f"\n==============================")
+            print("\n==============================")
             print(f"Combo: dataset={ds} | learner={learner}")
-            print(f"==============================")
+            print("==============================")
 
-            # -----------------
+            # -------------------------
             # Phase 1
-            # -----------------
+            # -------------------------
             p1_name = f"ws_{ds}_{learner}_p1"
             L1_min, L1_max, step1 = bounds_phase1(ds)
 
-            cfg1 = {
-                **DEFAULT,
-                "RUN_ID": f"{ds}-{learner}",
-                "DATASET": ds,
-                "LEARNER": learner,
-                "EPOCHS": int(phase1_epochs),
-                "TEST_EVERY_EPOCH": False,
-            }
+            cfg1 = deepcopy(base_run_cfg)
+            cfg1["RUN_ID"] = f"{ds}-{learner}"
+            cfg1["LEARNER"] = learner
+            cfg1["EPOCHS"] = int(phase1_epochs)
+            cfg1["TEST_EVERY_EPOCH"] = False
+
             if max_samples_override is not None:
                 cfg1["MAX_SAMPLES"] = int(max_samples_override)
 
@@ -318,23 +380,30 @@ def run_all_two_phase(
 
             done1 = completed_trials(study1)
             rem1 = max(0, phase1_trials - done1)
+
             if rem1 > 0:
                 print(f"[Phase 1] {p1_name} | L in [{L1_min},{L1_max}] step={step1} | epochs={phase1_epochs}")
                 print(f"[Phase 1] completed={done1} remaining={rem1} target={phase1_trials}")
 
                 obj1 = make_objective(
-                    cfg1, base_pipeline,
-                    dataset=ds, learner=learner, phase=1,
-                    metric=metric, results_dir=results_dir,
-                    L_min=L1_min, L_max=L1_max, step=step1,
+                    cfg1,
+                    base_pipeline,
+                    dataset=ds,
+                    learner=learner,
+                    phase=1,
+                    metric=metric,
+                    results_dir=results_dir,
+                    L_min=L1_min,
+                    L_max=L1_max,
+                    step=step1,
                 )
+
                 study1.optimize(obj1, n_trials=rem1, catch=(Exception,))
                 export_study_csv(study1, os.path.join(results_dir, "optuna", f"{p1_name}_trials.csv"))
                 export_best_json(study1, os.path.join(results_dir, "optuna", f"{p1_name}_best.json"))
             else:
                 print(f"[Phase 1] Skip (already has >= {phase1_trials} COMPLETE trials).")
 
-            # If phase 1 still has no completed trials (e.g., repeated failures), skip phase 2.
             if completed_trials(study1) == 0:
                 print("[Phase 2] Skipped because Phase 1 has no COMPLETE trials.")
                 continue
@@ -343,21 +412,18 @@ def run_all_two_phase(
             best_hr = float(study1.best_params.get("hop_ratio"))
             best_hop = int(study1.best_trial.user_attrs.get("hop", max(1, int(round(best_L * best_hr)))))
 
-            # -----------------
+            # -------------------------
             # Phase 2
-            # -----------------
+            # -------------------------
             p2_name = f"ws_{ds}_{learner}_p2"
             L2_min, L2_max, step2 = bounds_phase2_from_best(ds, best_L)
 
-            cfg2 = {
-                **DEFAULT,
-                "RUN_ID": f"{ds}-{learner}",
-                "DATASET": ds,
-                "LEARNER": learner,
-                "EPOCHS": int(phase2_epochs),
-                "TEST_EVERY_EPOCH": False,
-            }
-            # usually keep same cap; if you want full data in phase2, set max_samples_override=None
+            cfg2 = deepcopy(base_run_cfg)
+            cfg2["RUN_ID"] = f"{ds}-{learner}"
+            cfg2["LEARNER"] = learner
+            cfg2["EPOCHS"] = int(phase2_epochs)
+            cfg2["TEST_EVERY_EPOCH"] = False
+
             if max_samples_override is not None:
                 cfg2["MAX_SAMPLES"] = int(max_samples_override)
 
@@ -370,31 +436,39 @@ def run_all_two_phase(
                 pruner=optuna.pruners.NopPruner(),
             )
 
-            # Seed phase 2 with the phase 1 best to make refinement start strong (and reproducible)
+            # seed phase 2 with phase-1 best and neighbors
             if len(study2.trials) == 0:
                 study2.enqueue_trial({"win_L": best_L, "hop_ratio": best_hr})
 
-                # also enqueue a couple neighbors (optional but helpful)
-                neigh = []
+                neighbors = []
                 for dL in (-step2, step2):
                     Lcand = max(L2_min, min(L2_max, best_L + dL))
-                    neigh.append({"win_L": int(Lcand), "hop_ratio": best_hr})
-                for x in neigh:
-                    study2.enqueue_trial(x)
+                    neighbors.append({"win_L": int(Lcand), "hop_ratio": best_hr})
+
+                for params in neighbors:
+                    study2.enqueue_trial(params)
 
             done2 = completed_trials(study2)
             rem2 = max(0, phase2_trials - done2)
+
             if rem2 > 0:
                 print(f"[Phase 2] {p2_name} | refine around best_L={best_L}, best_hop={best_hop}")
                 print(f"[Phase 2] L in [{L2_min},{L2_max}] step={step2} | epochs={phase2_epochs}")
                 print(f"[Phase 2] completed={done2} remaining={rem2} target={phase2_trials}")
 
                 obj2 = make_objective(
-                    cfg2, base_pipeline,
-                    dataset=ds, learner=learner, phase=2,
-                    metric=metric, results_dir=results_dir,
-                    L_min=L2_min, L_max=L2_max, step=step2,
+                    cfg2,
+                    base_pipeline,
+                    dataset=ds,
+                    learner=learner,
+                    phase=2,
+                    metric=metric,
+                    results_dir=results_dir,
+                    L_min=L2_min,
+                    L_max=L2_max,
+                    step=step2,
                 )
+
                 study2.optimize(obj2, n_trials=rem2, catch=(Exception,))
                 export_study_csv(study2, os.path.join(results_dir, "optuna", f"{p2_name}_trials.csv"))
                 export_best_json(study2, os.path.join(results_dir, "optuna", f"{p2_name}_best.json"))
@@ -402,9 +476,17 @@ def run_all_two_phase(
                 print(f"[Phase 2] Skip (already has >= {phase2_trials} COMPLETE trials).")
 
             if completed_trials(study2) > 0:
-                print(f"[Best Phase2] value={study2.best_value:.4f} params={study2.best_params} hop={study2.best_trial.user_attrs.get('hop')}")
+                print(
+                    f"[Best Phase2] value={study2.best_value:.4f} "
+                    f"params={study2.best_params} "
+                    f"hop={study2.best_trial.user_attrs.get('hop')}"
+                )
             else:
-                print(f"[Best Phase1] value={study1.best_value:.4f} params={study1.best_params} hop={study1.best_trial.user_attrs.get('hop')}")
+                print(
+                    f"[Best Phase1] value={study1.best_value:.4f} "
+                    f"params={study1.best_params} "
+                    f"hop={study1.best_trial.user_attrs.get('hop')}"
+                )
 
     print("\n=== Done: all combos processed (two-phase) ===")
     print(f"Optuna DB: {db_path}")
@@ -420,5 +502,5 @@ if __name__ == "__main__":
         phase1_epochs=5,
         phase2_trials=10,
         phase2_epochs=10,
-        max_samples_override=None
+        max_samples_override=None,
     )
