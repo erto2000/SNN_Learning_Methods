@@ -53,8 +53,23 @@ def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_
             "dataset": payload["config"].get("DATASET") if payload.get("config") else None,
             "learner": payload["config"].get("LEARNER") if payload.get("config") else None,
             "epochs": payload["config"].get("EPOCHS") if payload.get("config") else None,
-            "final_sample_acc": payload["final"].get("sample_acc"),
             "status": payload["status"],
+
+            "final_sample_acc": payload["final"].get("sample_acc"),
+            "final_window_acc": payload["final"].get("window_acc"),
+
+            "avg_spike_count": payload["final"].get("avg_spike_count"),
+            "firing_rate": payload["final"].get("firing_rate"),
+            "avg_synaptic_operations": payload["final"].get("avg_synaptic_operations"),
+
+            "energy_per_synop_pj": payload["final"].get("energy_per_synop_pj"),
+            "energy_per_sample_pj": payload["final"].get("energy_per_sample_pj"),
+            "energy_per_sample_nj": payload["final"].get("energy_per_sample_nj"),
+            "energy_per_sample_uj": payload["final"].get("energy_per_sample_uj"),
+            "energy_per_sample_mj": payload["final"].get("energy_per_sample_mj"),
+
+            "eval_dtype": payload["final"].get("eval_dtype"),
+            "eval_int8_weights": payload["final"].get("eval_int8_weights"),
         }
         _write_json(metrics, os.path.join(folder, "metrics.json"))
 

@@ -110,10 +110,12 @@ class FFLearner(BaseLearner):
             h = spk
         return layer_spikes, new_mems
 
-    def _goodness_scores(self, X_lbl: torch.Tensor) -> torch.Tensor:
+    def _goodness_scores(self, X_lbl: torch.Tensor, return_activity: bool = False):
         """
         Compute class goodness for label-conditioned inputs.
-        Returns [B] goodness if X_lbl has B batch examples.
+        Returns:
+          - goodness [B] if return_activity=False
+          - (goodness [B], activity dict) if return_activity=True
         """
         B, T, _ = X_lbl.shape
         device = X_lbl.device
@@ -128,36 +130,53 @@ class FFLearner(BaseLearner):
             )
             for i in range(L)
         ]
-        spk_sums = [
-            torch.zeros_like(m)
-            for m in mems
-        ]
+        spk_sums = [torch.zeros_like(m) for m in mems]
+        layer_spike_counts = [0.0 for _ in range(L)]
 
         for t in range(T):
             layer_spikes, mems = self._ff_step_collect(X_lbl[:, t, :], mems)
             for i in range(L):
                 spk_sums[i] += layer_spikes[i]
+                if return_activity:
+                    layer_spike_counts[i] += float(layer_spikes[i].detach().sum().item())
 
         goodness = sum((s ** 2).mean(1) for s in spk_sums)  # [B]
-        return goodness
+
+        if not return_activity:
+            return goodness
+
+        activity = self._make_activity_dict(
+            layer_spike_counts=layer_spike_counts,
+            num_samples=B,
+            num_timesteps=T,
+        )
+        return goodness, activity
 
     # ------------ contract ------------
 
     @torch.no_grad()
-    def forward(self, X: torch.Tensor) -> torch.Tensor:
+    def forward(self, X: torch.Tensor, return_activity: bool = False):
         """
-        X: [B, T, D] -> class scores [B, K] computed via FF goodness.
+        X: [B, T, D] -> class scores [B, K] OR (scores [B, K], activity).
         Uses all layers' goodness (sum), just like before.
         """
         N, T, D = X.shape
+        X = X.to(self.device)
         C = self.meta["n_classes"]
         device = X.device
 
         X_rep = X.unsqueeze(1).expand(N, C, T, D).reshape(N * C, T, D)
         labels = torch.arange(C, device=device).unsqueeze(0).expand(N, C).reshape(-1)
         X_lbl = self._add_label_channels(X_rep, labels)  # [N*C, T, D+K]
-        scores_flat = self._goodness_scores(X_lbl)       # [N*C]
-        return scores_flat.view(N, C)                    # [B, K]
+
+        if not return_activity:
+            scores_flat = self._goodness_scores(X_lbl, return_activity=False)
+            return scores_flat.view(N, C)
+
+        scores_flat, activity = self._goodness_scores(X_lbl, return_activity=True)
+        activity["ff_label_conditioned"] = True
+        activity["ff_effective_batch_multiplier"] = int(C)
+        return scores_flat.view(N, C), activity
 
     # ------------- training -------------
 

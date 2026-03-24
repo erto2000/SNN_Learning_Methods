@@ -86,20 +86,34 @@ class PepitaLearner(BaseLearner):
     # Inference
     # -------------------------------------------------------------------------
     @torch.no_grad()
-    def forward(self, X: torch.Tensor) -> torch.Tensor:
-        """X:[B,T,D] -> logits:[B,K] (sum of head outputs over time)."""
+    def forward(self, X: torch.Tensor, return_activity: bool = False):
+        """X:[B,T,D] -> logits:[B,K] OR (logits, activity)."""
         B, T, _ = X.shape
         X = X.to(self.device)
         state, head_mem = self.model.init_state(B, X.device, X.dtype)
         logits = torch.zeros(B, self.meta["n_classes"], device=X.device)
 
+        layer_spike_counts = [0.0 for _ in self.model.fcs]
+
         for t in range(T):
-            _, head_out, state, head_mem, _, _ = self.model.forward_step(
+            _, head_out, state, head_mem, layer_spikes, _ = self.model.forward_step(
                 X[:, t, :], state, head_mem
             )
             logits += head_out
 
-        return logits
+            if return_activity:
+                for i, spk in enumerate(layer_spikes):
+                    layer_spike_counts[i] += float(spk.detach().sum().item())
+
+        if not return_activity:
+            return logits
+
+        activity = self._make_activity_dict(
+            layer_spike_counts=layer_spike_counts,
+            num_samples=B,
+            num_timesteps=T,
+        )
+        return logits, activity
 
     # -------------------------------------------------------------------------
     # First-pass helper (collect spike sequences + logits)

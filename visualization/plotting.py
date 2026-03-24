@@ -85,6 +85,13 @@ def save_final_card(run_dir: str, summary: Dict[str, Any]) -> None:
         f"Hidden: {config.get('HIDDEN_SIZES','?')}",
         f"TestEveryEpoch: {config.get('TEST_EVERY_EPOCH','?')}",
         f"Final sample_acc: {final.get('sample_acc','n/a')}",
+        f"Final window_acc: {final.get('window_acc', 'n/a')}",
+        f"Avg spikes/sample: {final.get('avg_spike_count', 'n/a')}",
+        f"Firing rate: {final.get('firing_rate', 'n/a')}",
+        f"Avg SynOps/sample: {final.get('avg_synaptic_operations', 'n/a')}",
+        f"Energy per sample (uJ): {final.get('energy_per_sample_uj', 'n/a')}",
+        f"Eval dtype: {final.get('eval_dtype', 'n/a')}",
+        f"Eval int8 weights: {final.get('eval_int8_weights', 'n/a')}",
     ]
     text = "\n".join(label_lines)
 

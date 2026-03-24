@@ -25,20 +25,38 @@ class BackpropLearner(BaseLearner):
         if self.agg == "last": return seq_BTK[:, -1, :]
         raise ValueError(f"Unknown agg: {self.agg}")
 
-    def forward(self, X: torch.Tensor) -> torch.Tensor:
-        # X: [B,T,D] -> logits: [B,K]
+    def forward(self, X: torch.Tensor, return_activity: bool = False):
+        # X: [B,T,D] -> logits: [B,K] OR (logits, activity)
         B, T, _ = X.shape
         X = X.to(self.device)
         state, head_mem = self.model.init_state(B, X.device, X.dtype)
+
         outs = []
+        layer_spike_counts = [0.0 for _ in self.model.fcs]
+
         for t in range(T):
-            _, head_out, state, head_mem, _, _ = self.model.forward_step(X[:, t, :], state, head_mem)
-            outs.append(head_out)                  # [B,K]
-        seq_TBK = torch.stack(outs, dim=0)        # [T,B,K]
+            _, head_out, state, head_mem, layer_spikes, _ = self.model.forward_step(
+                X[:, t, :], state, head_mem
+            )
+            outs.append(head_out)
+            if return_activity:
+                for i, spk in enumerate(layer_spikes):
+                    layer_spike_counts[i] += float(spk.detach().sum().item())
+
+        seq_TBK = torch.stack(outs, dim=0)  # [T,B,K]
         seq_BTK = seq_TBK.permute(1, 0, 2).contiguous()
-        logits  = self._aggregate(seq_BTK)        # [B,K]
+        logits = self._aggregate(seq_BTK)  # [B,K]
         assert logits.shape == (B, self.meta["n_classes"])
-        return logits
+
+        if not return_activity:
+            return logits
+
+        activity = self._make_activity_dict(
+            layer_spike_counts=layer_spike_counts,
+            num_samples=B,
+            num_timesteps=T,
+        )
+        return logits, activity
 
     def train_step(self, X: torch.Tensor, y: torch.Tensor) -> dict:
         self.model.train()

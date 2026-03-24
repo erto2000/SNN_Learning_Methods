@@ -45,6 +45,7 @@ def eval_epoch(
     *,
     eval_dtype_str: str = None,
     use_int8_weights: bool = False,
+    energy_per_synop_pj: float = 0.0,
 ) -> Dict[str, float]:
     """
     Evaluate model on test set.
@@ -65,7 +66,6 @@ def eval_epoch(
         print("[Int8] Converting Linear weights to int8 for inference-only final eval...")
         convert_linear_to_int8(learner.model, per_channel=True)
 
-    # --- optional model casting inferred from eval_dtype ---
     orig_dtype = None
     orig_device = None
     if eval_dtype is not None:
@@ -76,17 +76,23 @@ def eval_epoch(
         learner.model.to(device=device, dtype=eval_dtype)
 
     correct_windows = 0
-    total_windows   = 0
-    sample_correct  = 0
-    sample_total    = 0
+    total_windows = 0
+    sample_correct = 0
+    sample_total = 0
+
+    total_spike_count = 0.0
+    total_synops = 0.0
+    total_neuron_slots = 0.0
+    total_activity_samples = 0
+
     try:
         for Xw, yw, sample_ids, B in iter_pieces(test_loader, device, dtype=eval_dtype):
-            logits = learner.forward(Xw)        # [Nseg, K]
-            preds_w = logits.argmax(dim=-1)     # [Nseg]
-            correct_windows += (preds_w == yw).sum().item()
-            total_windows   += yw.numel()
+            logits, activity = learner.forward(Xw, return_activity=True)
 
-            # majority vote per original sample
+            preds_w = logits.argmax(dim=-1)
+            correct_windows += (preds_w == yw).sum().item()
+            total_windows += yw.numel()
+
             gt_per_sample = torch.empty(B, dtype=torch.long, device=yw.device)
             gt_per_sample[:] = -1
             gt_per_sample.index_copy_(0, sample_ids, yw)
@@ -96,19 +102,41 @@ def eval_epoch(
                 gt_per_sample,
             )
 
-            # ----- majority vote over windows to get per-sample prediction -----
             preds_sample = majority_vote(preds_w, sample_ids, num_classes=n_classes, B=B)
 
             sample_correct += (preds_sample == gt_per_sample).sum().item()
-            sample_total   += B
+            sample_total += B
+
+            total_spike_count += float(activity["total_spike_count"])
+            total_synops += float(activity["synaptic_operations"])
+            total_neuron_slots += float(activity["num_neuron_slots"])
+            total_activity_samples += int(activity["num_samples"])
+
     finally:
-        # restore original model dtype/device if we changed it
         if eval_dtype is not None and orig_dtype is not None:
             learner.model.to(device=orig_device or device, dtype=orig_dtype)
 
+    firing_rate = total_spike_count / max(1.0, total_neuron_slots)
+    avg_spike_count = total_spike_count / max(1, total_activity_samples)
+    avg_synops = total_synops / max(1, total_activity_samples)
+    energy_per_sample_pj = avg_synops * float(energy_per_synop_pj)
+
     return {
         "window_acc": 100.0 * correct_windows / max(1, total_windows),
-        "sample_acc": 100.0 * sample_correct  / max(1, sample_total),
+        "sample_acc": 100.0 * sample_correct / max(1, sample_total),
+
+        "avg_spike_count": avg_spike_count,
+        "avg_synaptic_operations": avg_synops,
+        "firing_rate": firing_rate,
+
+        "energy_per_synop_pj": float(energy_per_synop_pj),
+        "energy_per_sample_pj": energy_per_sample_pj,
+        "energy_per_sample_nj": energy_per_sample_pj / 1e3,
+        "energy_per_sample_uj": energy_per_sample_pj / 1e6,
+        "energy_per_sample_mj": energy_per_sample_pj / 1e9,
+
+        "eval_dtype": str(eval_dtype_str),
+        "eval_int8_weights": bool(use_int8_weights),
     }
 
 def run_train_loop(
@@ -122,6 +150,7 @@ def run_train_loop(
     test_every_epoch: bool,
     eval_dtype_str: str = None,
     use_int8_weights: bool = False,
+    energy_per_synop_pj: float = 0.0,
 ) -> Tuple[Dict[str, Any], Dict[int, Dict[str, float]]]:
     """
     Training loop.
@@ -160,7 +189,9 @@ def run_train_loop(
                 n_classes,
                 eval_dtype_str=eval_dtype_str,
                 use_int8_weights=use_int8_weights,
+                energy_per_synop_pj=energy_per_synop_pj,
             )
+
             print(
                 f"[{ts}] Epoch {epoch:02d} | loss:{loss_avg:.4f} | acc:{acc_avg:.2f}% | "
                 f"test_sample_acc:{stats_te['sample_acc']:.2f}% | "
@@ -188,6 +219,7 @@ def run_train_loop(
             n_classes,
             eval_dtype_str=eval_dtype_str,
             use_int8_weights=use_int8_weights,
+            energy_per_synop_pj=energy_per_synop_pj,
         )
 
     return final_stats, epoch_log

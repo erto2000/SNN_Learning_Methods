@@ -56,9 +56,9 @@ class EpropLearner(BaseLearner):
 
     # ------------ contract ------------
     @torch.no_grad()
-    def forward(self, X: torch.Tensor) -> torch.Tensor:
+    def forward(self, X: torch.Tensor, return_activity: bool = False):
         """
-        X: [B,T,D] -> logits: [B,K]
+        X: [B,T,D] -> logits: [B,K] OR (logits, activity)
         Cumulative rate-code readout (matches train_step logic).
         """
         B, T, _ = X.shape
@@ -69,13 +69,29 @@ class EpropLearner(BaseLearner):
         W_out = self.model.head.weight
         b_out = self.model.head.bias
         logits = torch.zeros(B, self.meta["n_classes"], device=X.device)
+
+        layer_spike_counts = [0.0 for _ in self.model.fcs]
+
         for t in range(T):
             _, _, state, head_mem, layer_spikes, _ = self.model.forward_step(
                 X[:, t, :], state, head_mem, need_pre=False
             )
             r_sum = r_sum + layer_spikes[-1]
             logits = r_sum @ W_out.T + (b_out if b_out is not None else 0.0)
-        return logits  # [B,K]
+
+            if return_activity:
+                for i, spk in enumerate(layer_spikes):
+                    layer_spike_counts[i] += float(spk.detach().sum().item())
+
+        if not return_activity:
+            return logits  # [B,K]
+
+        activity = self._make_activity_dict(
+            layer_spike_counts=layer_spike_counts,
+            num_samples=B,
+            num_timesteps=T,
+        )
+        return logits, activity
 
     @torch.no_grad()
     def train_step(self, X: torch.Tensor, y: torch.Tensor) -> Dict[str, float]:

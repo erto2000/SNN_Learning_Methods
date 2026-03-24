@@ -82,6 +82,7 @@ DEFAULT = dict(
     SEED                = 123,
     NUM_WORKERS         = 0,
     PIN_MEMORY          = False,
+    ENERGY_PER_SYNOP_PJ = 0.9,
 
     # Network
     HIDDEN_SIZES     = [128],
