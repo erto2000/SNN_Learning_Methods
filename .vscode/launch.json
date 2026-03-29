@@ -1,0 +1,26 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "run_training",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/run_training.py",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "compare_results",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/compare_results.py",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "visualize_datasets",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/visualize_datasets.py",
+            "console": "integratedTerminal"
+        }
+    ]
+}

@@ -17,6 +17,7 @@ from .datasets.urban8k import build_urban8k_raw
 from .datasets.pamap2 import build_pamap2_raw
 from .datasets.mitbih import build_mitbih_raw
 from .datasets.dvs_gesture import build_dvs_gesture_raw
+from .datasets.large_scale_audio import build_large_scale_audio_raw
 
 @dataclass
 class DatasetMeta:
@@ -38,6 +39,7 @@ _REGISTRY: Dict[str, LoaderFn] = {
     "pamap2": build_pamap2_raw,
     "mitbih": build_mitbih_raw,
     "dvs_gesture": build_dvs_gesture_raw,
+    "large_scale_audio": build_large_scale_audio_raw,
 }
 
 def _maybe_fit_pipeline(train_ds, transform) -> None:

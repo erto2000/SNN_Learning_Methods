@@ -68,6 +68,14 @@ DVS_GESTURE_PIPELINE = transforms.Compose([
     transforms.ZScore(),
 ])
 
+
+# Large-Scale Audio Dataset (3s segments -> log-mel 64)
+LARGE_SCALE_AUDIO_PIPELINE = transforms.Compose([
+    transforms.ToFloat32(),
+    transforms.ToLogMel(sample_rate=16000, n_mels=64, win_len_ms=25, hop_ms=10),
+    transforms.ZScore(),
+])
+
 # ──────────────────────────────────────────────────────────────────────────────
 # DEFAULTS (tunable per run)
 DEFAULT = dict(
@@ -248,6 +256,21 @@ RUNS = [
         #     "BATCH_SIZE": 128,
         #     "HIDDEN_SIZES": [512],
         #     "TRANSFORM": DVS_GESTURE_PIPELINE,
+        # },
+        #
+        # # ── Large-Scale Audio Dataset ─────────────────────────────
+        # {
+        #     **DEFAULT,
+        #     "RUN_ID": "large-scale-audio-bp",
+        #     "DATASET": "large_scale_audio",
+        #     "LEARNER": "bp",
+        #     "EPOCHS": 10,
+        #     "HIDDEN_SIZES": [128],
+        #     "TRANSFORM": LARGE_SCALE_AUDIO_PIPELINE,
+        #     "DATASET_KW": {
+        #         "duration": 3.0,
+        #         "equal_per_class": True,
+        #     },
         # },
     ]
 
