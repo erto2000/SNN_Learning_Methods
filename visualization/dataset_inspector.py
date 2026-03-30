@@ -335,7 +335,7 @@ def build_dataset_viz(
             figs[f"mnist_grid_{split}"] = save_examples_mnist_grid(
                 sel, class_names, os.path.join(out_dir, "examples_raw", f"mnist_grid_{split}.png")
             )
-        elif DATASET in ("esc50", "urban8k"):
+        elif DATASET in ("esc50", "urban8k", "large_scale_audio"):
             figs[f"waveforms_{split}"] = save_examples_waveforms(
                 sel, class_names, os.path.join(out_dir, "examples_raw", f"waveforms_{split}.png")
             )
@@ -375,7 +375,7 @@ def build_dataset_viz(
                 figs[f"mnist_time_{split}"] = save_examples_spike_raster(
                     selp, class_names, os.path.join(out_dir, "examples_post", f"mnist_time_{split}.png")
                 )
-            elif DATASET in ("esc50", "urban8k"):
+            elif DATASET in ("esc50", "urban8k", "large_scale_audio"):
                 figs[f"mel_specs_{split}"] = save_examples_mel_specs(
                     selp, class_names, os.path.join(out_dir, "examples_post", f"mel_specs_{split}.png")
                 )

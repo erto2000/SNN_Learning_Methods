@@ -66,6 +66,13 @@ MITBIH_PIPELINE = transforms.Compose([
     transforms.ZScore(),
 ])
 
+# Large-Scale Audio: 3s @16kHz → log-mel(64)
+LARGE_SCALE_AUDIO_PIPELINE = transforms.Compose([
+    transforms.ToFloat32(),
+    transforms.ToLogMel(sample_rate=16000, n_mels=64, win_len_ms=25, hop_ms=10),
+    transforms.ZScore(),
+])
+
 # DVS128 Gesture (neuromorphic events)
 DVS_GESTURE_PIPELINE = transforms.Compose([
     transforms.DownsampleEvents(factor=4),
@@ -152,6 +159,17 @@ VIS = [
     #      DATASET="dvs_gesture", SPLITS=["train","test"], DATA_ROOT="./data",
     #      MAX_SAMPLES=400, TRANSFORM=DVS_GESTURE_PIPELINE,
     #      NOTES="DVS events → voxel (128×128×bins) → SlidingWindow(50,25) + ZScore",
+    #      SEED=SEED),
+
+    # # ── Large-Scale Audio (emergency siren vs road noise)
+    # dict(ID="large-scale-audio",
+    #      DATASET="large_scale_audio",
+    #      SPLITS=["train","test"],
+    #      DATA_ROOT="./data",
+    #      MAX_SAMPLES=2000,
+    #      TRANSFORM=LARGE_SCALE_AUDIO_PIPELINE,
+    #      DATASET_KW={"duration": 3.0, "equal_per_class": True},
+    #      NOTES="Large-Scale Audio 3s crops → log-mel(64)",
     #      SEED=SEED),
 ]
 
