@@ -17,6 +17,21 @@ def str_to_dtype(name: str) -> torch.dtype:
         return torch.bfloat16
     raise ValueError(f"Unknown dtype string: {name}")
 
+
+def _resolve_energy_per_synop_pj(
+    eval_dtype_str: str | None,
+    energy_fp32_pj: float,
+    energy_fp16_pj: float,
+) -> float:
+    name = str(eval_dtype_str or "fp32").lower()
+
+    if name in ("fp16", "float16", "16", "half", "bf16", "bfloat16"):
+        return float(energy_fp16_pj)
+
+    # default: fp32
+    return float(energy_fp32_pj)
+
+
 # ---------------------------
 # Model config + evaluation
 # ---------------------------
@@ -36,6 +51,7 @@ def build_cfg(D: int, K: int, g: Dict[str, Any]) -> NetConfig:
         init=g["INIT_TYPE"],
     )
 
+
 @torch.no_grad()
 def eval_epoch(
     learner,
@@ -45,19 +61,15 @@ def eval_epoch(
     *,
     eval_dtype_str: str = None,
     use_int8_weights: bool = False,
-    energy_per_synop_pj: float = 0.0,
+    energy_per_synop_fp32_pj: float = 0.0,
+    energy_per_synop_fp16_pj: float = 0.0,
 ) -> Dict[str, float]:
-    """
-    Evaluate model on test set.
-    - eval_dtype_str controls precision (None/“fp32” → fp32, else fp16/bf16/etc.).
-    - If use_int8_weights=True, we convert weights to int8 for inference-only eval
-        (does not modify original model weights).
-    """
     learner.model.eval()
 
+    eval_dtype_name = str(eval_dtype_str or "fp32").lower()
     eval_dtype = None
-    if eval_dtype_str.lower() != "fp32":
-        eval_dtype = str_to_dtype(eval_dtype_str)
+    if eval_dtype_name != "fp32":
+        eval_dtype = str_to_dtype(eval_dtype_name)
         if device.type == "cpu" and eval_dtype == torch.float16:
             print("[Eval] On CPU; switching fp16 -> bf16 for stability.")
             eval_dtype = torch.bfloat16
@@ -119,7 +131,13 @@ def eval_epoch(
     firing_rate = total_spike_count / max(1.0, total_neuron_slots)
     avg_spike_count = total_spike_count / max(1, total_activity_samples)
     avg_synops = total_synops / max(1, total_activity_samples)
-    energy_per_sample_pj = avg_synops * float(energy_per_synop_pj)
+
+    energy_per_synop_pj = _resolve_energy_per_synop_pj(
+        eval_dtype_str=eval_dtype_name,
+        energy_fp32_pj=energy_per_synop_fp32_pj,
+        energy_fp16_pj=energy_per_synop_fp16_pj,
+    )
+    energy_per_sample_pj = avg_synops * energy_per_synop_pj
 
     return {
         "window_acc": 100.0 * correct_windows / max(1, total_windows),
@@ -130,6 +148,9 @@ def eval_epoch(
         "firing_rate": firing_rate,
 
         "energy_per_synop_pj": float(energy_per_synop_pj),
+        "energy_per_synop_fp32_pj": float(energy_per_synop_fp32_pj),
+        "energy_per_synop_fp16_pj": float(energy_per_synop_fp16_pj),
+
         "energy_per_sample_pj": energy_per_sample_pj,
         "energy_per_sample_nj": energy_per_sample_pj / 1e3,
         "energy_per_sample_uj": energy_per_sample_pj / 1e6,
@@ -138,6 +159,7 @@ def eval_epoch(
         "eval_dtype": str(eval_dtype_str),
         "eval_int8_weights": bool(use_int8_weights),
     }
+
 
 def run_train_loop(
     learner,
@@ -150,16 +172,9 @@ def run_train_loop(
     test_every_epoch: bool,
     eval_dtype_str: str = None,
     use_int8_weights: bool = False,
-    energy_per_synop_pj: float = 0.0,
+    energy_per_synop_fp32_pj: float = 0.0,
+    energy_per_synop_fp16_pj: float = 0.0,
 ) -> Tuple[Dict[str, Any], Dict[int, Dict[str, float]]]:
-    """
-    Training loop.
-
-    - All evaluations (per-epoch + final) go through eval_epoch.
-    - eval_dtype controls precision (None → fp32, else fp16/bf16/etc.).
-    - If use_int8_weights=True and test_every_epoch=False, we convert
-      weights to int8 right before the final eval.
-    """
     epoch_log: Dict[int, Dict[str, float]] = {}
 
     for epoch in range(1, epochs + 1):
@@ -167,8 +182,10 @@ def run_train_loop(
         for Xp, yp, _, _ in iter_pieces(train_loader, device, chunk_segments=True):
             stats = learner.train_step(Xp, yp)
             n_tr += 1
-            if "acc" in stats:  acc_tr_sum += stats["acc"]
-            if "loss" in stats: loss_sum   += stats["loss"]
+            if "acc" in stats:
+                acc_tr_sum += stats["acc"]
+            if "loss" in stats:
+                loss_sum += stats["loss"]
             if "layer" in stats:
                 aux_msg = f" | layer:{stats['layer']}"
 
@@ -178,7 +195,7 @@ def run_train_loop(
                 aux_msg += " | layer_advanced"
 
         loss_avg = loss_sum / max(1, n_tr)
-        acc_avg  = acc_tr_sum / max(1, n_tr)
+        acc_avg = acc_tr_sum / max(1, n_tr)
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if test_every_epoch:
@@ -189,7 +206,8 @@ def run_train_loop(
                 n_classes,
                 eval_dtype_str=eval_dtype_str,
                 use_int8_weights=use_int8_weights,
-                energy_per_synop_pj=energy_per_synop_pj,
+                energy_per_synop_fp32_pj=energy_per_synop_fp32_pj,
+                energy_per_synop_fp16_pj=energy_per_synop_fp16_pj,
             )
 
             print(
@@ -208,10 +226,8 @@ def run_train_loop(
             epoch_log[epoch] = {"loss": loss_avg, "acc": acc_avg, "timestamp": ts}
 
     if test_every_epoch:
-        # last epoch's eval already done with eval_dtype
         final_stats = epoch_log[epochs]
     else:
-        # single final eval here (at chosen precision / weight format)
         final_stats = eval_epoch(
             learner,
             test_loader,
@@ -219,7 +235,8 @@ def run_train_loop(
             n_classes,
             eval_dtype_str=eval_dtype_str,
             use_int8_weights=use_int8_weights,
-            energy_per_synop_pj=energy_per_synop_pj,
+            energy_per_synop_fp32_pj=energy_per_synop_fp32_pj,
+            energy_per_synop_fp16_pj=energy_per_synop_fp16_pj,
         )
 
     return final_stats, epoch_log

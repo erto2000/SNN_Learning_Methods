@@ -100,6 +100,9 @@ def load_run_summaries(results_dir: str = RESULTS_DIR) -> pd.DataFrame:
             "training_bytes_per_batch": mem.get("training_bytes_per_batch"),
             "memory_batch_size": mem.get("batch_size"),
             "memory_time_steps": mem.get("time_steps"),
+            "avg_synaptic_ops": final.get("avg_synaptic_operations"),
+            "firing_rate": final.get("firing_rate"),
+            "energy_per_sample_pj": final.get("energy_per_sample_pj"),
         })
 
     df = pd.DataFrame(rows)
@@ -125,6 +128,9 @@ def load_run_summaries(results_dir: str = RESULTS_DIR) -> pd.DataFrame:
         "training_bytes_per_batch",
         "memory_batch_size",
         "memory_time_steps",
+        "avg_synaptic_ops",
+        "firing_rate",
+        "energy_per_sample_pj",
     ]
     for col in numeric_cols:
         if col in df.columns:
@@ -187,6 +193,7 @@ def save_all_trials_csv(df: pd.DataFrame, out_dir: str) -> str:
     cols = [
         "run_id", "dataset", "learner", "phase", "trial",
         "win_L", "hop", "hop_ratio", "sample_acc",
+        "avg_synaptic_ops", "firing_rate", "energy_per_sample_pj",
         "training_bytes_per_batch", "training_mb_per_batch",
         "static_bytes", "static_mb",
         "fp_bytes", "memory_batch_size", "memory_time_steps",
@@ -204,6 +211,7 @@ def save_best_csv(df: pd.DataFrame, out_dir: str) -> str:
     best = df.loc[idx, [
         "dataset", "learner", "phase", "trial",
         "win_L", "hop", "hop_ratio", "sample_acc",
+        "avg_synaptic_ops", "firing_rate", "energy_per_sample_pj",
         "training_bytes_per_batch", "training_mb_per_batch",
         "static_bytes", "static_mb",
         "run_id",
@@ -225,6 +233,7 @@ def save_best_per_phase_csv(df: pd.DataFrame, out_dir: str) -> str:
     best = data.loc[idx, [
         "dataset", "learner", "phase", "trial",
         "win_L", "hop", "hop_ratio", "sample_acc",
+        "avg_synaptic_ops", "firing_rate", "energy_per_sample_pj",
         "training_mb_per_batch", "static_mb", "run_id"
     ]].sort_values(["dataset", "learner", "phase"])
 
@@ -612,6 +621,7 @@ def export_trials_csv(df_sub: pd.DataFrame, out_path: str) -> None:
         "run_id", "phase", "trial",
         "win_L", "hop", "hop_ratio",
         "sample_acc",
+        "avg_synaptic_ops", "firing_rate", "energy_per_sample_pj",
         "training_bytes_per_batch", "training_mb_per_batch",
         "static_bytes", "static_mb",
         "fp_bytes", "memory_batch_size", "memory_time_steps",
@@ -625,7 +635,8 @@ def export_cross_method_csv(df_ds: pd.DataFrame, out_path: str) -> None:
     cols = [
         "run_id", "dataset", "learner", "phase", "trial",
         "win_L", "hop", "hop_ratio",
-        "sample_acc", "training_mb_per_batch", "static_mb"
+        "sample_acc", "avg_synaptic_ops", "firing_rate", "energy_per_sample_pj",
+        "training_mb_per_batch", "static_mb"
     ]
     cols = [c for c in cols if c in df_ds.columns]
     sort_cols = [c for c in ["learner", "phase", "trial", "win_L", "hop"] if c in df_ds.columns]
@@ -645,7 +656,7 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
         subdir = os.path.join(out_root, str(dataset), str(learner))
         ensure_dir(subdir)
 
-        p = os.path.join(subdir, "hop_ratio_vs_win_length.png")
+        p = os.path.join(subdir, "hop_ratio_vs_window_length.png")
         plot_scatter_phase_colored(
             g,
             x_col="win_L",
@@ -653,8 +664,8 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             color_col="sample_acc",
             out_path=p,
             title=f"{dataset} | {learner} | hop ratio vs win length",
-            x_label="win_L",
-            y_label="hop_ratio",
+            x_label="window length",
+            y_label="hop ratio",
             color_label="sample_acc",
         )
         saved.append(p)
@@ -666,7 +677,7 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             y_col="sample_acc",
             out_path=p,
             title=f"{dataset} | {learner} | sample_acc vs window length",
-            x_label="win_L",
+            x_label="window length",
             y_label="sample_acc",
         )
         saved.append(p)
@@ -678,7 +689,7 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             y_col="sample_acc",
             out_path=p,
             title=f"{dataset} | {learner} | sample_acc vs hop ratio",
-            x_label="hop_ratio",
+            x_label="hop ratio",
             y_label="sample_acc",
         )
         saved.append(p)
@@ -715,8 +726,92 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             color_col="sample_acc",
             out_path=p,
             title=f"{dataset} | {learner} | window length vs training memory",
-            x_label="win_L",
+            x_label="window length",
             y_label="training memory per batch (MB)",
+            color_label="sample_acc",
+        )
+        saved.append(p)
+
+        p = os.path.join(subdir, "window_length_vs_synaptic_ops.png")
+        plot_scatter_phase_colored(
+            g,
+            x_col="win_L",
+            y_col="avg_synaptic_ops",
+            color_col="sample_acc",
+            out_path=p,
+            title=f"{dataset} | {learner} | window length vs synaptic ops",
+            x_label="window length",
+            y_label="avg synaptic operations",
+            color_label="sample_acc",
+        )
+        saved.append(p)
+
+        p = os.path.join(subdir, "hop_ratio_vs_synaptic_ops.png")
+        plot_scatter_phase_colored(
+            g,
+            x_col="hop_ratio",
+            y_col="avg_synaptic_ops",
+            color_col="sample_acc",
+            out_path=p,
+            title=f"{dataset} | {learner} | hop ratio vs synaptic ops",
+            x_label="hop ratio",
+            y_label="avg synaptic operations",
+            color_label="sample_acc",
+        )
+        saved.append(p)
+
+        p = os.path.join(subdir, "window_length_vs_firing_rate.png")
+        plot_scatter_phase_colored(
+            g,
+            x_col="win_L",
+            y_col="firing_rate",
+            color_col="sample_acc",
+            out_path=p,
+            title=f"{dataset} | {learner} | window length vs firing rate",
+            x_label="window length",
+            y_label="firing rate",
+            color_label="sample_acc",
+        )
+        saved.append(p)
+
+        p = os.path.join(subdir, "hop_ratio_vs_firing_rate.png")
+        plot_scatter_phase_colored(
+            g,
+            x_col="hop_ratio",
+            y_col="firing_rate",
+            color_col="sample_acc",
+            out_path=p,
+            title=f"{dataset} | {learner} | hop ratio vs firing rate",
+            x_label="hop ratio",
+            y_label="firing rate",
+            color_label="sample_acc",
+        )
+        saved.append(p)
+
+        p = os.path.join(subdir, "window_length_vs_energy.png")
+        plot_scatter_phase_colored(
+            g,
+            x_col="win_L",
+            y_col="energy_per_sample_pj",
+            color_col="sample_acc",
+            out_path=p,
+            title=f"{dataset} | {learner} | window length vs energy",
+            x_label="window length",
+            y_label="energy per sample (pJ)",
+            color_label="sample_acc",
+        )
+        saved.append(p)
+
+        p = os.path.join(subdir, "hop_ratio_vs_energy.png")
+        plot_scatter_phase_colored(
+            g,
+            x_col="hop_ratio",
+            y_col="energy_per_sample_pj",
+            color_col="sample_acc",
+            out_path=p,
+            title=f"{dataset} | {learner} | hop ratio vs energy",
+            x_label="hop ratio",
+            y_label="energy per sample (pJ)",
             color_label="sample_acc",
         )
         saved.append(p)
@@ -738,15 +833,15 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
         ds_dir = os.path.join(out_root, str(dataset), "_all_methods")
         ensure_dir(ds_dir)
 
-        p = os.path.join(ds_dir, "hop_ratio_vs_win_length_all_methods.png")
+        p = os.path.join(ds_dir, "hop_ratio_vs_window_length_all_methods.png")
         plot_all_methods_scatter_colored_by_accuracy(
             g,
             x_col="win_L",
             y_col="hop_ratio",
             out_path=p,
             title=f"{dataset} | all methods | hop ratio vs win length",
-            x_label="win_L",
-            y_label="hop_ratio",
+            x_label="window length",
+            y_label="hop ratio",
         )
         saved.append(p)
 
@@ -769,7 +864,7 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             y_col="training_mb_per_batch",
             out_path=p,
             title=f"{dataset} | all methods | window length vs training memory",
-            x_label="win_L",
+            x_label="window length",
             y_label="training memory per batch (MB)",
         )
         saved.append(p)
@@ -778,14 +873,14 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
         plot_all_methods_static_memory_bar(g, out_path=p, dataset=str(dataset))
         saved.append(p)
 
-        p = os.path.join(ds_dir, "sample_acc_vs_L_all_methods.png")
+        p = os.path.join(ds_dir, "sample_acc_vs_window_length_all_methods.png")
         plot_all_methods_scatter(
             g,
             x_col="win_L",
             y_col="sample_acc",
             out_path=p,
             title=f"{dataset} | all methods | sample_acc vs window length",
-            x_label="win_L",
+            x_label="window length",
             y_label="sample_acc",
         )
         saved.append(p)
@@ -797,7 +892,7 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             y_col="sample_acc",
             out_path=p,
             title=f"{dataset} | all methods | sample_acc vs hop ratio",
-            x_label="hop_ratio",
+            x_label="hop ratio",
             y_label="sample_acc",
         )
         saved.append(p)
@@ -811,6 +906,78 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             title=f"{dataset} | all methods | sample_acc vs hop",
             x_label="hop",
             y_label="sample_acc",
+        )
+        saved.append(p)
+
+        p = os.path.join(ds_dir, "window_length_vs_synaptic_ops_all_methods.png")
+        plot_all_methods_scatter_colored_by_accuracy(
+            g,
+            x_col="win_L",
+            y_col="avg_synaptic_ops",
+            out_path=p,
+            title=f"{dataset} | all methods | window length vs synaptic ops",
+            x_label="window length",
+            y_label="avg synaptic operations",
+        )
+        saved.append(p)
+
+        p = os.path.join(ds_dir, "hop_ratio_vs_synaptic_ops_all_methods.png")
+        plot_all_methods_scatter_colored_by_accuracy(
+            g,
+            x_col="hop_ratio",
+            y_col="avg_synaptic_ops",
+            out_path=p,
+            title=f"{dataset} | all methods | hop ratio vs synaptic ops",
+            x_label="hop ratio",
+            y_label="avg synaptic operations",
+        )
+        saved.append(p)
+
+        p = os.path.join(ds_dir, "window_length_vs_firing_rate_all_methods.png")
+        plot_all_methods_scatter_colored_by_accuracy(
+            g,
+            x_col="win_L",
+            y_col="firing_rate",
+            out_path=p,
+            title=f"{dataset} | all methods | window length vs firing rate",
+            x_label="window length",
+            y_label="firing rate",
+        )
+        saved.append(p)
+
+        p = os.path.join(ds_dir, "hop_ratio_vs_firing_rate_all_methods.png")
+        plot_all_methods_scatter_colored_by_accuracy(
+            g,
+            x_col="hop_ratio",
+            y_col="firing_rate",
+            out_path=p,
+            title=f"{dataset} | all methods | hop ratio vs firing rate",
+            x_label="hop ratio",
+            y_label="firing rate",
+        )
+        saved.append(p)
+
+        p = os.path.join(ds_dir, "window_length_vs_energy_all_methods.png")
+        plot_all_methods_scatter_colored_by_accuracy(
+            g,
+            x_col="win_L",
+            y_col="energy_per_sample_pj",
+            out_path=p,
+            title=f"{dataset} | all methods | window length vs energy",
+            x_label="window length",
+            y_label="energy per sample (pJ)",
+        )
+        saved.append(p)
+
+        p = os.path.join(ds_dir, "hop_ratio_vs_energy_all_methods.png")
+        plot_all_methods_scatter_colored_by_accuracy(
+            g,
+            x_col="hop_ratio",
+            y_col="energy_per_sample_pj",
+            out_path=p,
+            title=f"{dataset} | all methods | hop ratio vs energy",
+            x_label="hop ratio",
+            y_label="energy per sample (pJ)",
         )
         saved.append(p)
 
