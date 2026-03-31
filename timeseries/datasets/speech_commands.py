@@ -32,6 +32,7 @@ class SpeechCommandsRaw(Dataset):
         include_silence: bool = True,
         class_count: Optional[int] = None,
         class_seed: int = 0,
+        class_filter: Optional[List[str]] = None,
     ):
         assert _HAS_TA, "torchaudio is required for Speech Commands."
         self.ds = SPEECHCOMMANDS(root=root, download=True, subset=subset)
@@ -64,8 +65,13 @@ class SpeechCommandsRaw(Dataset):
             labels.append("silence")
 
         # --------- Class subset selection ---------
-        # Random subset via class_count
-        if class_count is not None and class_count > 0 and class_count < len(labels):
+        if class_filter is not None:
+            available = set(labels)
+            unknown = [c for c in class_filter if c not in available]
+            if unknown:
+                raise ValueError(f"class_filter contains unknown Speech Commands classes: {unknown}")
+            labels = [c for c in class_filter if c in available]
+        elif class_count is not None and class_count > 0 and class_count < len(labels):
             rng = random.Random(class_seed)
             # sample from labels as they are (directory names), then sort for stability
             labels = sorted(rng.sample(labels, class_count))
@@ -142,6 +148,7 @@ def build_sc_raw(
     *,
     seed: int = 123,
     class_count: Optional[int] = None,
+    class_filter: Optional[List[str]] = None,
     equal_per_class: bool = False,
 ) -> Tuple[Dataset, Dataset, List[str], dict]:
     """
@@ -163,6 +170,7 @@ def build_sc_raw(
         include_silence=include_silence,
         class_count=class_count,
         class_seed=seed,
+        class_filter=class_filter,
     )
     valid = SpeechCommandsRaw(
         "validation",
@@ -170,6 +178,7 @@ def build_sc_raw(
         include_silence=include_silence,
         class_count=class_count,
         class_seed=seed,
+        class_filter=class_filter,
     )
     test = SpeechCommandsRaw(
         "testing",
@@ -177,6 +186,7 @@ def build_sc_raw(
         include_silence=include_silence,
         class_count=class_count,
         class_seed=seed,
+        class_filter=class_filter,
     )
 
     from torch.utils.data import ConcatDataset, Subset
@@ -210,13 +220,14 @@ def build_sc_raw(
 
     # ---------- Equal-per-class balancing (ignores max_samples) ----------
     if equal_per_class:
-        def _balanced_indices(labels: List[int], seed: int) -> List[int]:
+        def _balanced_indices(labels: List[int], seed: int, max_n: Optional[int] = None) -> List[int]:
             rng = random.Random(seed)
             per_class = defaultdict(list)
             for i, y in enumerate(labels):
                 per_class[y].append(i)
-            # Same number of samples per class
             n_per_class = min(len(v) for v in per_class.values())
+            if max_n is not None:
+                n_per_class = min(n_per_class, max_n // len(per_class))
             idxs: List[int] = []
             for _, inds in per_class.items():
                 rng.shuffle(inds)
@@ -224,7 +235,7 @@ def build_sc_raw(
             idxs.sort()
             return idxs
 
-        tr_idx = _balanced_indices(tr_labels, seed)
+        tr_idx = _balanced_indices(tr_labels, seed, max_n=max_samples)
         te_idx = _balanced_indices(te_labels, seed + 1)
 
         full_train = Subset(full_train, tr_idx)

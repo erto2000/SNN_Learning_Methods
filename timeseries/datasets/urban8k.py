@@ -204,7 +204,7 @@ class Urban8KRaw(Dataset):
     Returns waveform x:[T,1] at the original dataset sample rate (no resampling).
     Optional `duration` (in seconds) will center-crop or zero-pad each clip.
     """
-    def __init__(self, root: str, folds: List[int], duration: Optional[float] = None):
+    def __init__(self, root: str, folds: List[int], duration: Optional[float] = None, class_filter: Optional[List[str]] = None):
         assert _HAS_TA, "torchaudio required for UrbanSound8K."
 
         # Download/prepare dataset if missing
@@ -219,10 +219,24 @@ class Urban8KRaw(Dataset):
 
         df = pd.read_csv(self.meta_path)
         df = df[df["fold"].isin(folds)].reset_index(drop=True)
-        self.rows = df
 
-        classes = df[["classID", "class"]].drop_duplicates().sort_values("classID")
-        self.class_names = classes["class"].tolist()
+        if class_filter is not None:
+            unknown = [c for c in class_filter if c not in df["class"].values]
+            if unknown:
+                raise ValueError(f"class_filter contains unknown UrbanSound8K classes: {unknown}")
+            df = df[df["class"].isin(class_filter)].reset_index(drop=True)
+            if df.empty:
+                raise ValueError(f"No samples found for class_filter={class_filter} in the selected folds.")
+            present = set(df["class"].unique())
+            self.class_names = [c for c in class_filter if c in present]
+            name_to_idx = {c: i for i, c in enumerate(self.class_names)}
+            df = df.copy()
+            df["classID"] = df["class"].map(name_to_idx)
+        else:
+            classes = df[["classID", "class"]].drop_duplicates().sort_values("classID")
+            self.class_names = classes["class"].tolist()
+
+        self.rows = df
 
     def __len__(self):
         return len(self.rows)
@@ -270,6 +284,7 @@ def build_urban8k_raw(
     seed: int = 123,
     equal_per_class: bool = False,
     duration: Optional[float] = None,
+    class_filter: Optional[List[str]] = None,
 ) -> Tuple[Dataset, Dataset, List[str], dict]:
     """
     Build UrbanSound8K datasets from a single combined pool (folds 1–10).
@@ -280,7 +295,7 @@ def build_urban8k_raw(
         => Both train and test end up balanced across classes (up to rounding).
     """
 
-    full = Urban8KRaw(root=root, folds=list(range(1, 11)), duration=duration)
+    full = Urban8KRaw(root=root, folds=list(range(1, 11)), duration=duration, class_filter=class_filter)
 
     class_names = full.class_names
     num_classes = len(class_names)

@@ -177,7 +177,7 @@ RUNS = [
         #     "MAX_SAMPLES": 10000,
         #     "TRANSFORM": SC_PIPELINE,
         #     "DATASET_KW": {
-        #         "class_count": 10,
+        #         "class_filter": ["yes", "no", "stop"],
         #         "equal_per_class":True,
         #     },
         # },
@@ -190,10 +190,10 @@ RUNS = [
         #     "LEARNER": "bp",
         #     "EPOCHS": 10,
         #     "BATCH_SIZE": 128,
-        #     "HIDDEN_SIZES": [512],
+        #     "HIDDEN_SIZES": [128],
         #     "TRANSFORM": ESC50_PIPELINE,
         #     "DATASET_KW": {
-        #         "class_count": 10,
+        #         "class_filter": ["dog", "rain", "siren", "helicopter"],
         #         "equal_per_class": True,
         #         "duration": 1
         #     },
@@ -207,9 +207,10 @@ RUNS = [
         #     "LEARNER": "bp",
         #     "EPOCHS": 10,
         #     "BATCH_SIZE": 128,
-        #     "HIDDEN_SIZES": [512],
+        #     "HIDDEN_SIZES": [128],
         #     "TRANSFORM": URBAN8K_PIPELINE,
         #     "DATASET_KW": {
+        #         "class_filter": ["dog_bark", "siren", "gun_shot"],
         #         "equal_per_class": True,
         #     }
         # },
@@ -255,8 +256,11 @@ RUNS = [
         #     "LEARNER": "bp",
         #     "EPOCHS": 10,
         #     "BATCH_SIZE": 128,
-        #     "HIDDEN_SIZES": [512],
+        #     "HIDDEN_SIZES": [128],
         #     "TRANSFORM": DVS_GESTURE_PIPELINE,
+        #     "DATASET_KW": {
+        #         "class_filter": ["hand_clap", "right_hand_wave", "left_hand_wave", "right_arm_cw"],
+        #     },
         # },
         #
         # # ── Large-Scale Audio Dataset ─────────────────────────────
@@ -266,6 +270,7 @@ RUNS = [
         #     "DATASET": "large_scale_audio",
         #     "LEARNER": "bp",
         #     "EPOCHS": 10,
+        #     "BATCH_SIZE": 128,
         #     "HIDDEN_SIZES": [128],
         #     "TRANSFORM": LARGE_SCALE_AUDIO_PIPELINE,
         #     "DATASET_KW": {

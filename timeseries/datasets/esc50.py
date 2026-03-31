@@ -231,6 +231,7 @@ def build_esc50_raw(
     seed: int = 123,
     equal_per_class: bool = False,
     class_count: Optional[int] = None,
+    class_filter: Optional[List[str]] = None,
     duration: Optional[float] = None,
 ) -> Tuple[Dataset, Dataset, List[str], dict]:
 
@@ -240,16 +241,21 @@ def build_esc50_raw(
     tmp_all = ESC50Raw(root=root)
     all_classes = tmp_all.class_names
 
-    if class_count is not None:
+    if class_filter is not None:
+        unknown = [c for c in class_filter if c not in all_classes]
+        if unknown:
+            raise ValueError(f"class_filter contains unknown ESC-50 classes: {unknown}")
+        chosen_filter = list(class_filter)
+    elif class_count is not None:
         if class_count > len(all_classes):
             raise ValueError(
                 f"class_count={class_count} exceeds total classes {len(all_classes)}"
             )
-        class_filter = all_classes[:class_count]
+        chosen_filter = all_classes[:class_count]
     else:
-        class_filter = None
+        chosen_filter = None
 
-    base = ESC50Raw(root=root, class_filter=class_filter)
+    base = ESC50Raw(root=root, class_filter=chosen_filter)
     class_names = base.class_names
 
     # Build segments using duration instead of time_steps
