@@ -746,20 +746,6 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
         )
         saved.append(p)
 
-        p = os.path.join(subdir, "hop_ratio_vs_synaptic_ops.png")
-        plot_scatter_phase_colored(
-            g,
-            x_col="hop_ratio",
-            y_col="avg_synaptic_ops",
-            color_col="sample_acc",
-            out_path=p,
-            title=f"{dataset} | {learner} | hop ratio vs synaptic ops",
-            x_label="hop ratio",
-            y_label="avg synaptic operations",
-            color_label="sample_acc",
-        )
-        saved.append(p)
-
         p = os.path.join(subdir, "window_length_vs_firing_rate.png")
         plot_scatter_phase_colored(
             g,
@@ -774,20 +760,6 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
         )
         saved.append(p)
 
-        p = os.path.join(subdir, "hop_ratio_vs_firing_rate.png")
-        plot_scatter_phase_colored(
-            g,
-            x_col="hop_ratio",
-            y_col="firing_rate",
-            color_col="sample_acc",
-            out_path=p,
-            title=f"{dataset} | {learner} | hop ratio vs firing rate",
-            x_label="hop ratio",
-            y_label="firing rate",
-            color_label="sample_acc",
-        )
-        saved.append(p)
-
         p = os.path.join(subdir, "window_length_vs_energy.png")
         plot_scatter_phase_colored(
             g,
@@ -797,20 +769,6 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             out_path=p,
             title=f"{dataset} | {learner} | window length vs energy",
             x_label="window length",
-            y_label="energy per sample (pJ)",
-            color_label="sample_acc",
-        )
-        saved.append(p)
-
-        p = os.path.join(subdir, "hop_ratio_vs_energy.png")
-        plot_scatter_phase_colored(
-            g,
-            x_col="hop_ratio",
-            y_col="energy_per_sample_pj",
-            color_col="sample_acc",
-            out_path=p,
-            title=f"{dataset} | {learner} | hop ratio vs energy",
-            x_label="hop ratio",
             y_label="energy per sample (pJ)",
             color_label="sample_acc",
         )
@@ -921,18 +879,6 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
         )
         saved.append(p)
 
-        p = os.path.join(ds_dir, "hop_ratio_vs_synaptic_ops_all_methods.png")
-        plot_all_methods_scatter_colored_by_accuracy(
-            g,
-            x_col="hop_ratio",
-            y_col="avg_synaptic_ops",
-            out_path=p,
-            title=f"{dataset} | all methods | hop ratio vs synaptic ops",
-            x_label="hop ratio",
-            y_label="avg synaptic operations",
-        )
-        saved.append(p)
-
         p = os.path.join(ds_dir, "window_length_vs_firing_rate_all_methods.png")
         plot_all_methods_scatter_colored_by_accuracy(
             g,
@@ -945,18 +891,6 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
         )
         saved.append(p)
 
-        p = os.path.join(ds_dir, "hop_ratio_vs_firing_rate_all_methods.png")
-        plot_all_methods_scatter_colored_by_accuracy(
-            g,
-            x_col="hop_ratio",
-            y_col="firing_rate",
-            out_path=p,
-            title=f"{dataset} | all methods | hop ratio vs firing rate",
-            x_label="hop ratio",
-            y_label="firing rate",
-        )
-        saved.append(p)
-
         p = os.path.join(ds_dir, "window_length_vs_energy_all_methods.png")
         plot_all_methods_scatter_colored_by_accuracy(
             g,
@@ -965,18 +899,6 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             out_path=p,
             title=f"{dataset} | all methods | window length vs energy",
             x_label="window length",
-            y_label="energy per sample (pJ)",
-        )
-        saved.append(p)
-
-        p = os.path.join(ds_dir, "hop_ratio_vs_energy_all_methods.png")
-        plot_all_methods_scatter_colored_by_accuracy(
-            g,
-            x_col="hop_ratio",
-            y_col="energy_per_sample_pj",
-            out_path=p,
-            title=f"{dataset} | all methods | hop ratio vs energy",
-            x_label="hop ratio",
             y_label="energy per sample (pJ)",
         )
         saved.append(p)
