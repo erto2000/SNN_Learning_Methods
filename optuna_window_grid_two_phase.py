@@ -109,6 +109,7 @@ DATASET_T_HINT = {
     "pamap2": 128,
     "mitbih": 360,
     "dvs_gesture": 200,
+    "large_scale_audio": 301,
 }
 
 
@@ -342,6 +343,7 @@ def run_all_two_phase(
         "pamap2",
         "mitbih",
         "dvs_gesture",
+        "large_scale_audio",
     ]
     learners = ["bp", "eprop", "ff", "pepita"]
 
