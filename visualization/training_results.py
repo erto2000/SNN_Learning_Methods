@@ -62,11 +62,8 @@ def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_
             "firing_rate": payload["final"].get("firing_rate"),
             "avg_synaptic_operations": payload["final"].get("avg_synaptic_operations"),
 
-            "energy_per_synop_pj": payload["final"].get("energy_per_synop_pj"),
-            "energy_per_sample_pj": payload["final"].get("energy_per_sample_pj"),
-            "energy_per_sample_nj": payload["final"].get("energy_per_sample_nj"),
             "energy_per_sample_uj": payload["final"].get("energy_per_sample_uj"),
-            "energy_per_sample_mj": payload["final"].get("energy_per_sample_mj"),
+            "energy_breakdown_pct": payload["final"].get("energy_breakdown_pct"),
 
             "eval_dtype": payload["final"].get("eval_dtype"),
             "eval_int8_weights": payload["final"].get("eval_int8_weights"),

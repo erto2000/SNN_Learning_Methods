@@ -5,6 +5,7 @@ from datetime import datetime
 from networks.specs import NetConfig, LayerSpec
 from utils.segments import iter_pieces, majority_vote
 from networks.int8_linear import convert_linear_to_int8
+from utils.energy import compute_energy_breakdown
 
 
 def str_to_dtype(name: str) -> torch.dtype:
@@ -16,20 +17,6 @@ def str_to_dtype(name: str) -> torch.dtype:
     if name in ("bf16", "bfloat16"):
         return torch.bfloat16
     raise ValueError(f"Unknown dtype string: {name}")
-
-
-def _resolve_energy_per_synop_pj(
-    eval_dtype_str: str | None,
-    energy_fp32_pj: float,
-    energy_fp16_pj: float,
-) -> float:
-    name = str(eval_dtype_str or "fp32").lower()
-
-    if name in ("fp16", "float16", "16", "half", "bf16", "bfloat16"):
-        return float(energy_fp16_pj)
-
-    # default: fp32
-    return float(energy_fp32_pj)
 
 
 # ---------------------------
@@ -61,8 +48,6 @@ def eval_epoch(
     *,
     eval_dtype_str: str = None,
     use_int8_weights: bool = False,
-    energy_per_synop_fp32_pj: float = 0.0,
-    energy_per_synop_fp16_pj: float = 0.0,
 ) -> Dict[str, float]:
     learner.model.eval()
 
@@ -95,6 +80,8 @@ def eval_epoch(
     total_spike_count = 0.0
     total_synops = 0.0
     total_neuron_slots = 0.0
+    total_neuron_updates = 0.0
+    total_input_mac_ops = 0.0
     total_activity_samples = 0
 
     try:
@@ -122,6 +109,8 @@ def eval_epoch(
             total_spike_count += float(activity["total_spike_count"])
             total_synops += float(activity["synaptic_operations"])
             total_neuron_slots += float(activity["num_neuron_slots"])
+            total_neuron_updates += float(activity["neuron_updates"])
+            total_input_mac_ops += float(activity["input_mac_ops"])
             total_activity_samples += int(activity["num_samples"])
 
     finally:
@@ -132,14 +121,16 @@ def eval_epoch(
     avg_spike_count = total_spike_count / max(1, total_activity_samples)
     avg_synops = total_synops / max(1, total_activity_samples)
 
-    energy_per_synop_pj = _resolve_energy_per_synop_pj(
-        eval_dtype_str=eval_dtype_name,
-        energy_fp32_pj=energy_per_synop_fp32_pj,
-        energy_fp16_pj=energy_per_synop_fp16_pj,
-    )
-    energy_per_sample_pj = avg_synops * energy_per_synop_pj
+    aggregated_activity = {
+        "synaptic_operations": total_synops,
+        "neuron_updates": total_neuron_updates,
+        "input_mac_ops": total_input_mac_ops,
+        "num_samples": total_activity_samples,
+    }
 
-    return {
+    energy = compute_energy_breakdown(aggregated_activity)
+
+    result = {
         "window_acc": 100.0 * correct_windows / max(1, total_windows),
         "sample_acc": 100.0 * sample_correct / max(1, sample_total),
 
@@ -147,18 +138,12 @@ def eval_epoch(
         "avg_synaptic_operations": avg_synops,
         "firing_rate": firing_rate,
 
-        "energy_per_synop_pj": float(energy_per_synop_pj),
-        "energy_per_synop_fp32_pj": float(energy_per_synop_fp32_pj),
-        "energy_per_synop_fp16_pj": float(energy_per_synop_fp16_pj),
-
-        "energy_per_sample_pj": energy_per_sample_pj,
-        "energy_per_sample_nj": energy_per_sample_pj / 1e3,
-        "energy_per_sample_uj": energy_per_sample_pj / 1e6,
-        "energy_per_sample_mj": energy_per_sample_pj / 1e9,
+        **energy,
 
         "eval_dtype": str(eval_dtype_str),
         "eval_int8_weights": bool(use_int8_weights),
     }
+    return result
 
 
 def run_train_loop(
@@ -172,8 +157,6 @@ def run_train_loop(
     test_every_epoch: bool,
     eval_dtype_str: str = None,
     use_int8_weights: bool = False,
-    energy_per_synop_fp32_pj: float = 0.0,
-    energy_per_synop_fp16_pj: float = 0.0,
 ) -> Tuple[Dict[str, Any], Dict[int, Dict[str, float]]]:
     epoch_log: Dict[int, Dict[str, float]] = {}
 
@@ -206,8 +189,6 @@ def run_train_loop(
                 n_classes,
                 eval_dtype_str=eval_dtype_str,
                 use_int8_weights=use_int8_weights,
-                energy_per_synop_fp32_pj=energy_per_synop_fp32_pj,
-                energy_per_synop_fp16_pj=energy_per_synop_fp16_pj,
             )
 
             print(
@@ -235,8 +216,6 @@ def run_train_loop(
             n_classes,
             eval_dtype_str=eval_dtype_str,
             use_int8_weights=use_int8_weights,
-            energy_per_synop_fp32_pj=energy_per_synop_fp32_pj,
-            energy_per_synop_fp16_pj=energy_per_synop_fp16_pj,
         )
 
     return final_stats, epoch_log

@@ -89,7 +89,7 @@ def save_final_card(run_dir: str, summary: Dict[str, Any]) -> None:
         f"Avg spikes/sample: {final.get('avg_spike_count', 'n/a')}",
         f"Firing rate: {final.get('firing_rate', 'n/a')}",
         f"Avg SynOps/sample: {final.get('avg_synaptic_operations', 'n/a')}",
-        f"Energy per sample (uJ): {final.get('energy_per_sample_uj', 'n/a')}",
+        f"Energy total (uJ): {final.get('energy_total_uj', 'n/a')}",
         f"Eval dtype: {final.get('eval_dtype', 'n/a')}",
         f"Eval int8 weights: {final.get('eval_int8_weights', 'n/a')}",
     ]
@@ -102,6 +102,61 @@ def save_final_card(run_dir: str, summary: Dict[str, Any]) -> None:
     fig.savefig(os.path.join(run_dir, "final_card.png"))
     plt.close(fig)
 
+def save_energy_breakdown(run_dir: str, summary: Dict[str, Any]) -> None:
+    """
+    Saves energy_breakdown.png: stacked horizontal bar showing energy component percentages.
+    """
+    _ensure_dir(run_dir)
+    final = summary.get("final", {}) or {}
+    breakdown = final.get("energy_breakdown_pct")
+    if not breakdown:
+        return
+
+    # component labels and colours
+    components = [
+        ("input_layer",   "Input Layer",   "#2ca02c"),
+        ("synop",         "Synaptic Ops",  "#1f77b4"),
+        ("neuron_update", "Neuron Update", "#d62728"),
+        ("memory",        "Memory",        "#9467bd"),
+    ]
+
+    labels = []
+    values = []
+    colors = []
+    for key, label, color in components:
+        pct = breakdown.get(key, 0.0)
+        if pct > 0.01:  # skip negligible components
+            labels.append(label)
+            values.append(pct)
+            colors.append(color)
+
+    if not values:
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 3), dpi=140)
+
+    left = 0.0
+    for label, val, col in zip(labels, values, colors):
+        ax.barh(0, val, left=left, color=col, edgecolor="white", linewidth=0.5, label=f"{label} ({val:.1f}%)")
+        left += val
+
+    ax.set_xlim(0, 100)
+    ax.set_yticks([])
+    ax.set_xlabel("Energy Contribution (%)")
+
+    total_uj = final.get("energy_total_uj")
+    title = f"Energy Breakdown"
+    if total_uj is not None:
+        title += f" — Total: {total_uj:.4f} uJ/sample"
+    ax.set_title(title)
+
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.25), ncol=3, fontsize=9)
+    fig.tight_layout()
+    fig.savefig(os.path.join(run_dir, "energy_breakdown.png"), bbox_inches="tight")
+    plt.close(fig)
+
+
 def save_run_plots(run_dir: str, summary: Dict[str, Any]) -> None:
     save_training_curves(run_dir, summary)
     save_final_card(run_dir, summary)
+    save_energy_breakdown(run_dir, summary)

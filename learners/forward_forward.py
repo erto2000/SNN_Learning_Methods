@@ -165,6 +165,7 @@ class FFLearner(BaseLearner):
         C = self.meta["n_classes"]
         device = X.device
 
+        # Evaluate every class-conditioned copy
         X_rep = X.unsqueeze(1).expand(N, C, T, D).reshape(N * C, T, D)
         labels = torch.arange(C, device=device).unsqueeze(0).expand(N, C).reshape(-1)
         X_lbl = self._add_label_channels(X_rep, labels)  # [N*C, T, D+K]
@@ -174,8 +175,14 @@ class FFLearner(BaseLearner):
             return scores_flat.view(N, C)
 
         scores_flat, activity = self._goodness_scores(X_lbl, return_activity=True)
+
+        activity = dict(activity)
+        activity["num_samples"] = int(N)
+
         activity["ff_label_conditioned"] = True
         activity["ff_effective_batch_multiplier"] = int(C)
+        activity["ff_internal_num_samples"] = int(activity.get("num_samples", N * C))
+
         return scores_flat.view(N, C), activity
 
     # ------------- training -------------

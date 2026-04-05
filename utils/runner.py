@@ -179,8 +179,6 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                     test_every_epoch=g["TEST_EVERY_EPOCH"],
                     eval_dtype_str=g.get("EVAL_DTYPE", "fp32"),
                     use_int8_weights=bool(g.get("EVAL_INT8_WEIGHTS", False)),
-                    energy_per_synop_fp32_pj=float(g.get("ENERGY_PER_SYNOP_FP32_PJ", 0.9)),
-                    energy_per_synop_fp16_pj=float(g.get("ENERGY_PER_SYNOP_FP16_PJ", 0.45)),
                 )
 
                 if not g["TEST_EVERY_EPOCH"]:
