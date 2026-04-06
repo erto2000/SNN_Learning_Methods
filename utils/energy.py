@@ -81,6 +81,6 @@ def compute_energy_breakdown(
         # },
 
         # Simplified summary metrics
-        "energy_total_uj": energy_total_pj / 1e6,
+        "energy_per_sample_pj": energy_total_pj,
         "energy_breakdown_pct": breakdown_pct,
     }

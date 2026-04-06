@@ -21,6 +21,13 @@
             "request": "launch",
             "program": "${workspaceFolder}/visualize_datasets.py",
             "console": "integratedTerminal"
+        },
+        {
+            "name": "run_current_file",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
         }
     ]
 }

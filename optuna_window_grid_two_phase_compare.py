@@ -774,6 +774,18 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
         )
         saved.append(p)
 
+        p = os.path.join(subdir, "energy_vs_accuracy.png")
+        plot_scatter_phase_simple(
+            g,
+            x_col="energy_per_sample_pj",
+            y_col="sample_acc",
+            out_path=p,
+            title=f"{dataset} | {learner} | accuracy vs energy per sample",
+            x_label="energy per sample (pJ)",
+            y_label="sample_acc",
+        )
+        saved.append(p)
+
         p = os.path.join(subdir, "trials.csv")
         export_trials_csv(g, p)
         saved.append(p)
@@ -900,6 +912,18 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             title=f"{dataset} | all methods | window length vs energy",
             x_label="window length",
             y_label="energy per sample (pJ)",
+        )
+        saved.append(p)
+
+        p = os.path.join(ds_dir, "energy_vs_accuracy_all_methods.png")
+        plot_all_methods_scatter(
+            g,
+            x_col="energy_per_sample_pj",
+            y_col="sample_acc",
+            out_path=p,
+            title=f"{dataset} | all methods | accuracy vs energy per sample",
+            x_label="energy per sample (pJ)",
+            y_label="sample_acc",
         )
         saved.append(p)
 

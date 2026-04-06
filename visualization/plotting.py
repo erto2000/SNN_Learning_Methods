@@ -89,7 +89,7 @@ def save_final_card(run_dir: str, summary: Dict[str, Any]) -> None:
         f"Avg spikes/sample: {final.get('avg_spike_count', 'n/a')}",
         f"Firing rate: {final.get('firing_rate', 'n/a')}",
         f"Avg SynOps/sample: {final.get('avg_synaptic_operations', 'n/a')}",
-        f"Energy total (uJ): {final.get('energy_total_uj', 'n/a')}",
+        f"Energy/sample (pJ): {final.get('energy_per_sample_pj', 'n/a')}",
         f"Eval dtype: {final.get('eval_dtype', 'n/a')}",
         f"Eval int8 weights: {final.get('eval_int8_weights', 'n/a')}",
     ]
@@ -144,10 +144,10 @@ def save_energy_breakdown(run_dir: str, summary: Dict[str, Any]) -> None:
     ax.set_yticks([])
     ax.set_xlabel("Energy Contribution (%)")
 
-    total_uj = final.get("energy_total_uj")
+    energy_pj = final.get("energy_per_sample_pj")
     title = f"Energy Breakdown"
-    if total_uj is not None:
-        title += f" — Total: {total_uj:.4f} uJ/sample"
+    if energy_pj is not None:
+        title += f" — {energy_pj:.1f} pJ/sample"
     ax.set_title(title)
 
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.25), ncol=3, fontsize=9)
