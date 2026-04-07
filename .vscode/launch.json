@@ -23,7 +23,14 @@
             "console": "integratedTerminal"
         },
         {
-            "name": "run_current_file",
+            "name": "calculate_memory_requirements",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/calculate_memory_requirements.py",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "current_file",
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
