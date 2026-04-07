@@ -246,12 +246,12 @@ class PepitaLearner(BaseLearner):
         """
         Hs = [fc.out_features for fc in self.model.fcs]
         sum_hidden = sum(Hs)
+        K = int(self.meta.get("n_classes", 0))
 
         if self.mode == "accum":
-            # Running stats per layer, no temporal history.
-            elems = batch * sum_hidden
+            elems = batch * (sum_hidden + K)
         else:
             # 'original' PEPITA: store first-pass activations for all time steps.
-            elems = batch * time_steps * sum_hidden
+            elems = batch * time_steps * (sum_hidden + K)
 
         return elems * fp_bytes

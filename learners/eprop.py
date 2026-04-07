@@ -234,4 +234,8 @@ class EpropLearner(BaseLearner):
             if flag
         )
 
-        return (e_ff_elems + e_rec_elems) * fp_bytes
+        # e_out: [B, H_last, K] — output layer eligibility trace
+        K = int(self.meta.get("n_classes", 0))
+        e_out_elems = batch * Hs[-1] * K if Hs else 0
+
+        return (e_ff_elems + e_rec_elems + e_out_elems) * fp_bytes
