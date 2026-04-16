@@ -10,26 +10,19 @@
 #
 # Output layout:
 #   results/memory/
-#     overview_static_memory.png
-#     overview_dynamic_memory.png
-#     overview_total_memory.png
-#     overview_static_vs_dynamic_memory.png
+#     overview_training_memory.png
 #     overview_base_memory.csv
 #     {dataset}/
-#       1_static_vs_dynamic.png
-#       2_static_memory_vs_hidden_size.png
-#       3_dynamic_memory_vs_hidden_size.png
-#       4_memory_vs_batch_size.png
-#       5_memory_vs_time_steps.png
-#       6_static_memory_vs_num_layers.png
-#       7_memory_vs_num_layers.png
+#       1_training_memory.png
+#       2_training_memory_vs_hidden_size.png
+#       3_training_memory_vs_batch_size.png  (saved as 4_memory_vs_batch_size.png)
+#       4_training_memory_vs_time_steps.png  (saved as 5_memory_vs_time_steps.png)
+#       5_training_memory_vs_num_layers.png  (saved as 6_training_memory_vs_num_layers.png)
 #       0_base_memory.csv
-#       2_static_memory_vs_hidden_size.csv
-#       3_dynamic_memory_vs_hidden_size.csv
+#       2_training_memory_vs_hidden_size.csv
 #       4_dynamic_memory_vs_batch_size.csv
 #       5_dynamic_memory_vs_time_steps.csv
-#       6_static_memory_vs_num_layers.csv
-#       7_dynamic_memory_vs_num_layers.csv
+#       6_training_memory_vs_num_layers.csv
 
 from __future__ import annotations
 import os
@@ -98,8 +91,8 @@ def _dir(path: str) -> str:
     return path
 
 
-def _mb(b: int) -> float:
-    return b / (1024 ** 2)
+def _kb(b: int) -> float:
+    return b / 1024
 
 
 def _dataset_slug(name: str) -> str:
@@ -173,7 +166,7 @@ def _get_memory(
     batch: int,
     time_steps: int,
 ) -> tuple[int, int, int]:
-    """Returns (static_bytes, dynamic_bytes, fp_bytes). Does NOT load any data."""
+    """Returns (param_bytes, training_bytes, fp_bytes). Does NOT load any data."""
     g = _make_g(base_g, learner_name, hidden_sizes)
     cfg = build_cfg(meta["input_dim"], meta["n_classes"], g)
     m = dict(meta)
@@ -184,13 +177,12 @@ def _get_memory(
         warnings.warn(f"Could not build {learner_name} with hidden={hidden_sizes}: {e}")
         return 0, 0, 4
     fp = _infer_fp_bytes(learner.model)
-    static = learner.get_static_memory_bytes(fp_bytes=fp)
-    dynamic = learner.get_training_memory_bytes(batch=batch, time_steps=time_steps, fp_bytes=fp)
-    return static, dynamic, fp
+    param    = learner.get_param_memory_bytes(fp_bytes=fp)
+    training = learner.get_training_memory_bytes(batch=batch, time_steps=time_steps, fp_bytes=fp)
+    return param, training, fp
 
 
-def _apply_style(ax, title: str, xlabel: str, ylabel: str = "Memory (MB)") -> None:
-    ax.set_title(title, fontsize=10, fontweight="bold")
+def _apply_style(ax, xlabel: str, ylabel: str = "Memory (KB)") -> None:
     ax.set_xlabel(xlabel, fontsize=9)
     ax.set_ylabel(ylabel, fontsize=9)
     ax.grid(True, alpha=0.25, linestyle="--")
@@ -233,26 +225,18 @@ def _base_context_row(
 
 def plot_static_vs_dynamic(out_dir, ds_label, base_g, meta, base_hidden, base_batch, windowed) -> None:
     T = meta["time_steps"]
-    statics, dynamics, fp_bytes = [], [], 4
+    totals, fp_bytes = [], 4
     csv_rows = []
 
     for ln in LEARNERS:
-        s, d, fp = _get_memory(base_g, ln, meta, [base_hidden], base_batch, T)
-        s_mb = _mb(s)
-        d_mb = _mb(d)
-        statics.append(s_mb)
-        dynamics.append(d_mb)
+        p, t, fp = _get_memory(base_g, ln, meta, [base_hidden], base_batch, T)
+        total_kb = _kb(t)
+        totals.append(total_kb)
         fp_bytes = fp
 
         row = _base_context_row(ds_label, ln, fp, base_hidden, base_batch, T, windowed, meta)
-        row.update({
-            "static_bytes": s,
-            "dynamic_bytes": d,
-            "total_bytes": s + d,
-            "static_mb": s_mb,
-            "dynamic_mb": d_mb,
-            "total_mb": s_mb + d_mb,
-        })
+        row["training_kb"] = total_kb
+        row["training_bytes"] = t
         csv_rows.append(row)
 
     _csv_write(
@@ -263,8 +247,7 @@ def plot_static_vs_dynamic(out_dir, ds_label, base_g, meta, base_hidden, base_ba
             "precision", "fp_bytes",
             "base_hidden", "base_batch", "time_steps", "windowed",
             "input_dim", "n_classes",
-            "static_bytes", "dynamic_bytes", "total_bytes",
-            "static_mb", "dynamic_mb", "total_mb",
+            "training_bytes", "training_kb",
         ],
     )
 
@@ -274,42 +257,23 @@ def plot_static_vs_dynamic(out_dir, ds_label, base_g, meta, base_hidden, base_ba
     w = 0.5
 
     fig, ax = plt.subplots(figsize=(8, 5), dpi=140)
-    ax.bar(x, statics, w, label="Static (weights)", color=colors, alpha=0.85)
-    ax.bar(
-        x,
-        dynamics,
-        w,
-        bottom=statics,
-        label="Dynamic (activations/traces)",
-        color=colors,
-        alpha=0.40,
-        hatch="//",
-        edgecolor="white",
-    )
+    ax.bar(x, totals, w, color=colors, alpha=0.85)
 
-    max_total = max(s + d for s, d in zip(statics, dynamics)) if statics else 1
-    for i, (s, d) in enumerate(zip(statics, dynamics)):
-        total = s + d
-        ax.text(
-            x[i],
-            total + max_total * 0.01,
-            f"{total:.3f} MB",
-            ha="center",
-            va="bottom",
-            fontsize=8,
-        )
+    max_val = max(totals) if totals else 1
+    for i, v in enumerate(totals):
+        ax.text(x[i], v + max_val * 0.01, f"{v:.1f} KB",
+                ha="center", va="bottom", fontsize=8)
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=9)
     t_label = f"window L={T}" if windowed else f"T={T}"
     ax.set_title(
-        f"{ds_label} — Static vs Dynamic Memory\n"
+        f"{ds_label} — Training Memory\n"
         f"(hidden=[{base_hidden}], batch={base_batch}, {t_label}, {_fp_label(fp_bytes)})",
         fontsize=11,
         fontweight="bold",
     )
-    ax.set_ylabel("Memory (MB)", fontsize=9)
-    ax.legend(fontsize=8)
+    ax.set_ylabel("Memory (KB)", fontsize=9)
     ax.grid(True, alpha=0.25, axis="y", linestyle="--")
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, "1_static_vs_dynamic.png"))
@@ -319,25 +283,19 @@ def plot_static_vs_dynamic(out_dir, ds_label, base_g, meta, base_hidden, base_ba
 def plot_vs_hidden_size(out_dir, ds_label, base_g, meta, base_batch, windowed) -> None:
     T = meta["time_steps"]
     fp_bytes = 4
-
-    static_rows = []
-    dynamic_rows = []
-
-    # --- Static memory figure ---
+    rows = []
     fig, ax = plt.subplots(figsize=(8, 5), dpi=140)
 
     for ln in LEARNERS:
-        vals_s = []
+        vals = []
         for h in HIDDEN_SIZES_SWEEP:
-            s, _, fp = _get_memory(base_g, ln, meta, [h], base_batch, T)
-            s_mb = _mb(s)
-            v = s_mb
-            if PER_DATASET_LOG_SCALE:
-                v = max(v, PER_DATASET_LOG_EPS_MB)
-            vals_s.append(v)
+            p, t, fp = _get_memory(base_g, ln, meta, [h], base_batch, T)
+            total_kb = _kb(t)
+            v = max(total_kb, PER_DATASET_LOG_EPS_MB) if PER_DATASET_LOG_SCALE else total_kb
+            vals.append(v)
             fp_bytes = fp
 
-            static_rows.append({
+            rows.append({
                 "dataset": ds_label,
                 "learner_key": ln,
                 "learner_label": LEARNER_LABELS[ln],
@@ -347,30 +305,25 @@ def plot_vs_hidden_size(out_dir, ds_label, base_g, meta, base_batch, windowed) -
                 "windowed": windowed,
                 "precision": _fp_label(fp),
                 "fp_bytes": fp,
-                "static_bytes": s,
-                "static_mb": s_mb,
+                "training_bytes": t,
+                "training_kb": total_kb,
             })
 
-        kw = dict(
-            linewidth=2,
-            color=LEARNER_COLORS[ln],
-            label=LEARNER_LABELS[ln],
-            **LEARNER_STYLES[ln],
-        )
-        ax.plot(HIDDEN_SIZES_SWEEP, vals_s, **kw)
+        ax.plot(HIDDEN_SIZES_SWEEP, vals, linewidth=2,
+                color=LEARNER_COLORS[ln], label=LEARNER_LABELS[ln], **LEARNER_STYLES[ln])
 
     _csv_write(
-        os.path.join(out_dir, "2_static_memory_vs_hidden_size.csv"),
-        static_rows,
+        os.path.join(out_dir, "2_training_memory_vs_hidden_size.csv"),
+        rows,
         [
             "dataset", "learner_key", "learner_label",
             "hidden_size", "batch_size", "time_steps", "windowed",
             "precision", "fp_bytes",
-            "static_bytes", "static_mb",
+            "training_bytes", "training_kb",
         ],
     )
 
-    _apply_style(ax, "Static Memory vs Hidden Width", "Hidden layer width (neurons)")
+    _apply_style(ax, "Hidden layer width (neurons)")
     _apply_numeric_x_log(ax, HIDDEN_SIZES_SWEEP)
 
     if PER_DATASET_LOG_SCALE:
@@ -378,74 +331,12 @@ def plot_vs_hidden_size(out_dir, ds_label, base_g, meta, base_batch, windowed) -
 
     t_label = f"window L={T}" if windowed else f"T={T}"
     fig.suptitle(
-        f"{ds_label} — Static Memory vs Hidden Size  (batch={base_batch}, {t_label}, {_fp_label(fp_bytes)})",
+        f"{ds_label} — Training Memory vs Hidden Size  (batch={base_batch}, {t_label}, {_fp_label(fp_bytes)})",
         fontsize=12,
         fontweight="bold",
     )
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "2_static_memory_vs_hidden_size.png"))
-    plt.close(fig)
-
-    # --- Dynamic memory figure ---
-    fig, ax = plt.subplots(figsize=(8, 5), dpi=140)
-
-    for ln in LEARNERS:
-        vals_d = []
-        for h in HIDDEN_SIZES_SWEEP:
-            _, d, fp = _get_memory(base_g, ln, meta, [h], base_batch, T)
-            d_mb = _mb(d)
-            v = d_mb
-            if PER_DATASET_LOG_SCALE:
-                v = max(v, PER_DATASET_LOG_EPS_MB)
-            vals_d.append(v)
-            fp_bytes = fp
-
-            dynamic_rows.append({
-                "dataset": ds_label,
-                "learner_key": ln,
-                "learner_label": LEARNER_LABELS[ln],
-                "hidden_size": h,
-                "batch_size": base_batch,
-                "time_steps": T,
-                "windowed": windowed,
-                "precision": _fp_label(fp),
-                "fp_bytes": fp,
-                "dynamic_bytes": d,
-                "dynamic_mb": d_mb,
-            })
-
-        kw = dict(
-            linewidth=2,
-            color=LEARNER_COLORS[ln],
-            label=LEARNER_LABELS[ln],
-            **LEARNER_STYLES[ln],
-        )
-        ax.plot(HIDDEN_SIZES_SWEEP, vals_d, **kw)
-
-    _csv_write(
-        os.path.join(out_dir, "3_dynamic_memory_vs_hidden_size.csv"),
-        dynamic_rows,
-        [
-            "dataset", "learner_key", "learner_label",
-            "hidden_size", "batch_size", "time_steps", "windowed",
-            "precision", "fp_bytes",
-            "dynamic_bytes", "dynamic_mb",
-        ],
-    )
-
-    _apply_style(ax, "Dynamic Memory vs Hidden Width", "Hidden layer width (neurons)")
-    _apply_numeric_x_log(ax, HIDDEN_SIZES_SWEEP)
-
-    if PER_DATASET_LOG_SCALE:
-        ax.set_yscale("log")
-
-    fig.suptitle(
-        f"{ds_label} — Dynamic Memory vs Hidden Size  (batch={base_batch}, {t_label}, {_fp_label(fp_bytes)})",
-        fontsize=12,
-        fontweight="bold",
-    )
-    fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "3_dynamic_memory_vs_hidden_size.png"))
+    fig.savefig(os.path.join(out_dir, "2_training_memory_vs_hidden_size.png"))
     plt.close(fig)
 
 
@@ -458,11 +349,9 @@ def plot_vs_batch_size(out_dir, ds_label, base_g, meta, base_hidden, windowed) -
     for ln in LEARNERS:
         vals = []
         for b in BATCH_SIZES_SWEEP:
-            _, d, fp = _get_memory(base_g, ln, meta, [base_hidden], b, T)
-            d_mb = _mb(d)
-            v = d_mb
-            if PER_DATASET_LOG_SCALE:
-                v = max(v, PER_DATASET_LOG_EPS_MB)
+            p, t, fp = _get_memory(base_g, ln, meta, [base_hidden], b, T)
+            total_kb = _kb(t)
+            v = max(total_kb, PER_DATASET_LOG_EPS_MB) if PER_DATASET_LOG_SCALE else total_kb
             vals.append(v)
             fp_bytes = fp
 
@@ -476,8 +365,8 @@ def plot_vs_batch_size(out_dir, ds_label, base_g, meta, base_hidden, windowed) -
                 "windowed": windowed,
                 "precision": _fp_label(fp),
                 "fp_bytes": fp,
-                "dynamic_bytes": d,
-                "dynamic_mb": d_mb,
+                "training_bytes": t,
+                "training_kb": total_kb,
             })
 
         ax.plot(
@@ -496,16 +385,16 @@ def plot_vs_batch_size(out_dir, ds_label, base_g, meta, base_hidden, windowed) -
             "dataset", "learner_key", "learner_label",
             "hidden_size", "batch_size", "time_steps", "windowed",
             "precision", "fp_bytes",
-            "dynamic_bytes", "dynamic_mb",
+            "training_bytes", "training_kb",
         ],
     )
 
     t_label = f"window L={T}" if windowed else f"T={T}"
-    _apply_style(
-        ax,
-        f"{ds_label} — Dynamic Memory vs Batch Size\n(hidden=[{base_hidden}], {t_label}, {_fp_label(fp_bytes)})",
-        "Batch size",
+    ax.set_title(
+        f"{ds_label} — Training Memory vs Batch Size\n(hidden=[{base_hidden}], {t_label}, {_fp_label(fp_bytes)})",
+        fontsize=11, fontweight="bold",
     )
+    _apply_style(ax, "Batch size")
     _apply_numeric_x_log(ax, BATCH_SIZES_SWEEP)
 
     if PER_DATASET_LOG_SCALE:
@@ -526,11 +415,9 @@ def plot_vs_time_steps(out_dir, ds_label, base_g, meta, base_hidden, base_batch,
     for ln in LEARNERS:
         vals = []
         for T in TIME_STEPS_SWEEP:
-            _, d, fp = _get_memory(base_g, ln, meta, [base_hidden], base_batch, T)
-            d_mb = _mb(d)
-            v = d_mb
-            if PER_DATASET_LOG_SCALE:
-                v = max(v, PER_DATASET_LOG_EPS_MB)
+            p, t, fp = _get_memory(base_g, ln, meta, [base_hidden], base_batch, T)
+            total_kb = _kb(t)
+            v = max(total_kb, PER_DATASET_LOG_EPS_MB) if PER_DATASET_LOG_SCALE else total_kb
             vals.append(v)
             fp_bytes = fp
 
@@ -545,8 +432,8 @@ def plot_vs_time_steps(out_dir, ds_label, base_g, meta, base_hidden, base_batch,
                 "windowed": windowed,
                 "precision": _fp_label(fp),
                 "fp_bytes": fp,
-                "dynamic_bytes": d,
-                "dynamic_mb": d_mb,
+                "training_bytes": t,
+                "training_kb": total_kb,
             })
 
         ax.plot(
@@ -566,7 +453,7 @@ def plot_vs_time_steps(out_dir, ds_label, base_g, meta, base_hidden, base_batch,
             "hidden_size", "batch_size",
             "time_steps", "native_time_steps", "windowed",
             "precision", "fp_bytes",
-            "dynamic_bytes", "dynamic_mb",
+            "training_bytes", "training_kb",
         ],
     )
 
@@ -577,12 +464,12 @@ def plot_vs_time_steps(out_dir, ds_label, base_g, meta, base_hidden, base_batch,
         linewidth=1.5,
         label=f"Data Length = {native_T}",
     )
-    _apply_style(
-        ax,
-        f"{ds_label} — Dynamic Memory vs {'Window' if windowed else 'Sequence'} Length\n"
+    ax.set_title(
+        f"{ds_label} — Training Memory vs {'Window' if windowed else 'Sequence'} Length\n"
         f"(hidden=[{base_hidden}], batch={base_batch}, {_fp_label(fp_bytes)})",
-        xlabel,
+        fontsize=11, fontweight="bold",
     )
+    _apply_style(ax, xlabel)
     _apply_numeric_x_log(ax, TIME_STEPS_SWEEP)
 
     if PER_DATASET_LOG_SCALE:
@@ -597,25 +484,19 @@ def plot_vs_num_layers(out_dir, ds_label, base_g, meta, base_hidden, base_batch,
     T = meta["time_steps"]
     fp_bytes = 4
     t_label = f"window L={T}" if windowed else f"T={T}"
-
-    static_rows = []
-    dynamic_rows = []
-
-    # --- Static memory figure ---
+    rows = []
     fig, ax = plt.subplots(figsize=(8, 5), dpi=140)
 
     for ln in LEARNERS:
-        vals_s = []
+        vals = []
         for n in NUM_LAYERS_SWEEP:
-            s, _, fp = _get_memory(base_g, ln, meta, [base_hidden] * n, base_batch, T)
-            s_mb = _mb(s)
-            v = s_mb
-            if PER_DATASET_LOG_SCALE:
-                v = max(v, PER_DATASET_LOG_EPS_MB)
-            vals_s.append(v)
+            p, t, fp = _get_memory(base_g, ln, meta, [base_hidden] * n, base_batch, T)
+            total_kb = _kb(t)
+            v = max(total_kb, PER_DATASET_LOG_EPS_MB) if PER_DATASET_LOG_SCALE else total_kb
+            vals.append(v)
             fp_bytes = fp
 
-            static_rows.append({
+            rows.append({
                 "dataset": ds_label,
                 "learner_key": ln,
                 "learner_label": LEARNER_LABELS[ln],
@@ -626,108 +507,39 @@ def plot_vs_num_layers(out_dir, ds_label, base_g, meta, base_hidden, base_batch,
                 "windowed": windowed,
                 "precision": _fp_label(fp),
                 "fp_bytes": fp,
-                "static_bytes": s,
-                "static_mb": s_mb,
+                "training_bytes": t,
+                "training_kb": total_kb,
             })
 
-        kw = dict(
-            linewidth=2,
-            color=LEARNER_COLORS[ln],
-            label=LEARNER_LABELS[ln],
-            **LEARNER_STYLES[ln],
-        )
-        ax.plot(NUM_LAYERS_SWEEP, vals_s, **kw)
+        ax.plot(NUM_LAYERS_SWEEP, vals, linewidth=2,
+                color=LEARNER_COLORS[ln], label=LEARNER_LABELS[ln], **LEARNER_STYLES[ln])
 
     _csv_write(
-        os.path.join(out_dir, "6_static_memory_vs_num_layers.csv"),
-        static_rows,
+        os.path.join(out_dir, "6_training_memory_vs_num_layers.csv"),
+        rows,
         [
             "dataset", "learner_key", "learner_label",
             "num_layers", "hidden_size_per_layer", "batch_size", "time_steps", "windowed",
             "precision", "fp_bytes",
-            "static_bytes", "static_mb",
+            "training_bytes", "training_kb",
         ],
     )
-
-    _apply_style(ax, "Static Memory vs Depth", "Number of hidden layers")
-    _apply_numeric_x_log(ax, NUM_LAYERS_SWEEP)
-
-    if PER_DATASET_LOG_SCALE:
-        ax.set_yscale("log")
 
     scale_label = "Log Scale" if PER_DATASET_LOG_SCALE else "Linear Scale"
-    fig.suptitle(
-        f"{ds_label} — Static Memory vs Network Depth ({scale_label})\n"
-        f"(hidden={base_hidden}/layer, batch={base_batch}, {t_label}, {_fp_label(fp_bytes)})",
-        fontsize=11,
-        fontweight="bold",
-    )
-    fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "6_static_memory_vs_num_layers.png"))
-    plt.close(fig)
-
-    # --- Dynamic memory figure ---
-    fig, ax = plt.subplots(figsize=(8, 5), dpi=140)
-
-    for ln in LEARNERS:
-        vals_d = []
-        for n in NUM_LAYERS_SWEEP:
-            _, d, fp = _get_memory(base_g, ln, meta, [base_hidden] * n, base_batch, T)
-            d_mb = _mb(d)
-            v = d_mb
-            if PER_DATASET_LOG_SCALE:
-                v = max(v, PER_DATASET_LOG_EPS_MB)
-            vals_d.append(v)
-            fp_bytes = fp
-
-            dynamic_rows.append({
-                "dataset": ds_label,
-                "learner_key": ln,
-                "learner_label": LEARNER_LABELS[ln],
-                "num_layers": n,
-                "hidden_size_per_layer": base_hidden,
-                "batch_size": base_batch,
-                "time_steps": T,
-                "windowed": windowed,
-                "precision": _fp_label(fp),
-                "fp_bytes": fp,
-                "dynamic_bytes": d,
-                "dynamic_mb": d_mb,
-            })
-
-        kw = dict(
-            linewidth=2,
-            color=LEARNER_COLORS[ln],
-            label=LEARNER_LABELS[ln],
-            **LEARNER_STYLES[ln],
-        )
-        ax.plot(NUM_LAYERS_SWEEP, vals_d, **kw)
-
-    _csv_write(
-        os.path.join(out_dir, "7_dynamic_memory_vs_num_layers.csv"),
-        dynamic_rows,
-        [
-            "dataset", "learner_key", "learner_label",
-            "num_layers", "hidden_size_per_layer", "batch_size", "time_steps", "windowed",
-            "precision", "fp_bytes",
-            "dynamic_bytes", "dynamic_mb",
-        ],
-    )
-
-    _apply_style(ax, "Dynamic Memory vs Depth", "Number of hidden layers")
+    _apply_style(ax, "Number of hidden layers")
     _apply_numeric_x_log(ax, NUM_LAYERS_SWEEP)
 
     if PER_DATASET_LOG_SCALE:
         ax.set_yscale("log")
 
     fig.suptitle(
-        f"{ds_label} — Dynamic Memory vs Network Depth\n"
+        f"{ds_label} — Training Memory vs Network Depth\n"
         f"(hidden={base_hidden}/layer, batch={base_batch}, {t_label}, {_fp_label(fp_bytes)})",
         fontsize=11,
         fontweight="bold",
     )
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "7_dynamic_memory_vs_num_layers.png"))
+    fig.savefig(os.path.join(out_dir, "6_training_memory_vs_num_layers.png"))
     plt.close(fig)
 
 
@@ -737,16 +549,14 @@ def write_overview_csv(all_results: dict, out_dir: str, fp_bytes: int = 4) -> No
     rows = []
     for ds_label, learner_map in all_results.items():
         for ln in LEARNERS:
-            s_mb, d_mb = learner_map.get(ln, (0.0, 0.0))
+            training_kb = learner_map.get(ln, 0.0)
             rows.append({
                 "dataset": ds_label,
                 "learner_key": ln,
                 "learner_label": LEARNER_LABELS[ln],
                 "precision": _fp_label(fp_bytes),
                 "fp_bytes": fp_bytes,
-                "static_mb": s_mb,
-                "dynamic_mb": d_mb,
-                "total_mb": s_mb + d_mb,
+                "training_kb": training_kb,
             })
 
     _csv_write(
@@ -755,16 +565,13 @@ def write_overview_csv(all_results: dict, out_dir: str, fp_bytes: int = 4) -> No
         [
             "dataset", "learner_key", "learner_label",
             "precision", "fp_bytes",
-            "static_mb", "dynamic_mb", "total_mb",
+            "training_kb",
         ],
     )
 
 
-def plot_overview(all_results: dict, out_dir: str, component: str, fp_bytes: int = 4) -> None:
-    """
-    all_results[ds_label][learner] = (static_mb, dynamic_mb)
-    component: "static" | "dynamic" | "total"
-    """
+def plot_overview(all_results: dict, out_dir: str, fp_bytes: int = 4) -> None:
+    """all_results[ds_label][learner] = training_kb (total training memory)."""
     ds_names = list(all_results.keys())
     n_ds = len(ds_names)
     n_ln = len(LEARNERS)
@@ -777,28 +584,21 @@ def plot_overview(all_results: dict, out_dir: str, component: str, fp_bytes: int
     for i, ln in enumerate(LEARNERS):
         vals = []
         for ds in ds_names:
-            s, d = all_results[ds].get(ln, (0.0, 0.0))
-            v = s if component == "static" else d if component == "dynamic" else s + d
+            v = all_results[ds].get(ln, 0.0)
             if OVERVIEW_LOG_SCALE:
                 v = max(v, OVERVIEW_LOG_EPS_MB)
             vals.append(v)
 
-        ax.bar(
-            x + offsets[i],
-            vals,
-            w * 0.9,
-            label=LEARNER_LABELS[ln],
-            color=LEARNER_COLORS[ln],
-            alpha=0.85,
-        )
+        ax.bar(x + offsets[i], vals, w * 0.9,
+               label=LEARNER_LABELS[ln], color=LEARNER_COLORS[ln], alpha=0.85)
 
     ax.set_xticks(x)
     ax.set_xticklabels(ds_names, rotation=28, ha="right", fontsize=8)
-    ax.set_ylabel("Memory (MB)", fontsize=9)
+    ax.set_ylabel("Memory (KB)", fontsize=9)
 
     scale_label = "Log Scale" if OVERVIEW_LOG_SCALE else "Linear Scale"
     ax.set_title(
-        f"All Datasets — {component.capitalize()} Memory per Learner  ({_fp_label(fp_bytes)}, {scale_label})",
+        f"All Datasets — Training Memory per Learner  ({_fp_label(fp_bytes)}, {scale_label})",
         fontsize=12,
         fontweight="bold",
     )
@@ -809,79 +609,10 @@ def plot_overview(all_results: dict, out_dir: str, component: str, fp_bytes: int
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.25, axis="y", linestyle="--")
     fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, f"overview_{component}_memory.png"), bbox_inches="tight")
+    fig.savefig(os.path.join(out_dir, "overview_training_memory.png"), bbox_inches="tight")
     plt.close(fig)
 
 
-def plot_overview_static_vs_dynamic(all_results: dict, out_dir: str, fp_bytes: int = 4) -> None:
-    """
-    all_results[ds_label][learner] = (static_mb, dynamic_mb)
-    Creates one overview figure with stacked bars:
-      - x axis: datasets
-      - within each dataset: one bar per learner
-      - each bar: static + dynamic stacked
-    """
-    ds_names = list(all_results.keys())
-    n_ds = len(ds_names)
-    n_ln = len(LEARNERS)
-    x = np.arange(n_ds)
-    w = 0.18
-    offsets = np.linspace(-(n_ln - 1) / 2, (n_ln - 1) / 2, n_ln) * w
-
-    fig, ax = plt.subplots(figsize=(max(12, n_ds * 1.5), 6), dpi=140)
-
-    for i, ln in enumerate(LEARNERS):
-        statics = []
-        dynamics = []
-        for ds in ds_names:
-            s, d = all_results[ds].get(ln, (0.0, 0.0))
-            if OVERVIEW_LOG_SCALE:
-                s = max(s, OVERVIEW_LOG_EPS_MB)
-                d = max(d, OVERVIEW_LOG_EPS_MB)
-            statics.append(s)
-            dynamics.append(d)
-
-        xpos = x + offsets[i]
-
-        ax.bar(
-            xpos,
-            statics,
-            w * 0.9,
-            label=f"{LEARNER_LABELS[ln]} static",
-            color=LEARNER_COLORS[ln],
-            alpha=0.85,
-        )
-        ax.bar(
-            xpos,
-            dynamics,
-            w * 0.9,
-            bottom=statics,
-            label=f"{LEARNER_LABELS[ln]} dynamic",
-            color=LEARNER_COLORS[ln],
-            alpha=0.40,
-            hatch="//",
-            edgecolor="white",
-        )
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(ds_names, rotation=28, ha="right", fontsize=8)
-    ax.set_ylabel("Memory (MB)", fontsize=9)
-
-    scale_label = "Log Scale" if OVERVIEW_LOG_SCALE else "Linear Scale"
-    ax.set_title(
-        f"All Datasets — Static vs Dynamic Memory per Learner ({_fp_label(fp_bytes)}, {scale_label})",
-        fontsize=12,
-        fontweight="bold",
-    )
-
-    if OVERVIEW_LOG_SCALE:
-        ax.set_yscale("log")
-
-    ax.grid(True, alpha=0.25, axis="y", linestyle="--")
-    ax.legend(fontsize=8, ncol=2)
-    fig.tight_layout()
-    fig.savefig(os.path.join(out_dir, "overview_static_vs_dynamic_memory.png"), bbox_inches="tight")
-    plt.close(fig)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -938,12 +669,12 @@ def main() -> None:
         all_results[ds_label] = {}
         ds_fp_bytes = 4
         for ln in LEARNERS:
-            s, d, fp = _get_memory(rep_g, ln, meta, [base_hidden], base_batch, T)
-            all_results[ds_label][ln] = (_mb(s), _mb(d))
+            p, t, fp = _get_memory(rep_g, ln, meta, [base_hidden], base_batch, T)
+            all_results[ds_label][ln] = _kb(t)
             ds_fp_bytes = fp
             global_fp_bytes = fp
             print(
-                f"    {LEARNER_LABELS[ln]:20s}  static={_mb(s):.4f} MB  dynamic={_mb(d):.4f} MB  [{_fp_label(fp)}]"
+                f"    {LEARNER_LABELS[ln]:20s}  training={_kb(t):.4f} KB  [{_fp_label(fp)}]"
             )
 
         out_dir = _dir(os.path.join(OUT_ROOT, _dataset_slug(dataset_key)))
@@ -957,12 +688,9 @@ def main() -> None:
 
         print(f"  Saved: {out_dir}\n")
 
-    print("Plotting cross-dataset overviews and writing overview CSV …")
+    print("Plotting cross-dataset overview and writing overview CSV …")
     write_overview_csv(all_results, OUT_ROOT, global_fp_bytes)
-    plot_overview_static_vs_dynamic(all_results, OUT_ROOT, global_fp_bytes)
-    plot_overview(all_results, OUT_ROOT, "static", global_fp_bytes)
-    plot_overview(all_results, OUT_ROOT, "dynamic", global_fp_bytes)
-    plot_overview(all_results, OUT_ROOT, "total", global_fp_bytes)
+    plot_overview(all_results, OUT_ROOT, global_fp_bytes)
     print(f"Done. All graphs and CSVs under {os.path.abspath(OUT_ROOT)}")
 
 

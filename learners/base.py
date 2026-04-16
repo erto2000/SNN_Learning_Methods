@@ -32,7 +32,7 @@ class BaseLearner(ABC):
         """Single-batch update. Returns logs like {'loss': float, 'acc': float[%]}."""
         ...
 
-    def get_static_memory_bytes(self, fp_bytes: int = 4) -> int:
+    def get_param_memory_bytes(self, fp_bytes: int = 4) -> int:
         fcs = getattr(self.model, "fcs", None)
         if fcs is None or len(fcs) == 0:
             return 0
@@ -44,11 +44,12 @@ class BaseLearner(ABC):
         r_flags = list(getattr(self.model, "Wrec_flags", [False] * L))
         C = int(self.meta.get("n_classes", getattr(self.model, "n_classes", 0)))
 
-        Nf = d[0] * d0 + sum(d[l] * d[l - 1] for l in range(1, L))
-        Nr = sum((d[l] * d[l]) for l in range(L) if r_flags[l])
-        Nout = C * d[-1] if getattr(self.model, "head", None) is not None else 0
+        Nf    = d[0] * d0 + sum(d[l] * d[l - 1] for l in range(1, L))
+        Nbias = sum(d)  # one bias per hidden neuron across all layers
+        Nr    = sum((d[l] * d[l]) for l in range(L) if r_flags[l])
+        Nout  = C * d[-1] if getattr(self.model, "head", None) is not None else 0
 
-        return (Nf + Nr + Nout) * fp_bytes
+        return (Nf + Nbias + Nr + Nout) * fp_bytes
 
     def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
         return 0

@@ -118,7 +118,7 @@ DEFAULT = dict(
     EP_WEIGHT_CLIP   = 1.5,
 
     # PEPITA
-    PEP_MODE         = "original",
+    PEP_MODE         = "accum",
     PEP_LR           = 1e-2,
     PEP_MAX_REL_STEP = 0.05,
     PEP_MOD_RATIO    = 0.1,

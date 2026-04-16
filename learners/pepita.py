@@ -222,14 +222,6 @@ class PepitaLearner(BaseLearner):
     # -------------------------------------------------------------------------
     # Memory estimation
     # -------------------------------------------------------------------------
-    def get_static_memory_bytes(self, fp_bytes: int = 4) -> int:
-        """
-        Network params (excluding unused recurrent weights) + feedback matrix F.
-        """
-        base = super().get_static_memory_bytes(fp_bytes=fp_bytes)
-        F_elems = self.F.numel()
-        return base + F_elems * fp_bytes
-
     def get_training_memory_bytes(
         self,
         batch: int,
@@ -237,21 +229,16 @@ class PepitaLearner(BaseLearner):
         fp_bytes: int = 4,
     ) -> int:
         """
-        Approximate training memory:
-
-        - mode='original': first pass stores activations over all time steps;
-          second pass does not store activations.
-        - mode='accum': assume an accumulated variant that only keeps per-layer
-          running states (no T factor).
+        N_param + N_state + N_intermediate + N_grad
+          N_param        ~ get_param_memory_bytes()  (weights + biases only)
+          N_state        = B * sum_l d_l  (first pass activations)
+          N_intermediate = B * sum_l d_l + F_elems  (second pass activations + feedback matrix F)
+          N_grad         ~ N_param        (one .grad buffer per parameter tensor)
+        Memory is independent of T — PEPITA uses spike-rate differences, not history.
         """
         Hs = [fc.out_features for fc in self.model.fcs]
-        sum_hidden = sum(Hs)
-        K = int(self.meta.get("n_classes", 0))
-
-        if self.mode == "accum":
-            elems = batch * (sum_hidden + K)
-        else:
-            # 'original' PEPITA: store first-pass activations for all time steps.
-            elems = batch * time_steps * (sum_hidden + K)
-
-        return elems * fp_bytes
+        N_param        = self.get_param_memory_bytes(fp_bytes=fp_bytes)
+        N_state        = batch * sum(Hs) * fp_bytes
+        N_intermediate = batch * sum(Hs) * fp_bytes + self.F.numel() * fp_bytes
+        N_grad         = self.get_param_memory_bytes(fp_bytes=fp_bytes)
+        return N_param + N_state + N_intermediate + N_grad

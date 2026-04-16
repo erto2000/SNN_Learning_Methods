@@ -92,13 +92,13 @@ def _print_memory_info(static_bytes: int,
         train_mb = train_bytes / mb
         print(
             f"[Memory] dtype={fp_bytes*8}-bit | "
-            f"static={static_mb:.2f} MB | "
+            f"param={static_mb:.2f} MB | "
             f"train_batch={train_mb:.2f} MB (B={batch_size}, T={time_steps})"
         )
     else:
         print(
             f"[Memory] dtype={fp_bytes*8}-bit | "
-            f"static={static_mb:.2f} MB | train_batch=n/a"
+            f"param={static_mb:.2f} MB | train_batch=n/a"
         )
 
 
@@ -149,7 +149,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                 # Memory estimates (auto: uses meta time_steps and model dtype)
                 fp_bytes = _infer_fp_bytes(learner.model)
                 time_steps = meta.get("time_steps")
-                static_mem_bytes = learner.get_static_memory_bytes(fp_bytes=fp_bytes)
+                static_mem_bytes = learner.get_param_memory_bytes(fp_bytes=fp_bytes)
                 train_mem_bytes = None
                 if time_steps is not None:
                     train_mem_bytes = learner.get_training_memory_bytes(

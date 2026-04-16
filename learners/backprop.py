@@ -71,12 +71,15 @@ class BackpropLearner(BaseLearner):
 
     def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
         """
-        Approx: membrane states for all hidden layers + output logits, both across time.
+        N_param + N_state + N_intermediate + N_grad
+          N_param        ~ get_param_memory_bytes()   (weights + biases stored in model)
+          N_state        = B * T * sum_l d_l
+          N_intermediate = B * T * sum_l d_l  (surrogate gradients, same order as states)
+          N_grad         ~ N_param             (one .grad buffer per parameter tensor)
         """
         Hs = [fc.out_features for fc in self.model.fcs]
-        mem_hidden = batch * time_steps * sum(Hs)
-
-        K = int(self.meta.get("n_classes", 0))
-        mem_out = batch * time_steps * K
-
-        return (mem_hidden + mem_out) * fp_bytes
+        N_param        = self.get_param_memory_bytes(fp_bytes=fp_bytes)
+        N_state        = batch * time_steps * sum(Hs) * fp_bytes
+        N_intermediate = batch * time_steps * sum(Hs) * fp_bytes
+        N_grad         = self.get_param_memory_bytes(fp_bytes=fp_bytes)
+        return N_param + N_state + N_intermediate + N_grad

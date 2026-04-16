@@ -218,24 +218,23 @@ class EpropLearner(BaseLearner):
 
     def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
         """
-        Approx: eligibility traces (feedforward + recurrent).
-        No activation history; ignores tiny state buffers.
+        N_param + N_state + N_intermediate + N_grad
+          N_param        ~ get_param_memory_bytes()              (weights + biases stored in model)
+          N_state        = B * sum_l d_l
+          N_intermediate = B * sum_l d_{l-1} * d_l  (eligibility traces; no T factor)
+          N_grad         ~ N_param                               (one .grad buffer per parameter tensor)
+        Recurrent eligibility traces added for recurrent layers.
         """
         Hs = [fc.out_features for fc in self.model.fcs]
         in_dims = [self.model.fcs[0].in_features] + [fc.out_features for fc in self.model.fcs[:-1]]
 
-        # e_ff: [B, in_l, H_l] per layer
-        e_ff_elems = sum(batch * din * hout for din, hout in zip(in_dims, Hs))
+        N_param = self.get_param_memory_bytes(fp_bytes=fp_bytes)
+        N_state = batch * sum(Hs) * fp_bytes
 
-        # e_rec: [B, H_l, H_l] for recurrent layers only
-        e_rec_elems = sum(
-            batch * h * h
-            for flag, h in zip(self.rec_flags, Hs)
-            if flag
-        )
+        e_ff = sum(batch * din * hout for din, hout in zip(in_dims, Hs))
+        e_rec = sum(batch * h * h for flag, h in zip(self.rec_flags, Hs) if flag)
+        N_intermediate = (e_ff + e_rec) * fp_bytes
 
-        # e_out: [B, H_last, K] — output layer eligibility trace
-        K = int(self.meta.get("n_classes", 0))
-        e_out_elems = batch * Hs[-1] * K if Hs else 0
+        N_grad = self.get_param_memory_bytes(fp_bytes=fp_bytes)
 
-        return (e_ff_elems + e_rec_elems + e_out_elems) * fp_bytes
+        return N_param + N_state + N_intermediate + N_grad
