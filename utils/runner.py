@@ -10,7 +10,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 from utils.common import set_seed, select_device
 from timeseries.registry import get_dataloaders
-from utils.training import build_cfg, run_train_loop, resolve_runtime_dtype
+from utils.training import build_cfg, run_train_loop, str_to_dtype
 from learners.registry import LEARNER_REGISTRY
 
 
@@ -154,7 +154,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                 learner = _make_learner(cfg, meta, device, g)
 
                 # Apply selected runtime dtype before memory estimation / training
-                runtime_dtype = resolve_runtime_dtype(device, g.get("DTYPE", "fp32"))
+                runtime_dtype = str_to_dtype(g.get("DTYPE", "fp32"))
                 learner.model.to(device=device, dtype=runtime_dtype)
 
                 # Memory estimates (uses effective runtime model dtype)

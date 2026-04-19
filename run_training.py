@@ -68,7 +68,7 @@ DVS_GESTURE_PIPELINE = transforms.Compose([
     transforms.ZScore(),
 ])
 
-# Large-Scale Audio Dataset (3s segments -> log-mel 64)
+# Large-Scale Audio Dataset (901 timesteps, 3s segments -> log-mel 64)
 LARGE_SCALE_AUDIO_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.ToLogMel(sample_rate=16000, n_mels=64, win_len_ms=25, hop_ms=10),
