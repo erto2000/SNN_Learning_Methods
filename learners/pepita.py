@@ -90,8 +90,12 @@ class PepitaLearner(BaseLearner):
         """X:[B,T,D] -> logits:[B,K] OR (logits, activity)."""
         B, T, _ = X.shape
         X = X.to(self.device)
+
+        if self.F.dtype != X.dtype or self.F.device != X.device:
+            self.F = self.F.to(device=X.device, dtype=X.dtype)
+
         state, head_mem = self.model.init_state(B, X.device, X.dtype)
-        logits = torch.zeros(B, self.meta["n_classes"], device=X.device)
+        logits = torch.zeros(B, self.meta["n_classes"], device=X.device, dtype=X.dtype)
 
         layer_spike_counts = [0.0 for _ in self.model.fcs]
 
@@ -124,7 +128,7 @@ class PepitaLearner(BaseLearner):
         state, head_mem = self.model.init_state(B, X.device, X.dtype)
         L = len(self.model.fcs)
         h_rec = [[] for _ in range(L)]
-        logits = torch.zeros(B, self.meta["n_classes"], device=X.device)
+        logits = torch.zeros(B, self.meta["n_classes"], device=X.device, dtype=X.dtype)
 
         for t in range(T):
             _, head_out, state, head_mem, layer_spikes, _ = self.model.forward_step(
@@ -148,12 +152,15 @@ class PepitaLearner(BaseLearner):
         B, T, _ = X.shape
 
         # ----- First pass: standard input -----
+        if self.F.dtype != X.dtype or self.F.device != X.device:
+            self.F = self.F.to(device=X.device, dtype=X.dtype)
+
         fp = self._first_pass(X)
         logits = fp["logits"]
 
         # Cross-entropy and error signal at output
         p = torch.softmax(logits, dim=1)  # [B,K]
-        e = p - F.one_hot(y, num_classes=K).float()  # [B,K]
+        e = p - F.one_hot(y, num_classes=K).to(p.dtype)
         loss = F.cross_entropy(logits, y)
 
         # ----- One-time calibration of F using real data -----

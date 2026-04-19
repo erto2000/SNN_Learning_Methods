@@ -9,11 +9,11 @@ class BackpropLearner(BaseLearner):
     Standard backprop with a time-aggregated readout.
     Aggregation over time: 'mean' | 'sum' | 'last' (default: 'mean').
     """
-    def __init__(self, net_cfg, meta, device, agg: str = "mean", lr: float = 1e-3):
+    def __init__(self, net_cfg, meta, device, agg: str = "mean", lr: float = 1e-3, adam_eps:float=1e-8):
         super().__init__(net_cfg, meta, device)
         self.agg = agg
         self.loss = nn.CrossEntropyLoss()
-        self.opt = optim.Adam(self.model.parameters(), lr=lr)
+        self.opt = optim.Adam(self.model.parameters(), lr=lr, eps=adam_eps)
 
     def _build_model(self):
         return SNNCore(self.cfg, self.meta["n_classes"])

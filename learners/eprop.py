@@ -65,10 +65,11 @@ class EpropLearner(BaseLearner):
         X = X.to(self.device)
         state, head_mem = self.model.init_state(B, X.device, X.dtype)
         H_last = self.model.fcs[-1].out_features
-        r_sum = torch.zeros(B, H_last, device=X.device)
         W_out = self.model.head.weight
         b_out = self.model.head.bias
-        logits = torch.zeros(B, self.meta["n_classes"], device=X.device)
+
+        r_sum = torch.zeros(B, H_last, device=X.device, dtype=X.dtype)
+        logits = torch.zeros(B, self.meta["n_classes"], device=X.device, dtype=W_out.dtype)
 
         layer_spike_counts = [0.0 for _ in self.model.fcs]
 
@@ -120,12 +121,12 @@ class EpropLearner(BaseLearner):
         in_dims = [self.model.fcs[0].in_features] + [fc.out_features for fc in self.model.fcs[:-1]]
 
         # eligibilities: e_ff:[B, in_l, H_l], e_rec:[B, H_l, H_l]
-        e_ff  = [torch.zeros(B, in_dims[i], Hs[i], device=X.device) for i in range(L)]
-        e_rec = [torch.zeros(B, Hs[i], Hs[i], device=X.device) if self.rec_flags[i] else None
+        e_ff = [torch.zeros(B, in_dims[i], Hs[i], device=X.device, dtype=X.dtype) for i in range(L)]
+        e_rec = [torch.zeros(B, Hs[i], Hs[i], device=X.device, dtype=X.dtype) if self.rec_flags[i] else None
                  for i in range(L)]
 
         # grads (same shapes as weights)
-        dW_ff  = [torch.zeros_like(self.model.fcs[i].weight) for i in range(L)]
+        dW_ff = [torch.zeros_like(self.model.fcs[i].weight) for i in range(L)]
         dW_rec = [torch.zeros_like(self.model.Wrecs[i]) if self.rec_flags[i] else None
                   for i in range(L)]
         dW_out = torch.zeros_like(self.model.head.weight)
@@ -133,7 +134,7 @@ class EpropLearner(BaseLearner):
 
         # cumulative rate code from last hidden layer
         H_last = Hs[-1]
-        r_sum = torch.zeros(B, H_last, device=X.device)
+        r_sum = torch.zeros(B, H_last, device=X.device, dtype=X.dtype)
 
         # -------- 1) unroll in time: update eligibilities + r_sum only --------
         for t in range(T):
@@ -173,7 +174,7 @@ class EpropLearner(BaseLearner):
         logits = r_sum @ W_out.T + (b_out if b_out is not None else 0.0)  # [B,K]
 
         probs = torch.softmax(logits, dim=1)
-        grad_logits = probs - F.one_hot(y, num_classes=K).float()  # [B,K]
+        grad_logits = probs - F.one_hot(y, num_classes=K).to(probs.dtype)  # [B,K]
 
         # layer-wise learning signals (backprop through static readout)
         L_sig: List[Optional[torch.Tensor]] = [None for _ in range(L)]

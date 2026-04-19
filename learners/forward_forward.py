@@ -27,6 +27,7 @@ class FFLearner(BaseLearner):
         gain: float = 5.0,
         lr: float = 1e-3,
         total_epochs: int = 10,
+        adam_eps: float = 1e-8
     ):
         # augment first layer input with K label channels
         layers = [dataclasses.replace(
@@ -47,7 +48,7 @@ class FFLearner(BaseLearner):
         self.layer_opts = []
         for i in range(L):
             params = list(self.model.fcs[i].parameters()) + list(self.model.lifs[i].parameters())
-            self.layer_opts.append(torch.optim.Adam(params, lr=lr))
+            self.layer_opts.append(torch.optim.Adam(params, lr=lr, eps=adam_eps))
 
         # biases off, like your original
         for fc in self.model.fcs:

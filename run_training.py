@@ -68,7 +68,6 @@ DVS_GESTURE_PIPELINE = transforms.Compose([
     transforms.ZScore(),
 ])
 
-
 # Large-Scale Audio Dataset (3s segments -> log-mel 64)
 LARGE_SCALE_AUDIO_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
@@ -85,7 +84,7 @@ DEFAULT = dict(
     EPOCHS                      = 10,      # safe default; each run overrides up to max 10
     MAX_SAMPLES                 = None,
     TEST_EVERY_EPOCH            = False,
-    EVAL_DTYPE                  = "fp32",   # "fp32", "fp16", "bf16" for evaluation,
+    DTYPE                       = "fp32",   # "fp32", "fp16", "bf16" for both train + eval
     EVAL_INT8_WEIGHTS           = False,    # weight-only int8 for evaluation
     SEED                        = 123,
     NUM_WORKERS                 = 0,

@@ -46,18 +46,12 @@ def eval_epoch(
     device,
     n_classes: int,
     *,
-    eval_dtype_str: str = None,
+    dtype_str: str = None,
     use_int8_weights: bool = False,
 ) -> Dict[str, float]:
     learner.model.eval()
 
-    eval_dtype_name = str(eval_dtype_str or "fp32").lower()
-    eval_dtype = None
-    if eval_dtype_name != "fp32":
-        eval_dtype = str_to_dtype(eval_dtype_name)
-        if device.type == "cpu" and eval_dtype == torch.float16:
-            print("[Eval] On CPU; switching fp16 -> bf16 for stability.")
-            eval_dtype = torch.bfloat16
+    runtime_dtype = str_to_dtype(dtype_str)
 
     if use_int8_weights:
         print("[Int8] Converting Linear weights to int8 for inference-only final eval...")
@@ -65,12 +59,12 @@ def eval_epoch(
 
     orig_dtype = None
     orig_device = None
-    if eval_dtype is not None:
-        p = next(learner.model.parameters(), None)
-        if p is not None:
-            orig_dtype = p.dtype
-            orig_device = p.device
-        learner.model.to(device=device, dtype=eval_dtype)
+    p = next(learner.model.parameters(), None)
+    if p is not None:
+        orig_dtype = p.dtype
+        orig_device = p.device
+
+    learner.model.to(device=device, dtype=runtime_dtype)
 
     correct_windows = 0
     total_windows = 0
@@ -85,7 +79,7 @@ def eval_epoch(
     total_activity_samples = 0
 
     try:
-        for Xw, yw, sample_ids, B in iter_pieces(test_loader, device, dtype=eval_dtype):
+        for Xw, yw, sample_ids, B in iter_pieces(test_loader, device, dtype=runtime_dtype):
             logits, activity = learner.forward(Xw, return_activity=True)
 
             preds_w = logits.argmax(dim=-1)
@@ -114,7 +108,7 @@ def eval_epoch(
             total_activity_samples += int(activity["num_samples"])
 
     finally:
-        if eval_dtype is not None and orig_dtype is not None:
+        if orig_dtype is not None:
             learner.model.to(device=orig_device or device, dtype=orig_dtype)
 
     firing_rate = total_spike_count / max(1.0, total_neuron_slots)
@@ -140,7 +134,7 @@ def eval_epoch(
 
         **energy,
 
-        "eval_dtype": str(eval_dtype_str),
+        "dtype": str(dtype_str),
         "eval_int8_weights": bool(use_int8_weights),
     }
     return result
@@ -155,14 +149,21 @@ def run_train_loop(
     *,
     epochs: int,
     test_every_epoch: bool,
-    eval_dtype_str: str = None,
+    dtype_str: str = None,
     use_int8_weights: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[int, Dict[str, float]]]:
     epoch_log: Dict[int, Dict[str, float]] = {}
 
+    runtime_dtype = str_to_dtype(dtype_str)
+
+    # Keep model in selected dtype for the whole training loop
+    learner.model.to(device=device, dtype=runtime_dtype)
+
     for epoch in range(1, epochs + 1):
+        learner.model.train()
+
         n_tr, acc_tr_sum, loss_sum, aux_msg = 0, 0.0, 0.0, ""
-        for Xp, yp, _, _ in iter_pieces(train_loader, device, chunk_segments=True):
+        for Xp, yp, _, _ in iter_pieces(train_loader, device, chunk_segments=True, dtype=runtime_dtype):
             stats = learner.train_step(Xp, yp)
             n_tr += 1
             if "acc" in stats:
@@ -187,7 +188,7 @@ def run_train_loop(
                 test_loader,
                 device,
                 n_classes,
-                eval_dtype_str=eval_dtype_str,
+                dtype_str=dtype_str,
                 use_int8_weights=use_int8_weights,
             )
 
@@ -204,7 +205,12 @@ def run_train_loop(
             }
         else:
             print(f"[{ts}] Epoch {epoch:02d} | loss:{loss_avg:.4f} | acc:{acc_avg:.2f}%{aux_msg}")
-            epoch_log[epoch] = {"loss": loss_avg, "acc": acc_avg, "timestamp": ts}
+            epoch_log[epoch] = {
+                "loss": loss_avg,
+                "acc": acc_avg,
+                "dtype": str(dtype_str),
+                "timestamp": ts,
+            }
 
     if test_every_epoch:
         final_stats = epoch_log[epochs]
@@ -214,7 +220,7 @@ def run_train_loop(
             test_loader,
             device,
             n_classes,
-            eval_dtype_str=eval_dtype_str,
+            dtype_str=dtype_str,
             use_int8_weights=use_int8_weights,
         )
 

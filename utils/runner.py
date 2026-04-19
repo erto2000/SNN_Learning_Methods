@@ -10,7 +10,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 from utils.common import set_seed, select_device
 from timeseries.registry import get_dataloaders
-from utils.training import build_cfg, run_train_loop
+from utils.training import build_cfg, run_train_loop, resolve_runtime_dtype
 from learners.registry import LEARNER_REGISTRY
 
 
@@ -62,8 +62,13 @@ def _make_learner(cfg, meta, device, g: Dict[str, Any]):
             drop_diag=g["EP_DROP_DIAG"], weight_clip=g["EP_WEIGHT_CLIP"],
         )
     if name == "pepita":
-        return LearnerCls(cfg, meta, device, mode=g["PEP_MODE"], lr=g["PEP_LR"], max_rel_step=g["PEP_MAX_REL_STEP"],
-                          target_modulation_ratio=g["PEP_MOD_RATIO"])
+        return LearnerCls(
+            cfg, meta, device,
+            mode=g["PEP_MODE"],
+            lr=g["PEP_LR"],
+            max_rel_step=g["PEP_MAX_REL_STEP"],
+            target_modulation_ratio=g["PEP_MOD_RATIO"],
+        )
     raise ValueError(f"Unhandled learner: {name}")
 
 
@@ -81,11 +86,13 @@ def _print_header(run_id: str, g: Dict[str, Any], meta: Dict[str, Any]) -> None:
     )
 
 
-def _print_memory_info(static_bytes: int,
-                       train_bytes: int | None,
-                       batch_size: int,
-                       time_steps: int | None,
-                       fp_bytes: int) -> None:
+def _print_memory_info(
+    static_bytes: int,
+    train_bytes: int | None,
+    batch_size: int,
+    time_steps: int | None,
+    fp_bytes: int,
+) -> None:
     mb = 1024 ** 2
     static_mb = static_bytes / mb if static_bytes is not None else float("nan")
     if train_bytes is not None and time_steps is not None:
@@ -146,7 +153,11 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                 cfg = build_cfg(meta["input_dim"], meta["n_classes"], g)
                 learner = _make_learner(cfg, meta, device, g)
 
-                # Memory estimates (auto: uses meta time_steps and model dtype)
+                # Apply selected runtime dtype before memory estimation / training
+                runtime_dtype = resolve_runtime_dtype(device, g.get("DTYPE", "fp32"))
+                learner.model.to(device=device, dtype=runtime_dtype)
+
+                # Memory estimates (uses effective runtime model dtype)
                 fp_bytes = _infer_fp_bytes(learner.model)
                 time_steps = meta.get("time_steps")
                 static_mem_bytes = learner.get_param_memory_bytes(fp_bytes=fp_bytes)
@@ -177,13 +188,17 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                     meta["n_classes"],
                     epochs=g["EPOCHS"],
                     test_every_epoch=g["TEST_EVERY_EPOCH"],
-                    eval_dtype_str=g.get("EVAL_DTYPE", "fp32"),
+                    dtype_str=g.get("DTYPE", "fp32"),
                     use_int8_weights=bool(g.get("EVAL_INT8_WEIGHTS", False)),
                 )
 
                 if not g["TEST_EVERY_EPOCH"]:
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    print(f"[{ts}] [Final Test] sample_acc:{final_stats['sample_acc']:.2f}% | window_acc:{final_stats['window_acc']:.2f}%")
+                    print(
+                        f"[{ts}] [Final Test] "
+                        f"sample_acc:{final_stats['sample_acc']:.2f}% | "
+                        f"window_acc:{final_stats['window_acc']:.2f}%"
+                    )
 
                 status = "ok"
                 error = None
@@ -198,7 +213,6 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                 print(tb)
                 final_stats, epoch_log = {}, {}
                 meta = locals().get("meta", {})
-                # free CUDA for later runs
                 try:
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
@@ -211,8 +225,6 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
 
         memory_info = {}
         if status == "ok":
-            # fp_bytes, static_mem_bytes, train_mem_bytes may not exist if exception
-            # so fetch safely from locals()
             fp_bytes_loc = locals().get("fp_bytes")
             static_loc = locals().get("static_mem_bytes")
             train_loc = locals().get("train_mem_bytes")
@@ -245,7 +257,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
         tb = traceback.format_exc(limit=20)
         return {
             "run_id": run_id,
-            "config": deepcopy(cfg),
+            "config": deepcopy(config),
             "status": "error",
             "error": str(e),
             "traceback": tb,
@@ -271,8 +283,14 @@ def summarize(results: List[Dict[str, Any]]) -> None:
         learner = g.get("LEARNER", "?")
         epochs = g.get("EPOCHS", "?")
         if status == "ok":
-            final_acc = r.get("final", {}).get("sample_acc", float('nan'))
-            print(f"{run_id:>30s} | data={dataset:<10s} | learner={learner:<7s} | status=OK     | E={epochs:<3} | acc={final_acc:6.2f}%")
+            final_acc = r.get("final", {}).get("sample_acc", float("nan"))
+            print(
+                f"{run_id:>30s} | data={dataset:<10s} | learner={learner:<7s} | "
+                f"status=OK     | E={epochs:<3} | acc={final_acc:6.2f}%"
+            )
         else:
             err_msg = (r.get("error") or "").splitlines()[0][:120]
-            print(f"{run_id:>30s} | data={dataset:<10s} | learner={learner:<7s} | status=FAILED | E={epochs:<3} | acc=   n/a | err: {err_msg}")
+            print(
+                f"{run_id:>30s} | data={dataset:<10s} | learner={learner:<7s} | "
+                f"status=FAILED | E={epochs:<3} | acc=   n/a | err: {err_msg}"
+            )
