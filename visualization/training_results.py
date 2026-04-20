@@ -10,6 +10,10 @@ def _write_json(obj: Any, path: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
+def _resolve_eval_dtype(final: Dict[str, Any]) -> Any:
+    # Producer uses "dtype", older/newer output code may expect "eval_dtype"
+    return final.get("eval_dtype", final.get("dtype"))
+
 def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_plots: bool = True) -> List[str]:
     """
     Save each run as results/<RUN_ID>/summary.json and (optionally) plots.
@@ -47,6 +51,8 @@ def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_
         print(f"[Saved] {out_path}")
         saved_paths.append(out_path)
 
+        final = payload.get("final", {}) or {}
+
         # 2) metrics.json (flat, handy for quick reads)
         metrics = {
             "run_id": run_id,
@@ -55,18 +61,19 @@ def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_
             "epochs": payload["config"].get("EPOCHS") if payload.get("config") else None,
             "status": payload["status"],
 
-            "final_sample_acc": payload["final"].get("sample_acc"),
-            "final_window_acc": payload["final"].get("window_acc"),
+            "final_sample_acc": final.get("sample_acc"),
+            "final_window_acc": final.get("window_acc"),
 
-            "avg_spike_count": payload["final"].get("avg_spike_count"),
-            "firing_rate": payload["final"].get("firing_rate"),
-            "avg_synaptic_operations": payload["final"].get("avg_synaptic_operations"),
+            "avg_spike_count": final.get("avg_spike_count"),
+            "firing_rate": final.get("firing_rate"),
+            "avg_synaptic_operations": final.get("avg_synaptic_operations"),
 
-            "energy_per_sample_pj": payload["final"].get("energy_per_sample_pj"),
-            "energy_breakdown_pct": payload["final"].get("energy_breakdown_pct"),
+            "energy_per_sample_pj": final.get("energy_per_sample_pj"),
+            "energy_breakdown_pct": final.get("energy_breakdown_pct"),
 
-            "eval_dtype": payload["final"].get("eval_dtype"),
-            "eval_int8_weights": payload["final"].get("eval_int8_weights"),
+            # compatibility with actual producer field
+            "eval_dtype": _resolve_eval_dtype(final),
+            "eval_int8_weights": final.get("eval_int8_weights"),
         }
         _write_json(metrics, os.path.join(folder, "metrics.json"))
 

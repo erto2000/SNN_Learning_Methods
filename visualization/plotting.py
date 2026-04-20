@@ -1,29 +1,30 @@
 # visualization/plotting.py
 from __future__ import annotations
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 import os
-import math
-import json
 import matplotlib.pyplot as plt
 
 def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 def _epoch_series(epoch_log: Dict[int, Dict[str, float]], key: str) -> List[float]:
-    # epochs are 1..E; return list aligned to epoch index
     if not epoch_log:
         return []
     E = max(int(e) for e in epoch_log.keys())
     out = []
     for e in range(1, E + 1):
-        out.append(epoch_log.get(e, {}).get(key))
+        row = epoch_log.get(e) or epoch_log.get(str(e)) or {}
+        out.append(row.get(key))
     return out
+
+def _resolve_eval_dtype(final: Dict[str, Any]) -> Any:
+    return final.get("eval_dtype", final.get("dtype"))
 
 def save_training_curves(run_dir: str, summary: Dict[str, Any]) -> None:
     """
     Saves:
-      - training_curves.png : loss / train-acc / test-acc (when available)
-      - epoch_log.csv       : tabular epoch log (for quick access)
+      - training_curves.png : loss / train-acc / test sample acc / test window acc
+      - epoch_log.csv       : tabular epoch log
     """
     _ensure_dir(run_dir)
     epoch_log: Dict[int, Dict[str, float]] = summary.get("history", {}) or {}
@@ -32,24 +33,28 @@ def save_training_curves(run_dir: str, summary: Dict[str, Any]) -> None:
 
     # CSV export for convenience
     csv_path = os.path.join(run_dir, "epoch_log.csv")
-    # Header
     keys = set()
     for _, d in epoch_log.items():
         keys.update(d.keys())
-    ordered_cols = ["timestamp", "loss", "acc", "sample_acc"] + sorted(k for k in keys if k not in {"timestamp","loss","acc","sample_acc"})
+
+    preferred = ["timestamp", "loss", "acc", "sample_acc", "window_acc", "dtype", "eval_int8_weights"]
+    ordered_cols = preferred + sorted(k for k in keys if k not in set(preferred))
+
     with open(csv_path, "w", encoding="utf-8") as f:
         f.write("epoch," + ",".join(ordered_cols) + "\n")
-        for e in sorted(epoch_log):
+        for e in sorted(epoch_log, key=lambda x: int(x)):
+            row_data = epoch_log[e]
             row = [str(e)]
             for k in ordered_cols:
-                v = epoch_log[e].get(k, "")
+                v = row_data.get(k, "")
                 row.append(str(v) if v is not None else "")
             f.write(",".join(row) + "\n")
 
     # Plots
     loss = _epoch_series(epoch_log, "loss")
     acc_tr = _epoch_series(epoch_log, "acc")
-    acc_te = _epoch_series(epoch_log, "sample_acc")  # test accuracy (eval_epoch)
+    acc_te_sample = _epoch_series(epoch_log, "sample_acc")
+    acc_te_window = _epoch_series(epoch_log, "window_acc")
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 5), dpi=140)
     epochs = list(range(1, len(loss) + 1))
@@ -58,8 +63,10 @@ def save_training_curves(run_dir: str, summary: Dict[str, Any]) -> None:
         ax.plot(epochs, loss, label="Train Loss", color="#d62728", linewidth=2)
     if any(v is not None for v in acc_tr):
         ax.plot(epochs, acc_tr, label="Train Acc (%)", color="#1f77b4", linewidth=2)
-    if any(v is not None for v in acc_te):
-        ax.plot(epochs, acc_te, label="Test Acc (%)", color="#2ca02c", linewidth=2)
+    if any(v is not None for v in acc_te_sample):
+        ax.plot(epochs, acc_te_sample, label="Test Sample Acc (%)", color="#2ca02c", linewidth=2)
+    if any(v is not None for v in acc_te_window):
+        ax.plot(epochs, acc_te_window, label="Test Window Acc (%)", color="#ff7f0e", linewidth=2)
 
     ax.set_xlabel("Epoch")
     ax.set_title("Training Curves")
@@ -78,19 +85,19 @@ def save_final_card(run_dir: str, summary: Dict[str, Any]) -> None:
     config = summary.get("config", {}) or {}
 
     label_lines = [
-        f"Run ID: {summary.get('run_id','?')}",
-        f"Dataset: {config.get('DATASET','?')}",
-        f"Learner: {config.get('LEARNER','?')}",
-        f"Epochs: {config.get('EPOCHS','?')}",
-        f"Hidden: {config.get('HIDDEN_SIZES','?')}",
-        f"TestEveryEpoch: {config.get('TEST_EVERY_EPOCH','?')}",
-        f"Final sample_acc: {final.get('sample_acc','n/a')}",
+        f"Run ID: {summary.get('run_id', '?')}",
+        f"Dataset: {config.get('DATASET', '?')}",
+        f"Learner: {config.get('LEARNER', '?')}",
+        f"Epochs: {config.get('EPOCHS', '?')}",
+        f"Hidden: {config.get('HIDDEN_SIZES', '?')}",
+        f"TestEveryEpoch: {config.get('TEST_EVERY_EPOCH', '?')}",
+        f"Final sample_acc: {final.get('sample_acc', 'n/a')}",
         f"Final window_acc: {final.get('window_acc', 'n/a')}",
         f"Avg spikes/sample: {final.get('avg_spike_count', 'n/a')}",
         f"Firing rate: {final.get('firing_rate', 'n/a')}",
         f"Avg SynOps/sample: {final.get('avg_synaptic_operations', 'n/a')}",
         f"Energy/sample (pJ): {final.get('energy_per_sample_pj', 'n/a')}",
-        f"Eval dtype: {final.get('eval_dtype', 'n/a')}",
+        f"Eval dtype: {_resolve_eval_dtype(final) if _resolve_eval_dtype(final) is not None else 'n/a'}",
         f"Eval int8 weights: {final.get('eval_int8_weights', 'n/a')}",
     ]
     text = "\n".join(label_lines)
@@ -112,7 +119,6 @@ def save_energy_breakdown(run_dir: str, summary: Dict[str, Any]) -> None:
     if not breakdown:
         return
 
-    # component labels and colours
     components = [
         ("input_layer",   "Input Layer",   "#2ca02c"),
         ("synop",         "Synaptic Ops",  "#1f77b4"),
@@ -125,7 +131,7 @@ def save_energy_breakdown(run_dir: str, summary: Dict[str, Any]) -> None:
     colors = []
     for key, label, color in components:
         pct = breakdown.get(key, 0.0)
-        if pct > 0.01:  # skip negligible components
+        if pct > 0.01:
             labels.append(label)
             values.append(pct)
             colors.append(color)
@@ -145,7 +151,7 @@ def save_energy_breakdown(run_dir: str, summary: Dict[str, Any]) -> None:
     ax.set_xlabel("Energy Contribution (%)")
 
     energy_pj = final.get("energy_per_sample_pj")
-    title = f"Energy Breakdown"
+    title = "Energy Breakdown"
     if energy_pj is not None:
         title += f" — {energy_pj:.1f} pJ/sample"
     ax.set_title(title)
@@ -154,7 +160,6 @@ def save_energy_breakdown(run_dir: str, summary: Dict[str, Any]) -> None:
     fig.tight_layout()
     fig.savefig(os.path.join(run_dir, "energy_breakdown.png"), bbox_inches="tight")
     plt.close(fig)
-
 
 def save_run_plots(run_dir: str, summary: Dict[str, Any]) -> None:
     save_training_curves(run_dir, summary)
