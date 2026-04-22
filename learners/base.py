@@ -51,6 +51,28 @@ class BaseLearner(ABC):
 
         return (Nf + Nbias + Nr + Nout) * fp_bytes
 
+    def get_input_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
+        fcs = getattr(self.model, "fcs", None)
+        if fcs is None or len(fcs) == 0:
+            return 0
+
+        d0 = fcs[0].in_features
+        return batch * time_steps * d0 * fp_bytes
+
+    def get_inference_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
+        fcs = getattr(self.model, "fcs", None)
+        if fcs is None or len(fcs) == 0:
+            return self.get_input_memory_bytes(batch, time_steps, fp_bytes=fp_bytes) + \
+                self.get_param_memory_bytes(fp_bytes=fp_bytes)
+
+        Hs = [fc.out_features for fc in fcs]
+
+        N_input = self.get_input_memory_bytes(batch, time_steps, fp_bytes=fp_bytes)
+        N_param = self.get_param_memory_bytes(fp_bytes=fp_bytes)
+        N_state = batch * sum(Hs) * fp_bytes
+
+        return N_input + N_param + N_state
+
     def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
         return 0
 

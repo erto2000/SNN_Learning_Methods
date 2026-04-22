@@ -62,7 +62,7 @@ PROBE_MAX_SAMPLES = 64
 HIDDEN_SIZES_SWEEP = [32, 64, 128, 256, 512, 1024]
 BATCH_SIZES_SWEEP = [8, 16, 32, 64, 128, 256, 512]
 TIME_STEPS_SWEEP = [16, 32, 64, 128, 256, 512, 1024]
-NUM_LAYERS_SWEEP = [1, 10, 100, 1000]
+NUM_LAYERS_SWEEP = [1, 2, 4, 8, 16, 32, 64, 128]
 
 LEARNERS = ["bp", "ff", "eprop", "pepita"]
 LEARNER_LABELS = {
@@ -79,9 +79,9 @@ LEARNER_COLORS = {
 }
 LEARNER_STYLES = {
     "bp": {"linestyle": "-", "marker": "o"},
-    "ff": {"linestyle": "--", "marker": "s"},
-    "eprop": {"linestyle": "-.", "marker": "^"},
-    "pepita": {"linestyle": ":", "marker": "D"},
+    "ff": {"linestyle": "-", "marker": "o"},
+    "eprop": {"linestyle": "-", "marker": "o"},
+    "pepita": {"linestyle": "-", "marker": "o"},
 }
 
 # ── helpers ───────────────────────────────────────────────────────────────────

@@ -294,14 +294,16 @@ class FFLearner(BaseLearner):
 
     def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
         """
-        N_param + N_state + N_intermediate + N_grad
+        N_training = N_input + N_param + N_state + N_intermediate + N_grad
 
-          N_param        ~ get_param_memory_bytes()         (all weights + biases stored in model)
+          N_input        = B * T * d0
+          N_param        = get_param_memory_bytes()
           N_state        = B * sum_{l=1}^{L-1} d_l + B * T * max_l d_l
           N_intermediate = B * T * max_l d_l
-          N_grad         = max_l (d_{l-1} * d_l + d_l)     (greedy layer-wise: only one layer's grads live at a time)
+          N_grad         = max_l (d_{l-1} * d_l + d_l)
 
-        Total bytes = (N_state + N_intermediate + N_grad) * fp_bytes + N_param
+        For FF, d0 is the effective first-layer input dimension
+        (original input dimension + C label channels).
         """
         fcs = self.model.fcs
         Hs = [fc.out_features for fc in fcs]
@@ -312,9 +314,11 @@ class FFLearner(BaseLearner):
         in_dims = [fcs[0].in_features] + [fc.out_features for fc in fcs[:-1]]
         max_h = max(Hs)
 
-        N_param        = self.get_param_memory_bytes(fp_bytes=fp_bytes)
-        N_state        = batch * sum(Hs[:-1]) + batch * time_steps * max_h
-        N_intermediate = batch * time_steps * max_h
-        N_grad         = max(din * hout + hout for din, hout in zip(in_dims, Hs))
+        N_input = self.get_input_memory_bytes(batch, time_steps, fp_bytes=fp_bytes)
+        N_param = self.get_param_memory_bytes(fp_bytes=fp_bytes)
 
-        return N_param + (N_state + N_intermediate + N_grad) * fp_bytes
+        N_state = (batch * sum(Hs[:-1]) + batch * time_steps * max_h) * fp_bytes
+        N_intermediate = batch * time_steps * max_h * fp_bytes
+        N_grad = max(din * hout + hout for din, hout in zip(in_dims, Hs)) * fp_bytes
+
+        return N_input + N_param + N_state + N_intermediate + N_grad

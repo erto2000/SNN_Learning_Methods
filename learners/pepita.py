@@ -236,16 +236,20 @@ class PepitaLearner(BaseLearner):
         fp_bytes: int = 4,
     ) -> int:
         """
-        N_param + N_state + N_intermediate + N_grad
-          N_param        ~ get_param_memory_bytes()  (weights + biases only)
-          N_state        = B * sum_l d_l  (first pass activations)
-          N_intermediate = B * sum_l d_l + F_elems  (second pass activations + feedback matrix F)
-          N_grad         ~ N_param        (one .grad buffer per parameter tensor)
-        Memory is independent of T — PEPITA uses spike-rate differences, not history.
+        N_training = N_input + N_param + N_state + N_intermediate + N_grad
+
+          N_input        = B * T * d0
+          N_param        = get_param_memory_bytes()
+          N_state        = B * sum_l d_l
+          N_intermediate = B * sum_l d_l + C * d0
+          N_grad         = N_param
         """
         Hs = [fc.out_features for fc in self.model.fcs]
-        N_param        = self.get_param_memory_bytes(fp_bytes=fp_bytes)
-        N_state        = batch * sum(Hs) * fp_bytes
+
+        N_input = self.get_input_memory_bytes(batch, time_steps, fp_bytes=fp_bytes)
+        N_param = self.get_param_memory_bytes(fp_bytes=fp_bytes)
+        N_state = batch * sum(Hs) * fp_bytes
         N_intermediate = batch * sum(Hs) * fp_bytes + self.F.numel() * fp_bytes
-        N_grad         = self.get_param_memory_bytes(fp_bytes=fp_bytes)
-        return N_param + N_state + N_intermediate + N_grad
+        N_grad = self.get_param_memory_bytes(fp_bytes=fp_bytes)
+
+        return N_input + N_param + N_state + N_intermediate + N_grad

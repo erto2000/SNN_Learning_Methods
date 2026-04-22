@@ -71,15 +71,20 @@ class BackpropLearner(BaseLearner):
 
     def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
         """
-        N_param + N_state + N_intermediate + N_grad
-          N_param        ~ get_param_memory_bytes()   (weights + biases stored in model)
+        N_training = N_input + N_param + N_state + N_intermediate + N_grad
+
+          N_input        = B * T * d0
+          N_param        = get_param_memory_bytes()
           N_state        = B * T * sum_l d_l
-          N_intermediate = B * T * sum_l d_l  (surrogate gradients, same order as states)
-          N_grad         ~ N_param             (one .grad buffer per parameter tensor)
+          N_intermediate = B * T * sum_l d_l
+          N_grad         = N_param
         """
         Hs = [fc.out_features for fc in self.model.fcs]
-        N_param        = self.get_param_memory_bytes(fp_bytes=fp_bytes)
-        N_state        = batch * time_steps * sum(Hs) * fp_bytes
+
+        N_input = self.get_input_memory_bytes(batch, time_steps, fp_bytes=fp_bytes)
+        N_param = self.get_param_memory_bytes(fp_bytes=fp_bytes)
+        N_state = batch * time_steps * sum(Hs) * fp_bytes
         N_intermediate = batch * time_steps * sum(Hs) * fp_bytes
-        N_grad         = self.get_param_memory_bytes(fp_bytes=fp_bytes)
-        return N_param + N_state + N_intermediate + N_grad
+        N_grad = self.get_param_memory_bytes(fp_bytes=fp_bytes)
+
+        return N_input + N_param + N_state + N_intermediate + N_grad
