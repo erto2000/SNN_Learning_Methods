@@ -553,14 +553,6 @@ def plot_vs_time_steps(
         ],
     )
 
-    ax.axvline(
-        native_T,
-        color="gray",
-        linestyle=":",
-        linewidth=1.5,
-        label=f"Data Length = {native_T}",
-    )
-
     ax.set_title(
         f"{run_id} — Training Memory vs {'Window' if windowed else 'Sequence'} Length\n"
         f"({ds_label}, hidden={hidden_sizes}, batch={base_batch}, {_fp_label(fp_bytes)})",
@@ -719,7 +711,7 @@ def plot_scenario_overview(all_results: dict, out_dir: str) -> None:
         )
 
     ax.set_xticks(x)
-    ax.set_xticklabels(run_ids, rotation=28, ha="right", fontsize=8)
+    ax.set_xticklabels(run_ids, rotation=0, ha="center", fontsize=8)
     ax.set_ylabel("Memory (KB)", fontsize=9)
     ax.set_title(
         "Training Memory per Learner",
@@ -804,7 +796,7 @@ def plot_dataset_overview(all_results: dict, out_dir: str) -> None:
         )
 
     ax.set_xticks(x)
-    ax.set_xticklabels(ds_names, rotation=28, ha="right", fontsize=8)
+    ax.set_xticklabels(ds_names, rotation=0, ha="center", fontsize=8)
     ax.set_ylabel("Memory (KB)", fontsize=9)
     ax.set_title(
         "Datasets — Sum of Scenario Baseline Training Memory per Learner",
