@@ -400,14 +400,14 @@ class PepitaLearner(BaseLearner):
 
         Mode-specific intermediates:
           original:
-            Stores phase-1 and phase-2 timestep spike sequences:
+            Stores timestep spike sequences:
               B * T * sum_l d_l
-            plus X_mod and F.
+            plus F. Input-sized tensors are counted only in N_input.
 
           accum:
-            Stores only phase-1 and phase-2 spike rates:
+            Stores spike-rate intermediates:
               B * sum_l d_l
-            plus X_mod and F.
+            plus F. Input-sized tensors are counted only in N_input.
         """
         Hs = [fc.out_features for fc in self.model.fcs]
         d0 = self.cfg.layers[0].dim_in
@@ -415,19 +415,16 @@ class PepitaLearner(BaseLearner):
         N_input = self.get_input_memory_bytes(batch, time_steps, fp_bytes=fp_bytes)
         N_param = self.get_param_memory_bytes(fp_bytes=fp_bytes)
         N_state = batch * sum(Hs) * fp_bytes
-        N_x_mod = batch * time_steps * d0 * fp_bytes
         N_F = self.F.numel() * fp_bytes
 
         if self.mode == "original":
             N_intermediate = (
                 batch * time_steps * sum(Hs) * fp_bytes
-                + N_x_mod
                 + N_F
             )
         elif self.mode == "accum":
             N_intermediate = (
                 batch * sum(Hs) * fp_bytes
-                + N_x_mod
                 + N_F
             )
         else:
