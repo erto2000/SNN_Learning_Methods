@@ -41,7 +41,7 @@ ESC50_PIPELINE = transforms.Compose([
     transforms.ZScore(),
 ])
 
-# UrbanSound8K: 1s-4s @44100Hz → log-mel(64) (436 timesteps, 64 channels)
+# UrbanSound8K: 1s-4s @44100Hz → log-mel(64) (401 timesteps, 64 channels)
 URBAN8K_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
     transforms.Ensure2D(),
