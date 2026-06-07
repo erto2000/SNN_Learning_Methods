@@ -78,17 +78,22 @@ LARGE_SCALE_AUDIO_PIPELINE = transforms.Compose([
 # ──────────────────────────────────────────────────────────────────────────────
 # DEFAULTS (tunable per run)
 DEFAULT = dict(
-    # General
+    # Setup
     DATA_ROOT                   = "./data",
-    BATCH_SIZE                  = 128,
-    EPOCHS                      = 10,      # safe default; each run overrides up to max 10
-    MAX_SAMPLES                 = None,
-    TEST_EVERY_EPOCH            = False,
-    DTYPE                       = "fp32",   # "fp32", "fp16", "bf16" for both train + eval
-    EVAL_INT8_WEIGHTS           = False,    # weight-only int8 for evaluation
+    NUM_WORKERS                 = 0,        # subprocesses for data loading; 0 loads data in main process
+    PIN_MEMORY                  = False,    # speeds CPU-to-GPU transfer when using CUDA
     SEED                        = 123,
-    NUM_WORKERS                 = 0,
-    PIN_MEMORY                  = False,
+    BATCH_SIZE                  = 128,
+    EPOCHS                      = 10,       # safe default; each run overrides up to max 10
+    MAX_SAMPLES                 = None,
+    DTYPE                       = "fp32",   # "fp32", "fp16", "bf16" for both train + eval
+
+    # Evaluation
+    TEST_EVERY_EPOCH            = False,
+    EVAL_INT8_WEIGHTS           = False,    # weight-only int8 for evaluation
+    TIME_EVAL                   = True,
+    TIME_EVAL_FRACS             = (0.25, 0.50, 1.0),
+    TIME_EVAL_INCLUDE_T1        = True,
 
     # Network
     HIDDEN_SIZES     = [128],

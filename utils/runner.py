@@ -179,6 +179,10 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                     fp_bytes=fp_bytes,
                 )
 
+                time_eval_enabled = bool(g.get("TIME_EVAL", False))
+                time_eval_fracs = g.get("TIME_EVAL_FRACS") if time_eval_enabled else None
+                time_eval_include_t1 = bool(g.get("TIME_EVAL_INCLUDE_T1", False)) if time_eval_enabled else False
+
                 # Train
                 final_stats, epoch_log = run_train_loop(
                     learner,
@@ -190,6 +194,8 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                     test_every_epoch=g["TEST_EVERY_EPOCH"],
                     dtype_str=g.get("DTYPE", "fp32"),
                     use_int8_weights=bool(g.get("EVAL_INT8_WEIGHTS", False)),
+                    time_eval_fracs=time_eval_fracs,
+                    time_eval_include_t1=time_eval_include_t1,
                 )
 
                 if not g["TEST_EVERY_EPOCH"]:

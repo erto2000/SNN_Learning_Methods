@@ -39,6 +39,24 @@ def build_cfg(D: int, K: int, g: Dict[str, Any]) -> NetConfig:
     )
 
 
+def _time_eval_steps(T: int, time_eval_fracs=None, time_eval_include_t1: bool = False):
+    steps = []
+
+    if time_eval_include_t1:
+        steps.append(1)
+
+    if time_eval_fracs:
+        for frac in time_eval_fracs:
+            frac = float(frac)
+            if frac > 1.0:
+                frac = frac / 100.0
+            t = int(round(frac * T))
+            t = max(1, min(T, t))
+            steps.append(t)
+
+    return sorted(set(steps))
+
+
 @torch.no_grad()
 def eval_epoch(
     learner,
@@ -48,6 +66,8 @@ def eval_epoch(
     *,
     dtype_str: str = None,
     use_int8_weights: bool = False,
+    time_eval_fracs=None,
+    time_eval_include_t1: bool = False,
 ) -> Dict[str, float]:
     learner.model.eval()
 
@@ -70,6 +90,11 @@ def eval_epoch(
     total_windows = 0
     sample_correct = 0
     sample_total = 0
+
+    time_eval_window_correct = {}
+    time_eval_window_total = {}
+    time_eval_sample_correct = {}
+    time_eval_sample_total = {}
 
     total_spike_count = 0.0
     total_synops = 0.0
@@ -99,6 +124,28 @@ def eval_epoch(
 
             sample_correct += (preds_sample == gt_per_sample).sum().item()
             sample_total += B
+
+            for T_eval in _time_eval_steps(Xw.shape[1], time_eval_fracs, time_eval_include_t1):
+                key = f"T{T_eval}"
+
+                if T_eval == Xw.shape[1]:
+                    logits_t = logits
+                else:
+                    logits_t = learner.forward(Xw[:, :T_eval, :], return_activity=False)
+
+                preds_w_t = logits_t.argmax(dim=-1)
+
+                time_eval_window_correct[key] = time_eval_window_correct.get(key, 0) + (
+                    preds_w_t == yw
+                ).sum().item()
+                time_eval_window_total[key] = time_eval_window_total.get(key, 0) + yw.numel()
+
+                preds_sample_t = majority_vote(preds_w_t, sample_ids, num_classes=n_classes, B=B)
+
+                time_eval_sample_correct[key] = time_eval_sample_correct.get(key, 0) + (
+                    preds_sample_t == gt_per_sample
+                ).sum().item()
+                time_eval_sample_total[key] = time_eval_sample_total.get(key, 0) + B
 
             total_spike_count += float(activity["total_spike_count"])
             total_synops += float(activity["synaptic_operations"])
@@ -137,6 +184,15 @@ def eval_epoch(
         "dtype": str(dtype_str),
         "eval_int8_weights": bool(use_int8_weights),
     }
+
+    for key in sorted(time_eval_window_correct.keys(), key=lambda x: int(x[1:])):
+        result[f"time_eval_window_acc_{key}"] = (
+            100.0 * time_eval_window_correct[key] / max(1, time_eval_window_total[key])
+        )
+        result[f"time_eval_sample_acc_{key}"] = (
+            100.0 * time_eval_sample_correct[key] / max(1, time_eval_sample_total[key])
+        )
+
     return result
 
 
@@ -151,6 +207,8 @@ def run_train_loop(
     test_every_epoch: bool,
     dtype_str: str = None,
     use_int8_weights: bool = False,
+    time_eval_fracs=None,
+    time_eval_include_t1: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[int, Dict[str, float]]]:
     epoch_log: Dict[int, Dict[str, float]] = {}
 
@@ -183,6 +241,7 @@ def run_train_loop(
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if test_every_epoch:
+            do_time_eval = epoch == epochs
             stats_te = eval_epoch(
                 learner,
                 test_loader,
@@ -190,6 +249,8 @@ def run_train_loop(
                 n_classes,
                 dtype_str=dtype_str,
                 use_int8_weights=use_int8_weights,
+                time_eval_fracs=time_eval_fracs if do_time_eval else None,
+                time_eval_include_t1=time_eval_include_t1 if do_time_eval else False,
             )
 
             print(
@@ -222,6 +283,8 @@ def run_train_loop(
             n_classes,
             dtype_str=dtype_str,
             use_int8_weights=use_int8_weights,
+            time_eval_fracs=time_eval_fracs,
+            time_eval_include_t1=time_eval_include_t1,
         )
 
     return final_stats, epoch_log
