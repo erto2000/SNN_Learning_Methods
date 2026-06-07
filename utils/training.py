@@ -39,22 +39,32 @@ def build_cfg(D: int, K: int, g: Dict[str, Any]) -> NetConfig:
     )
 
 
-def _time_eval_steps(T: int, time_eval_fracs=None, time_eval_include_t1: bool = False):
-    steps = []
+def _time_eval_specs(T: int, time_eval_fracs=None, time_eval_include_t1: bool = False):
+    specs = []
+    seen = set()
 
     if time_eval_include_t1:
-        steps.append(1)
+        specs.append(("T1", 1))
+        seen.add("T1")
 
-    if time_eval_fracs:
-        for frac in time_eval_fracs:
-            frac = float(frac)
-            if frac > 1.0:
-                frac = frac / 100.0
-            t = int(round(frac * T))
-            t = max(1, min(T, t))
-            steps.append(t)
+    for frac in time_eval_fracs or []:
+        frac = float(frac)
+        if frac > 1.0:
+            frac = frac / 100.0
+        if frac <= 0.0:
+            continue
 
-    return sorted(set(steps))
+        key = f"P{int(round(frac * 100))}"
+        if key in seen:
+            continue
+
+        T_eval = int(round(frac * T))
+        T_eval = max(1, min(T, T_eval))
+
+        specs.append((key, T_eval))
+        seen.add(key)
+
+    return specs
 
 
 @torch.no_grad()
@@ -125,9 +135,7 @@ def eval_epoch(
             sample_correct += (preds_sample == gt_per_sample).sum().item()
             sample_total += B
 
-            for T_eval in _time_eval_steps(Xw.shape[1], time_eval_fracs, time_eval_include_t1):
-                key = f"T{T_eval}"
-
+            for key, T_eval in _time_eval_specs(Xw.shape[1], time_eval_fracs, time_eval_include_t1):
                 if T_eval == Xw.shape[1]:
                     logits_t = logits
                 else:
@@ -185,7 +193,7 @@ def eval_epoch(
         "eval_int8_weights": bool(use_int8_weights),
     }
 
-    for key in sorted(time_eval_window_correct.keys(), key=lambda x: int(x[1:])):
+    for key in time_eval_window_correct:
         result[f"time_eval_window_acc_{key}"] = (
             100.0 * time_eval_window_correct[key] / max(1, time_eval_window_total[key])
         )
