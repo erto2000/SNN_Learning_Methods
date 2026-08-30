@@ -1,6 +1,6 @@
 # Memory-Efficient Spiking Neural Network Training with Backpropagation-Free Learning Rules
 
-Code for the paper by Ertuğrul Keskin and Arda Yurdakul (Boğaziçi University), presented at the [29th Euromicro Conference on Digital System Design (DSD 2026)](https://dsd-seaa.com/dsd2026/), Kraków, Poland, September 2–4, 2026.
+Code for the paper by Ertuğrul Keskin and Arda Yurdakul (Boğaziçi University), presented at the [29th Euromicro Conference on Digital System Design (DSD 2026)](https://dsd-seaa.com/), Kraków, Poland, September 2–4, 2026.
 
 Code written and maintained by Ertuğrul Keskin. Research supervised by Arda Yurdakul.
 
