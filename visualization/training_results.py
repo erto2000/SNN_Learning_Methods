@@ -52,6 +52,8 @@ def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_
         saved_paths.append(out_path)
 
         final = payload.get("final", {}) or {}
+        memory = payload.get("memory", {}) or {}
+        theory = memory.get("theory", {}) or {}
 
         # 2) metrics.json (flat, handy for quick reads)
         metrics = {
@@ -74,6 +76,12 @@ def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_
             # compatibility with actual producer field
             "eval_dtype": _resolve_eval_dtype(final),
             "eval_int8_weights": final.get("eval_int8_weights"),
+
+            "theory_memory_bytes": theory.get("memory", {}).get("total_bytes"),
+            "theory_memory_scalars": theory.get("memory", {}).get("total_scalars"),
+            "theory_compute_scalars": theory.get("compute", {}).get("total_scalars"),
+            "theory_access_scalars": theory.get("access", {}).get("total_scalars"),
+            "theory_time_proxy": theory.get("time_proxy", {}).get("value"),
         }
         _write_json(metrics, os.path.join(folder, "metrics.json"))
 

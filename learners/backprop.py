@@ -9,11 +9,26 @@ class BackpropLearner(BaseLearner):
     Standard backprop with a time-aggregated readout.
     Aggregation over time: 'mean' | 'sum' | 'last' (default: 'mean').
     """
-    def __init__(self, net_cfg, meta, device, agg: str = "mean", lr: float = 1e-3, adam_eps:float=1e-8):
+    def __init__(
+        self,
+        net_cfg,
+        meta,
+        device,
+        agg: str = "mean",
+        lr: float = 1e-3,
+        optimizer: str = "adam",
+        adam_eps: float = 1e-8,
+    ):
         super().__init__(net_cfg, meta, device)
         self.agg = agg
         self.loss = nn.CrossEntropyLoss()
-        self.opt = optim.Adam(self.model.parameters(), lr=lr, eps=adam_eps)
+        optimizer = optimizer.lower()
+        if optimizer == "adam":
+            self.opt = optim.Adam(self.model.parameters(), lr=lr, eps=adam_eps)
+        elif optimizer == "sgd":
+            self.opt = optim.SGD(self.model.parameters(), lr=lr)
+        else:
+            raise ValueError(f"Unknown optimizer: {optimizer}")
 
     def _build_model(self):
         return SNNCore(self.cfg, self.meta["n_classes"])
@@ -69,22 +84,31 @@ class BackpropLearner(BaseLearner):
         acc = (logits.argmax(1) == y).float().mean().item() * 100.0
         return {"loss": float(loss.item()), "acc": acc}
 
-    def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
-        """
-        N_training = N_input + N_param + N_state + N_intermediate + N_grad
+    def _theory_components(self, batch: int, time_steps: int, dims: dict) -> dict:
+        B, T = int(batch), int(time_steps)
+        A, U, V, C = dims["A"], dims["U"], dims["V"], dims["C"]
+        d0_eff = dims["tilde_d0"]
+        F, P, Y = dims["F"], dims["P"], dims["Y"]
 
-          N_input        = B * T * d0
-          N_param        = get_param_memory_bytes()
-          N_state        = B * T * sum_l d_l
-          N_intermediate = B * T * sum_l d_l
-          N_grad         = N_param
-        """
-        Hs = [fc.out_features for fc in self.model.fcs]
-
-        N_input = self.get_input_memory_bytes(batch, time_steps, fp_bytes=fp_bytes)
-        N_param = self.get_param_memory_bytes(fp_bytes=fp_bytes)
-        N_state = batch * time_steps * sum(Hs) * fp_bytes
-        N_intermediate = batch * time_steps * sum(Hs) * fp_bytes
-        N_grad = self.get_param_memory_bytes(fp_bytes=fp_bytes)
-
-        return N_input + N_param + N_state + N_intermediate + N_grad
+        return {
+            "memory": {
+                "input": B * T * d0_eff,
+                "param": A + V,
+                "state": B * T * U,
+                "intermediate_hidden": B * T * U,
+                "intermediate_readout": B * T * C,
+                "grad": A + V,
+            },
+            "compute": {
+                "forward": B * T * (A + V + U),
+                "backward_update": B * T * (A + V + U),
+                "readout_temporal": B * T * C,
+            },
+            "access": {
+                "forward": B * T * (F + Y),
+                "temporal_hidden": 4 * B * T * U,
+                "temporal_readout": 2 * B * T * C,
+                "backward_update": B * T * (P + Y),
+                "param_read_write": 2 * (A + V),
+            },
+        }

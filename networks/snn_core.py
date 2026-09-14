@@ -69,7 +69,7 @@ class SNNCore(nn.Module):
         self.Wrec_flags: List[bool] = []
 
         for ls in cfg.layers:
-            self.fcs.append(nn.Linear(ls.dim_in, ls.dim_out))
+            self.fcs.append(nn.Linear(ls.dim_in, ls.dim_out, bias=ls.bias))
             if ls.norm == "layernorm":
                 self.norms.append(nn.LayerNorm(ls.dim_out))
             elif ls.norm == "batchnorm":
@@ -87,7 +87,7 @@ class SNNCore(nn.Module):
 
         last_dim = cfg.layers[-1].dim_out
         if cfg.head == "logits":
-            self.head = nn.Linear(last_dim, n_classes)
+            self.head = nn.Linear(last_dim, n_classes, bias=cfg.head_bias)
             self.head_lif = None
         elif cfg.head == "lif":
             self.head = nn.Linear(last_dim, n_classes, bias=False)

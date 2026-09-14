@@ -12,6 +12,12 @@ import matplotlib.pyplot as plt
 RESULTS_DIR = "results"
 OUT_DIR = os.path.join(RESULTS_DIR, "comparisons", "window_search")
 LEARNER_ORDER = ["bp", "eprop", "ff", "pepita"]
+THEORY_TRADEOFF_PLOTS = [
+    ("theory_memory_mb", "theoretical memory (MB)", "sample_acc_vs_theory_memory.png", "sample_acc vs theoretical memory"),
+    ("theory_compute_scalars", "theoretical compute (scalar ops)", "sample_acc_vs_theory_compute.png", "sample_acc vs theoretical compute"),
+    ("theory_access_scalars", "theoretical memory access (scalar accesses)", "sample_acc_vs_theory_access.png", "sample_acc vs theoretical memory access"),
+    ("theory_time_proxy", "theoretical time proxy", "sample_acc_vs_theory_time_proxy.png", "sample_acc vs theoretical time proxy"),
+]
 
 
 def ensure_dir(path: str) -> None:
@@ -69,6 +75,7 @@ def load_run_summaries(results_dir: str = RESULTS_DIR) -> pd.DataFrame:
         final = s.get("final", {}) or {}
         win = cfg.get("WINDOW", {}) or {}
         mem = s.get("memory", {}) or {}
+        theory = mem.get("theory", {}) or {}
         run_id = s.get("run_id", "")
 
         if not win and "-optuna-" not in run_id:
@@ -100,6 +107,11 @@ def load_run_summaries(results_dir: str = RESULTS_DIR) -> pd.DataFrame:
             "training_bytes_per_batch": mem.get("training_bytes_per_batch"),
             "memory_batch_size": mem.get("batch_size"),
             "memory_time_steps": mem.get("time_steps"),
+            "theory_memory_bytes": (theory.get("memory", {}) or {}).get("total_bytes"),
+            "theory_memory_scalars": (theory.get("memory", {}) or {}).get("total_scalars"),
+            "theory_compute_scalars": (theory.get("compute", {}) or {}).get("total_scalars"),
+            "theory_access_scalars": (theory.get("access", {}) or {}).get("total_scalars"),
+            "theory_time_proxy": (theory.get("time_proxy", {}) or {}).get("value"),
             "avg_synaptic_ops": final.get("avg_synaptic_operations"),
             "firing_rate": final.get("firing_rate"),
             "energy_per_sample_pj": final.get("energy_per_sample_pj"),
@@ -128,6 +140,11 @@ def load_run_summaries(results_dir: str = RESULTS_DIR) -> pd.DataFrame:
         "training_bytes_per_batch",
         "memory_batch_size",
         "memory_time_steps",
+        "theory_memory_bytes",
+        "theory_memory_scalars",
+        "theory_compute_scalars",
+        "theory_access_scalars",
+        "theory_time_proxy",
         "avg_synaptic_ops",
         "firing_rate",
         "energy_per_sample_pj",
@@ -140,6 +157,8 @@ def load_run_summaries(results_dir: str = RESULTS_DIR) -> pd.DataFrame:
         df["static_mb"] = df["static_bytes"] / (1024 ** 2)
     if "training_bytes_per_batch" in df.columns:
         df["training_mb_per_batch"] = df["training_bytes_per_batch"] / (1024 ** 2)
+    if "theory_memory_bytes" in df.columns:
+        df["theory_memory_mb"] = df["theory_memory_bytes"] / (1024 ** 2)
 
     return df
 
@@ -196,6 +215,12 @@ def save_all_trials_csv(df: pd.DataFrame, out_dir: str) -> str:
         "avg_synaptic_ops", "firing_rate", "energy_per_sample_pj",
         "training_bytes_per_batch", "training_mb_per_batch",
         "static_bytes", "static_mb",
+        "theory_memory_bytes",
+        "theory_memory_mb",
+        "theory_memory_scalars",
+        "theory_compute_scalars",
+        "theory_access_scalars",
+        "theory_time_proxy",
         "fp_bytes", "memory_batch_size", "memory_time_steps",
     ]
     cols = [c for c in cols if c in df.columns]
@@ -214,6 +239,12 @@ def save_best_csv(df: pd.DataFrame, out_dir: str) -> str:
         "avg_synaptic_ops", "firing_rate", "energy_per_sample_pj",
         "training_bytes_per_batch", "training_mb_per_batch",
         "static_bytes", "static_mb",
+        "theory_memory_bytes",
+        "theory_memory_mb",
+        "theory_memory_scalars",
+        "theory_compute_scalars",
+        "theory_access_scalars",
+        "theory_time_proxy",
         "run_id",
     ]].sort_values(["dataset", "learner"])
     out_path = os.path.join(out_dir, "best_per_dataset_learner.csv")
@@ -234,7 +265,14 @@ def save_best_per_phase_csv(df: pd.DataFrame, out_dir: str) -> str:
         "dataset", "learner", "phase", "trial",
         "win_L", "hop", "hop_ratio", "sample_acc",
         "avg_synaptic_ops", "firing_rate", "energy_per_sample_pj",
-        "training_mb_per_batch", "static_mb", "run_id"
+        "training_mb_per_batch", "static_mb",
+        "theory_memory_bytes",
+        "theory_memory_mb",
+        "theory_memory_scalars",
+        "theory_compute_scalars",
+        "theory_access_scalars",
+        "theory_time_proxy",
+        "run_id",
     ]].sort_values(["dataset", "learner", "phase"])
 
     out_path = os.path.join(out_dir, "best_per_dataset_learner_phase.csv")
@@ -616,6 +654,49 @@ def plot_all_methods_method_vs_accuracy(df_ds: pd.DataFrame, out_path: str, data
     plt.close(fig)
 
 
+
+def add_per_method_theory_tradeoff_plots(
+    g: pd.DataFrame,
+    subdir: str,
+    dataset: str,
+    learner: str,
+    saved: List[str],
+) -> None:
+    for x_col, x_label, filename, title_suffix in THEORY_TRADEOFF_PLOTS:
+        p = os.path.join(subdir, filename)
+        plot_scatter_phase_simple(
+            g,
+            x_col=x_col,
+            y_col="sample_acc",
+            out_path=p,
+            title=f"{dataset} | {learner} | {title_suffix}",
+            x_label=x_label,
+            y_label="sample_acc",
+        )
+        saved.append(p)
+
+
+def add_cross_method_theory_tradeoff_plots(
+    g: pd.DataFrame,
+    ds_dir: str,
+    dataset: str,
+    saved: List[str],
+) -> None:
+    for x_col, x_label, filename, title_suffix in THEORY_TRADEOFF_PLOTS:
+        stem, ext = os.path.splitext(filename)
+        p = os.path.join(ds_dir, f"{stem}_all_methods{ext}")
+        plot_all_methods_scatter(
+            g,
+            x_col=x_col,
+            y_col="sample_acc",
+            out_path=p,
+            title=f"{dataset} | all methods | {title_suffix}",
+            x_label=x_label,
+            y_label="sample_acc",
+        )
+        saved.append(p)
+
+
 def export_trials_csv(df_sub: pd.DataFrame, out_path: str) -> None:
     cols = [
         "run_id", "phase", "trial",
@@ -624,6 +705,12 @@ def export_trials_csv(df_sub: pd.DataFrame, out_path: str) -> None:
         "avg_synaptic_ops", "firing_rate", "energy_per_sample_pj",
         "training_bytes_per_batch", "training_mb_per_batch",
         "static_bytes", "static_mb",
+        "theory_memory_bytes",
+        "theory_memory_mb",
+        "theory_memory_scalars",
+        "theory_compute_scalars",
+        "theory_access_scalars",
+        "theory_time_proxy",
         "fp_bytes", "memory_batch_size", "memory_time_steps",
     ]
     cols = [c for c in cols if c in df_sub.columns]
@@ -636,7 +723,9 @@ def export_cross_method_csv(df_ds: pd.DataFrame, out_path: str) -> None:
         "run_id", "dataset", "learner", "phase", "trial",
         "win_L", "hop", "hop_ratio",
         "sample_acc", "avg_synaptic_ops", "firing_rate", "energy_per_sample_pj",
-        "training_mb_per_batch", "static_mb"
+        "training_mb_per_batch", "static_mb",
+        "theory_memory_mb", "theory_memory_scalars",
+        "theory_compute_scalars", "theory_access_scalars", "theory_time_proxy",
     ]
     cols = [c for c in cols if c in df_ds.columns]
     sort_cols = [c for c in ["learner", "phase", "trial", "win_L", "hop"] if c in df_ds.columns]
@@ -717,6 +806,8 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             y_label="sample_acc",
         )
         saved.append(p)
+
+        add_per_method_theory_tradeoff_plots(g, subdir, str(dataset), str(learner), saved)
 
         p = os.path.join(subdir, "window_length_vs_training_memory.png")
         plot_scatter_phase_colored(
@@ -868,6 +959,8 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             y_label="sample_acc",
         )
         saved.append(p)
+
+        add_cross_method_theory_tradeoff_plots(g, ds_dir, str(dataset), saved)
 
         p = os.path.join(ds_dir, "window_length_vs_training_memory_all_methods.png")
         plot_all_methods_scatter_colored_by_accuracy(

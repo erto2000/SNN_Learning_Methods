@@ -1,247 +1,481 @@
 # compare_results.py
 """
-Per-dataset comparisons (no cross-dataset mixing), with explicit out_path.
-All outputs are written RELATIVE to BASE_DIR, which is set to "results/comparisons".
+Comparisons for the current run_training.py layout.
+
+Expected run IDs:
+    <prefix>-<learner>
+
+Examples:
+    har-bp
+    har-ff
+    mnist-static-eprop
+    large-scale-audio-pepita
 
 Run:
     python compare_results.py
 """
 
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
 from visualization.flex_compare import run_comparisons
 
-# Write all artifacts under this directory
-BASE_DIR = "results"
 
-# ──────────────────────────────────────────────────────────────
-# Custom metric functions
-# ──────────────────────────────────────────────────────────────
-def max_test_acc(info):
-    """Return max test accuracy across epochs (ignores None)."""
-    hist = (info.get("summary") or {}).get("history", {}) or {}
+BASE_DIR = "results"
+LEARNERS = "bp|ff|eprop|pepita"
+EMIT_PER_EPOCH_CSV = False
+
+
+RUN_GROUPS = [
+    {"key": "har", "title": "HAR", "prefix": "har"},
+    {"key": "mnist_static", "title": "MNIST static", "prefix": "mnist-static"},
+    {"key": "mnist_rate", "title": "MNIST rate", "prefix": "mnist-rate"},
+    {"key": "speech_commands", "title": "Speech Commands", "prefix": "sc"},
+    {"key": "esc50", "title": "ESC-50", "prefix": "esc50"},
+    {"key": "urban8k", "title": "UrbanSound8K", "prefix": "urban8k"},
+    {"key": "pamap2", "title": "PAMAP2", "prefix": "pamap2"},
+    {"key": "mitbih", "title": "MIT-BIH", "prefix": "mitbih"},
+    {"key": "dvs_gesture", "title": "DVS Gesture", "prefix": "dvs"},
+    {"key": "large_scale_audio", "title": "Large-scale audio", "prefix": "large-scale-audio"},
+]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+
+
+def _summary(info: Dict[str, Any]) -> Dict[str, Any]:
+    return info.get("summary") or {}
+
+
+def _config(info: Dict[str, Any]) -> Dict[str, Any]:
+    return _summary(info).get("config") or {}
+
+
+def _history(info: Dict[str, Any]) -> Dict[str, Any]:
+    return _summary(info).get("history") or {}
+
+
+def _memory(info: Dict[str, Any]) -> Dict[str, Any]:
+    return _summary(info).get("memory") or {}
+
+
+def _theory(info: Dict[str, Any]) -> Dict[str, Any]:
+    theory = _memory(info).get("theory") or {}
+    return theory if isinstance(theory, dict) else {}
+
+
+def _deep_get(obj: Dict[str, Any], path: str) -> Optional[Any]:
+    cur: Any = obj
+    for part in path.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
+def _as_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cfg_value(info: Dict[str, Any], name: str) -> Any:
+    return _config(info).get(name)
+
+
+def _theory_value(info: Dict[str, Any], path: str) -> Optional[float]:
+    return _as_float(_deep_get(_theory(info), path))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Custom metrics for flex_compare
+
+
+def max_train_acc(info: Dict[str, Any]) -> Optional[float]:
     vals = []
-    for _, d in hist.items():
-        v = (d or {}).get("acc")
+    for _, row in _history(info).items():
+        v = _as_float((row or {}).get("acc"))
         if v is not None:
             vals.append(v)
     return max(vals) if vals else None
 
-def best_epoch(info):
-    """Epoch index at which accuracy is maximal; None if no history."""
-    hist = (info.get("summary") or {}).get("history", {}) or {}
-    best, best_ep = None, None
-    for k, d in hist.items():
-        v = (d or {}).get("acc")
+
+def best_train_epoch(info: Dict[str, Any]) -> Optional[int]:
+    best_acc, best_ep = None, None
+    for epoch, row in _history(info).items():
+        v = _as_float((row or {}).get("acc"))
         if v is None:
             continue
-        if best is None or v > best:
-            best, best_ep = v, int(k)
+        if best_acc is None or v > best_acc:
+            best_acc, best_ep = v, int(epoch)
     return best_ep
 
-def sec_per_epoch(info):
-    """Wall-clock sec per epoch from duration / EPOCHS."""
-    dur = info.get("summary", {}).get("duration_seconds")
-    epochs = ((info.get("summary", {}) or {}).get("config") or {}).get("EPOCHS")
-    if dur is None or not epochs:
-        return None
-    return float(dur) / float(epochs)
 
-def hs_total(info):
-    """Sum of hidden sizes (handy numeric axis)."""
-    hs = ((info.get("summary", {}) or {}).get("config") or {}).get("HIDDEN_SIZES") or []
+def max_sample_acc(info: Dict[str, Any]) -> Optional[float]:
+    vals = []
+    for _, row in _history(info).items():
+        v = _as_float((row or {}).get("sample_acc"))
+        if v is not None:
+            vals.append(v)
+    final_acc = _as_float(_deep_get(_summary(info), "final.sample_acc"))
+    if final_acc is not None:
+        vals.append(final_acc)
+    return max(vals) if vals else None
+
+
+def sec_per_epoch(info: Dict[str, Any]) -> Optional[float]:
+    duration = _as_float(_summary(info).get("duration_seconds"))
+    epochs = _as_float(_cfg_value(info, "EPOCHS"))
+    if duration is None or not epochs:
+        return None
+    return duration / epochs
+
+
+def hidden_total(info: Dict[str, Any]) -> Optional[int]:
+    hidden = _cfg_value(info, "HIDDEN_SIZES") or []
     try:
-        return sum(int(h) for h in hs)
-    except Exception:
+        return sum(int(x) for x in hidden)
+    except (TypeError, ValueError):
         return None
 
-def hs_depth(info):
-    """Depth (# hidden layers)."""
-    hs = ((info.get("summary", {}) or {}).get("config") or {}).get("HIDDEN_SIZES") or []
-    return len(hs)
 
-def hs_str(info):
-    """Hidden sizes as string (for labeling)."""
-    hs = ((info.get("summary", {}) or {}).get("config") or {}).get("HIDDEN_SIZES") or []
-    return "x".join(str(h) for h in hs)
+def hidden_depth(info: Dict[str, Any]) -> int:
+    return len(_cfg_value(info, "HIDDEN_SIZES") or [])
+
+
+def hidden_str(info: Dict[str, Any]) -> str:
+    return "x".join(str(x) for x in (_cfg_value(info, "HIDDEN_SIZES") or []))
+
+
+def learner_label(info: Dict[str, Any]) -> str:
+    mapping = {
+        "bp": "BPTT",
+        "ff": "FF",
+        "eprop": "E-PROP",
+        "pepita": "RATE-PEPITA",
+    }
+    return mapping.get(str(_cfg_value(info, "LEARNER")), str(_cfg_value(info, "LEARNER")))
+
+
+def optimizer_label(info: Dict[str, Any]) -> str:
+    learner = str(_cfg_value(info, "LEARNER"))
+    if learner == "bp":
+        opt = _cfg_value(info, "BP_OPTIMIZER")
+        lr = _cfg_value(info, "BP_LR")
+        return f"{str(opt).upper()} lr={float(lr):g}" if opt is not None and lr is not None else "BPTT"
+    if learner == "ff":
+        opt = _cfg_value(info, "FF_OPTIMIZER")
+        lr = _cfg_value(info, "FF_LR")
+        return f"{str(opt).upper()} lr={float(lr):g}" if opt is not None and lr is not None else "FF"
+    if learner == "eprop":
+        opt = _cfg_value(info, "EP_OPTIMIZER")
+        lr_in = _cfg_value(info, "EP_LR_IN")
+        lr_out = _cfg_value(info, "EP_LR_OUT")
+        if opt is not None and lr_in is not None and lr_out is not None:
+            return f"{str(opt).upper()} lr_in={float(lr_in):g}, lr_out={float(lr_out):g}"
+        return "E-PROP"
+    if learner == "pepita":
+        opt = _cfg_value(info, "PEP_OPTIMIZER")
+        lr = _cfg_value(info, "PEP_LR")
+        mode = _cfg_value(info, "PEP_MODE")
+        if opt is not None and lr is not None:
+            suffix = f" {mode}" if mode is not None else ""
+            return f"{str(opt).upper()} lr={float(lr):g}{suffix}"
+        return "RATE-PEPITA"
+    return learner
+
+
+def theory_memory_scalars(info: Dict[str, Any]) -> Optional[float]:
+    return _theory_value(info, "memory.total_scalars")
+
+
+def theory_memory_bytes(info: Dict[str, Any]) -> Optional[float]:
+    return _theory_value(info, "memory.total_bytes")
+
+
+def theory_memory_mb(info: Dict[str, Any]) -> Optional[float]:
+    value = theory_memory_bytes(info)
+    return None if value is None else value / (1024 ** 2)
+
+
+def theory_compute_scalars(info: Dict[str, Any]) -> Optional[float]:
+    return _theory_value(info, "compute.total_scalars")
+
+
+def theory_access_scalars(info: Dict[str, Any]) -> Optional[float]:
+    return _theory_value(info, "access.total_scalars")
+
+
+def theory_time_proxy(info: Dict[str, Any]) -> Optional[float]:
+    return _theory_value(info, "time_proxy.value")
+
+
+def training_memory_mb(info: Dict[str, Any]) -> Optional[float]:
+    value = _as_float(_memory(info).get("training_bytes_per_batch"))
+    return None if value is None else value / (1024 ** 2)
+
+
+def static_memory_mb(info: Dict[str, Any]) -> Optional[float]:
+    value = _as_float(_memory(info).get("static_bytes"))
+    return None if value is None else value / (1024 ** 2)
+
+
+def time_eval_t1(info: Dict[str, Any]) -> Optional[float]:
+    return _as_float(_deep_get(_summary(info), "final.time_eval_sample_acc_T1"))
+
+
+def time_eval_p25(info: Dict[str, Any]) -> Optional[float]:
+    return _as_float(_deep_get(_summary(info), "final.time_eval_sample_acc_P25"))
+
+
+def time_eval_p50(info: Dict[str, Any]) -> Optional[float]:
+    return _as_float(_deep_get(_summary(info), "final.time_eval_sample_acc_P50"))
+
+
+def time_eval_p100(info: Dict[str, Any]) -> Optional[float]:
+    return _as_float(_deep_get(_summary(info), "final.time_eval_sample_acc_P100"))
+
 
 CUSTOM_FUNCS = {
-    "max_test_acc": max_test_acc,
-    "best_epoch": best_epoch,
+    "max_train_acc": max_train_acc,
+    "best_train_epoch": best_train_epoch,
+    "max_sample_acc": max_sample_acc,
     "sec_per_epoch": sec_per_epoch,
-    "hs_total": hs_total,
-    "hs_depth": hs_depth,
-    "hs_str": hs_str,
+    "hidden_total": hidden_total,
+    "hidden_depth": hidden_depth,
+    "hidden_str": hidden_str,
+    "learner_label": learner_label,
+    "optimizer_label": optimizer_label,
+    "theory_memory_scalars": theory_memory_scalars,
+    "theory_memory_bytes": theory_memory_bytes,
+    "theory_memory_mb": theory_memory_mb,
+    "theory_compute_scalars": theory_compute_scalars,
+    "theory_access_scalars": theory_access_scalars,
+    "theory_time_proxy": theory_time_proxy,
+    "training_memory_mb": training_memory_mb,
+    "static_memory_mb": static_memory_mb,
+    "time_eval_t1": time_eval_t1,
+    "time_eval_p25": time_eval_p25,
+    "time_eval_p50": time_eval_p50,
+    "time_eval_p100": time_eval_p100,
 }
 
-# ──────────────────────────────────────────────────────────────
-# Datasets & learners
-# ──────────────────────────────────────────────────────────────
-DATASETS = [
-    "har", "mnist", "speech_commands", "esc50",
-    "urban8k", "pamap2", "mitbih", "dvs_gesture"
-]
-LEARNERS = "bp|ff|eprop|pepita"
 
-# Toggle to also export per-epoch CSV for each dataset (one row/epoch/run)
-EMIT_PER_EPOCH_CSV = False
+# ──────────────────────────────────────────────────────────────────────────────
+# Comparison specs
 
-def pretty_ds(ds):
-    return {
-        "har": "HAR",
-        "mnist": "MNIST (temporalized)",
-        "speech_commands": "Speech Commands",
-        "esc50": "ESC-50",
-        "urban8k": "UrbanSound8K",
-        "pamap2": "PAMAP2",
-        "mitbih": "MIT-BIH",
-        "dvs_gesture": "DVS Gesture",
-    }.get(ds, ds)
 
-def build_for_dataset(ds: str):
-    """
-    Build comparison specs for a single dataset.
-    Each comparison sets out_path so files land under:
-        results/comparisons/<ds>/<section>/
-    """
-    title_ds = pretty_ds(ds)
-    runs_all       = f"re:^{ds}-({LEARNERS})-"
-    runs_baseline  = f"re:^{ds}-({LEARNERS})-nowin-bs64-h128-e10$"
-    runs_win_pair  = f"re:^{ds}-({LEARNERS})-(nowin|win)-bs64-h128-e10$"
-    runs_batch     = f"re:^{ds}-({LEARNERS})-nowin-bs(64|128)-h128-e10$"
-    runs_hidden    = f"re:^{ds}-({LEARNERS})-nowin-bs64-h(128|128x128|512|512x512)-e10$"
+def run_pattern(prefix: str) -> str:
+    return f"re:^{prefix}-({LEARNERS})$"
+
+
+def all_current_runs_pattern() -> str:
+    prefixes = "|".join(g["prefix"] for g in RUN_GROUPS)
+    return f"re:^({prefixes})-({LEARNERS})$"
+
+
+def leaderboard_columns():
+    return [
+        {"name": "run_id", "value": "run_id"},
+        {"name": "dataset", "value": "config.DATASET"},
+        {"name": "learner", "value": "config.LEARNER"},
+        {"name": "learner_label", "func": "learner_label"},
+        {"name": "optimizer", "func": "optimizer_label"},
+        {"name": "batch", "value": "config.BATCH_SIZE"},
+        {"name": "hidden", "func": "hidden_str"},
+        {"name": "hidden_total", "func": "hidden_total"},
+        {"name": "hidden_depth", "func": "hidden_depth"},
+        {"name": "epochs", "value": "config.EPOCHS"},
+        {"name": "final_sample_acc", "value": "final.sample_acc"},
+        {"name": "max_sample_acc", "func": "max_sample_acc"},
+        {"name": "max_train_acc", "func": "max_train_acc"},
+        {"name": "best_train_epoch", "func": "best_train_epoch"},
+        {"name": "sec_per_epoch", "func": "sec_per_epoch"},
+        {"name": "static_memory_mb", "func": "static_memory_mb"},
+        {"name": "training_memory_mb", "func": "training_memory_mb"},
+        {"name": "theory_memory_scalars", "func": "theory_memory_scalars"},
+        {"name": "theory_memory_bytes", "func": "theory_memory_bytes"},
+        {"name": "theory_memory_mb", "func": "theory_memory_mb"},
+        {"name": "theory_compute_scalars", "func": "theory_compute_scalars"},
+        {"name": "theory_access_scalars", "func": "theory_access_scalars"},
+        {"name": "theory_time_proxy", "func": "theory_time_proxy"},
+        {"name": "avg_synaptic_ops", "value": "final.avg_synaptic_operations"},
+        {"name": "firing_rate", "value": "final.firing_rate"},
+        {"name": "energy_per_sample_pj", "value": "final.energy_per_sample_pj"},
+        {"name": "time_eval_sample_acc_T1", "func": "time_eval_t1"},
+        {"name": "time_eval_sample_acc_P25", "func": "time_eval_p25"},
+        {"name": "time_eval_sample_acc_P50", "func": "time_eval_p50"},
+        {"name": "time_eval_sample_acc_P100", "func": "time_eval_p100"},
+        {"name": "status", "value": "status"},
+        {"name": "duration_sec", "value": "duration_seconds"},
+        {"name": "started_at", "value": "started_at"},
+        {"name": "finished_at", "value": "finished_at"},
+    ]
+
+
+def per_epoch_columns():
+    return [
+        {"name": "run_id", "value": "run_id"},
+        {"name": "dataset", "value": "config.DATASET"},
+        {"name": "learner", "value": "config.LEARNER"},
+        {"name": "epoch", "value": "epoch"},
+        {"name": "train_loss", "value": "history.loss"},
+        {"name": "train_acc", "value": "history.acc"},
+        {"name": "sample_acc", "value": "history.sample_acc"},
+        {"name": "window_acc", "value": "history.window_acc"},
+        {"name": "final_sample_acc", "value": "final.sample_acc"},
+    ]
+
+
+def build_for_group(group: Dict[str, str]):
+    key = group["key"]
+    title = group["title"]
+    runs = [run_pattern(group["prefix"])]
 
     comps = [
-        # 1) Baseline: per-learner epoch curves
         {
-            "name": f"[{title_ds}] Epoch curves — baseline (nowin, bs64, h=128, e10)",
-            "runs": [runs_baseline],
+            "name": f"[{title}] Epoch curves",
+            "runs": runs,
             "dest": {
                 "type": "plot",
-                "out_path": f"{ds}/baseline",  # relative to BASE_DIR
+                "out_path": f"{key}/epoch_curves",
                 "panels": [
-                    {"x": "epoch", "y": "loss", "plot": "line", "title": "Train Loss vs Epoch"},
-                    {"x": "epoch", "y": "acc",  "plot": "line", "title": "Acc (%) vs Epoch"},
-                    {"x": "run",   "y": "final.sample_acc", "plot": "bar",  "title": "Final Acc by Learner"},
+                    {"x": "epoch", "y": "loss", "plot": "line", "title": "Train loss vs epoch"},
+                    {"x": "epoch", "y": "acc", "plot": "line", "title": "Train accuracy vs epoch"},
+                    {"x": "run", "y": "final.sample_acc", "plot": "bar", "title": "Final sample accuracy"},
                 ],
-                "style": {"dpi": 140, "figsize": [12, 6], "tight_layout": True}
-            }
+                "style": {"dpi": 140, "figsize": [12, 6], "tight_layout": True},
+            },
         },
-
-        # 2) Window ON/OFF effect (paired bars, scatter trade-off)
         {
-            "name": f"[{title_ds}] Window ON vs OFF (bs64, h=128, e10)",
-            "runs": [runs_win_pair],
+            "name": f"[{title}] Theoretical cost bars",
+            "runs": runs,
             "dest": {
                 "type": "plot",
-                "out_path": f"{ds}/window",
+                "out_path": f"{key}/theoretical_costs",
                 "panels": [
-                    {"x": "run", "y": "final.sample_acc", "plot": "bar", "title": "Final Acc — Window ON/OFF"},
-                    {"x": "func:max_test_acc", "y": "func:sec_per_epoch", "plot": "scatter",
-                     "title": "Max Acc vs Sec/Epoch (window trade-off)"},
+                    {"x": "run", "y": "func:theory_memory_mb", "plot": "bar", "title": "Theoretical training memory (MB)"},
+                    {"x": "run", "y": "func:theory_compute_scalars", "plot": "bar", "title": "Theoretical compute"},
+                    {"x": "run", "y": "func:theory_access_scalars", "plot": "bar", "title": "Theoretical memory access"},
+                    {"x": "run", "y": "func:theory_time_proxy", "plot": "bar", "title": "Theoretical time proxy"},
                 ],
-                "style": {"dpi": 140, "figsize": [12, 6]}
-            }
+                "style": {"dpi": 140, "figsize": [12, 8], "tight_layout": True},
+            },
         },
-
-        # 3) Batch sweep (64 vs 128), holding others
         {
-            "name": f"[{title_ds}] Batch sweep (64 vs 128) — nowin, h=128, e10",
-            "runs": [runs_batch],
+            "name": f"[{title}] Accuracy-cost tradeoffs",
+            "runs": runs,
             "dest": {
                 "type": "plot",
-                "out_path": f"{ds}/batch",
+                "out_path": f"{key}/accuracy_cost_tradeoffs",
                 "panels": [
-                    {"x": "config.BATCH_SIZE", "y": "final.sample_acc", "plot": "scatter",
-                     "title": "Final Acc vs Batch Size"},
-                    {"x": "config.BATCH_SIZE", "y": "func:sec_per_epoch", "plot": "line",
-                     "title": "Sec/Epoch vs Batch Size"},
+                    {"x": "func:theory_memory_mb", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical memory"},
+                    {"x": "func:theory_compute_scalars", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical compute"},
+                    {"x": "func:theory_access_scalars", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical access"},
+                    {"x": "func:theory_time_proxy", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical time proxy"},
                 ],
-                "style": {"dpi": 140, "figsize": [10, 5]}
-            }
+                "style": {"dpi": 140, "figsize": [12, 8], "tight_layout": True},
+            },
         },
-
-        # 4) Hidden-size sweep, holding others
         {
-            "name": f"[{title_ds}] Hidden-size sweep — nowin, bs64, e10",
-            "runs": [runs_hidden],
+            "name": f"[{title}] Time-truncation evaluation",
+            "runs": runs,
             "dest": {
                 "type": "plot",
-                "out_path": f"{ds}/hidden",
+                "out_path": f"{key}/time_eval",
                 "panels": [
-                    {"x": "func:hs_total", "y": "final.sample_acc", "plot": "line",
-                     "title": "Final Acc vs Σ Hidden"},
-                    {"x": "func:hs_depth", "y": "func:max_test_acc", "plot": "scatter",
-                     "title": "Max Acc vs Depth (#layers)"},
+                    {"x": "run", "y": "func:time_eval_t1", "plot": "bar", "title": "Sample accuracy at T=1"},
+                    {"x": "run", "y": "func:time_eval_p25", "plot": "bar", "title": "Sample accuracy at 25% T"},
+                    {"x": "run", "y": "func:time_eval_p50", "plot": "bar", "title": "Sample accuracy at 50% T"},
+                    {"x": "run", "y": "func:time_eval_p100", "plot": "bar", "title": "Sample accuracy at 100% T"},
                 ],
-                "style": {"dpi": 140, "figsize": [10, 5]}
-            }
+                "style": {"dpi": 140, "figsize": [12, 8], "tight_layout": True},
+            },
         },
-
-        # 5) Dataset leaderboard (all runs for this dataset)
         {
-            "name": f"[{title_ds}] Leaderboard (CSV) — all runs",
-            "runs": [runs_all],
+            "name": f"[{title}] Leaderboard CSV",
+            "runs": runs,
             "dest": {
                 "type": "csv",
-                "out_path": f"{ds}/tables",
+                "out_path": f"{key}/tables/leaderboard",
                 "spread_epochs": False,
-                "columns": [
-                    {"name": "run_id",          "value": "run_id"},
-                    {"name": "learner",         "value": "config.LEARNER"},
-                    {"name": "batch",           "value": "config.BATCH_SIZE"},
-                    {"name": "hidden",          "func": "hs_str"},
-                    {"name": "epochs",          "value": "config.EPOCHS"},
-                    {"name": "final_acc",       "value": "final.sample_acc"},
-                    {"name": "max_epoch_acc",   "func": "max_test_acc"},
-                    {"name": "best_epoch_idx",  "func": "best_epoch"},
-                    {"name": "sec_per_epoch",   "func": "sec_per_epoch"},
-                    {"name": "duration_sec",    "value": "duration_seconds"},
-                    {"name": "status",          "value": "status"},
-                    {"name": "started_at",      "value": "started_at"},
-                    {"name": "finished_at",     "value": "finished_at"},
-                ]
-            }
+                "columns": leaderboard_columns(),
+            },
         },
     ]
 
     if EMIT_PER_EPOCH_CSV:
         comps.append({
-            "name": f"[{title_ds}] Per-epoch (CSV) — all runs",
-            "runs": [runs_all],
+            "name": f"[{title}] Per-epoch CSV",
+            "runs": runs,
             "dest": {
                 "type": "csv",
-                "out_path": f"{ds}/tables",
+                "out_path": f"{key}/tables/per_epoch",
                 "spread_epochs": True,
-                "columns": [
-                    {"name": "run_id",     "value": "run_id"},
-                    {"name": "learner",    "value": "config.LEARNER"},
-                    {"name": "epoch",      "value": "epoch"},
-                    {"name": "train_loss", "value": "history.loss"},
-                    {"name": "train_acc",  "value": "history.acc"},
-                    {"name": "test_acc",   "value": "history.sample_acc"},
-                    {"name": "final_acc",  "value": "final.sample_acc"},
-                    {"name": "max_test_acc", "func": "max_test_acc"},
-                ]
-            }
+                "columns": per_epoch_columns(),
+            },
         })
+
     return comps
 
-# ──────────────────────────────────────────────────────────────
-# Build COMPARISONS: per dataset, no cross-dataset plots
-# ──────────────────────────────────────────────────────────────
+
 COMPARISONS = []
-for ds in DATASETS:
-    COMPARISONS.extend(build_for_dataset(ds))
+for run_group in RUN_GROUPS:
+    COMPARISONS.extend(build_for_group(run_group))
+
+COMPARISONS.append({
+    "name": "[All current runs] Leaderboard CSV",
+    "runs": [all_current_runs_pattern()],
+    "dest": {
+        "type": "csv",
+        "out_path": "all_current_runs/leaderboard",
+        "spread_epochs": False,
+        "columns": leaderboard_columns(),
+    },
+})
+
+COMPARISONS.append({
+    "name": "[All current runs] Accuracy-cost tradeoffs",
+    "runs": [all_current_runs_pattern()],
+    "dest": {
+        "type": "plot",
+        "out_path": "all_current_runs/accuracy_cost_tradeoffs",
+        "panels": [
+            {"x": "func:theory_memory_mb", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical memory"},
+            {"x": "func:theory_compute_scalars", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical compute"},
+            {"x": "func:theory_access_scalars", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical access"},
+            {"x": "func:theory_time_proxy", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical time proxy"},
+        ],
+        "style": {"dpi": 140, "figsize": [12, 8], "tight_layout": True},
+    },
+})
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+
 
 def main():
-    arts = run_comparisons(base_dir=BASE_DIR, comparisons=COMPARISONS, custom_funcs=CUSTOM_FUNCS)
+    artifacts = run_comparisons(
+        base_dir=BASE_DIR,
+        comparisons=COMPARISONS,
+        custom_funcs=CUSTOM_FUNCS,
+    )
+
     print("\n===== Comparison Summary =====")
-    for comp_name, produced in arts.items():
+    for comp_name, produced in artifacts.items():
         print(f"[{comp_name}]")
-        for k, v in produced.items():
-            if isinstance(v, list):
-                for p in v: print(f"- {p}")
-            elif v:
-                print(f"- {k}: {v}")
+        for key, value in produced.items():
+            if isinstance(value, list):
+                for item in value:
+                    print(f"- {item}")
+            elif value:
+                print(f"- {key}: {value}")
+
 
 if __name__ == "__main__":
     main()

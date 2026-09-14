@@ -34,10 +34,12 @@ class PepitaLearner(BaseLearner):
         net_cfg,
         meta,
         device,
-        mode: str = "original",
+        mode: str = "accum",
         lr: float = 0.01,
         max_rel_step: float = 0.05,
         target_modulation_ratio: float = 0.1,
+        optimizer: str = "adam",
+        adam_eps: float = 1e-8,
     ):
         """
         Args:
@@ -50,6 +52,8 @@ class PepitaLearner(BaseLearner):
             max_rel_step: max allowed relative step size per update
                           (||ΔW|| / ||W|| <= max_rel_step).
             target_modulation_ratio: target std((e @ F)) / std(X) on first batch.
+            optimizer: parameter update rule applied to the PEPITA directions
+                       ("adam" or "sgd").
         """
         super().__init__(net_cfg, meta, device)
 
@@ -60,6 +64,20 @@ class PepitaLearner(BaseLearner):
         self.lr = lr
         self.max_rel_step = max_rel_step
         self.target_modulation_ratio = target_modulation_ratio
+        self.optimizer_name = optimizer.lower()
+
+        # PEPITA constructs its own update directions. The optimizer consumes
+        # those directions without using autograd through the two forward phases.
+        opt_params = [fc.weight for fc in self.model.fcs]
+        if self.model.head is not None:
+            opt_params.append(self.model.head.weight)
+
+        if self.optimizer_name == "adam":
+            self.opt = torch.optim.Adam(opt_params, lr=self.lr, eps=adam_eps)
+        elif self.optimizer_name == "sgd":
+            self.opt = torch.optim.SGD(opt_params, lr=self.lr)
+        else:
+            raise ValueError(f"Unknown optimizer: {optimizer}")
 
         K = meta["n_classes"]
         D0 = net_cfg.layers[0].dim_in
@@ -79,24 +97,48 @@ class PepitaLearner(BaseLearner):
         return SNNCore(self.cfg, self.meta["n_classes"])
 
     # -------------------------------------------------------------------------
-    # Helper: safe parameter update with relative step-size control
+    # Helper: apply PEPITA directions with SGD or Adam
     # -------------------------------------------------------------------------
-    def _apply_update(self, W: torch.Tensor, dW: torch.Tensor) -> None:
+    @torch.no_grad()
+    def _apply_directions(self, directions) -> None:
         """
-        Apply an update to W using the 'gradient-like' dW, but enforce
-        a bound on the relative step size: ||ΔW|| / ||W|| <= max_rel_step.
+        Apply a collection of PEPITA update directions.
+
+        Each item is ``(parameter, direction)``, where ``direction`` follows the
+        original PEPITA convention ``W <- W + lr * direction``. PyTorch
+        optimizers use ``W <- W - ... * grad``, so ``-direction`` is supplied
+        as the optimizer gradient.
+
+        ``max_rel_step`` is enforced on the actual parameter change produced by
+        the selected optimizer, so the same stability constraint is available
+        for both SGD and Adam.
         """
-        with torch.no_grad():
-            update = self.lr * dW
-            w_norm = W.norm()
-            u_norm = update.norm()
+        if not directions:
+            return
 
-            if w_norm > 0 and u_norm > self.max_rel_step * w_norm:
-                # Scale down the update so that relative step is bounded.
-                scale = (self.max_rel_step * w_norm) / (u_norm + 1e-8)
-                update = update * scale
+        snapshots = None
+        if self.max_rel_step is not None:
+            snapshots = [(param, param.detach().clone()) for param, _ in directions]
 
-            W.add_(update)
+        self.opt.zero_grad(set_to_none=True)
+        for param, direction in directions:
+            param.grad = (-direction).detach()
+        self.opt.step()
+
+        if snapshots is None:
+            return
+
+        for param, old in snapshots:
+            old_norm = old.norm()
+            if old_norm <= 0:
+                continue
+
+            delta = param.detach() - old
+            delta_norm = delta.norm()
+            max_norm = self.max_rel_step * old_norm
+            if delta_norm > max_norm:
+                scale = max_norm / (delta_norm + 1e-8)
+                param.copy_(old + delta * scale)
 
     # -------------------------------------------------------------------------
     # Inference
@@ -239,25 +281,29 @@ class PepitaLearner(BaseLearner):
         denom = max(1, B)
 
         for t in range(T):
+            directions = []
+
             # ----- Layer 0 update -----
             diff0_t = h_seq[0][t] - h_mod_seq[0][t]  # [B,H0]
             x_mod_t = X_mod[:, t, :]                 # [B,D0]
             dW0_t = -(diff0_t.t() @ x_mod_t) / denom # [H0,D0]
-            self._apply_update(self.model.fcs[0].weight.data, dW0_t)
+            directions.append((self.model.fcs[0].weight, dW0_t))
 
             # ----- Deeper layer updates -----
             for l in range(1, L):
-                pre_t = h_mod_seq[l - 1][t]          # [B,H_{l-1}]
+                pre_t = h_mod_seq[l - 1][t]             # [B,H_{l-1}]
                 diff_t = h_seq[l][t] - h_mod_seq[l][t]  # [B,H_l]
                 dWl_t = -(diff_t.t() @ pre_t) / denom   # [H_l,H_{l-1}]
-                self._apply_update(self.model.fcs[l].weight.data, dWl_t)
+                directions.append((self.model.fcs[l].weight, dWl_t))
 
             # ----- Readout update -----
             # There is no hidden-layer phase difference at the head. Use the
             # same output error e with the current second-phase final-layer spikes.
             h_last_mod_t = h_mod_seq[-1][t]          # [B,H_{L-1}]
             dWo_t = -(e.t() @ h_last_mod_t) / denom  # [K,H_{L-1}]
-            self._apply_update(self.model.head.weight.data, dWo_t)
+            directions.append((self.model.head.weight, dWo_t))
+
+            self._apply_directions(directions)
 
     # -------------------------------------------------------------------------
     # Accum mode update: spike-rate differences, one update per batch
@@ -293,23 +339,27 @@ class PepitaLearner(BaseLearner):
         # Hidden layers use second-phase presynaptic spike rates.
         x_mod_rate = X_mod.mean(dim=1)               # [B,D0]
 
+        directions = []
+
         # ----- Layer 0 update -----
         diff0_rate = h_rate[0] - h_mod_rate[0]       # [B,H0]
         dW0 = -(diff0_rate.t() @ x_mod_rate) / denom # [H0,D0]
-        self._apply_update(self.model.fcs[0].weight.data, dW0)
+        directions.append((self.model.fcs[0].weight, dW0))
 
         # ----- Deeper layer updates -----
         for l in range(1, L):
             pre_rate = h_mod_rate[l - 1]             # [B,H_{l-1}]
             diff_rate = h_rate[l] - h_mod_rate[l]    # [B,H_l]
             dWl = -(diff_rate.t() @ pre_rate) / denom
-            self._apply_update(self.model.fcs[l].weight.data, dWl)
+            directions.append((self.model.fcs[l].weight, dWl))
 
         # ----- Readout layer update -----
         # Use the second-phase final-layer spike rate.
         h_last_mod_rate = h_mod_rate[-1]             # [B,H_{L-1}]
         dWo = -(e.t() @ h_last_mod_rate) / denom     # [K,H_{L-1}]
-        self._apply_update(self.model.head.weight.data, dWo)
+        directions.append((self.model.head.weight, dWo))
+
+        self._apply_directions(directions)
 
     # -------------------------------------------------------------------------
     # Training step with PEPITA update + F calibration + relative step control
@@ -383,53 +433,37 @@ class PepitaLearner(BaseLearner):
     # -------------------------------------------------------------------------
     # Memory estimation
     # -------------------------------------------------------------------------
-    def get_training_memory_bytes(
-        self,
-        batch: int,
-        time_steps: int,
-        fp_bytes: int = 4,
-    ) -> int:
-        """
-        Approximate training memory for the implemented training path.
+    def _theory_components(self, batch: int, time_steps: int, dims: dict) -> dict:
+        B, T = int(batch), int(time_steps)
+        A, U, V, C = dims["A"], dims["U"], dims["V"], dims["C"]
+        d0 = dims["d0"]
+        d0_eff = dims["tilde_d0"]
+        F, P, Y = dims["F"], dims["P"], dims["Y"]
 
-        Common terms:
-          N_input = B * T * d0
-          N_param = parameter memory
-          N_state = B * sum_l d_l
-          N_grad  = parameter-sized update/gradient-like storage estimate
+        if self.mode != "accum":
+            raise RuntimeError("Theoretical RATE-PEPITA costs are defined for mode='accum'.")
 
-        Mode-specific intermediates:
-          original:
-            Stores timestep spike sequences:
-              B * T * sum_l d_l
-            plus F. Input-sized tensors are counted only in N_input.
-
-          accum:
-            Stores spike-rate intermediates:
-              B * sum_l d_l
-            plus F. Input-sized tensors are counted only in N_input.
-        """
-        Hs = [fc.out_features for fc in self.model.fcs]
-        d0 = self.cfg.layers[0].dim_in
-
-        N_input = self.get_input_memory_bytes(batch, time_steps, fp_bytes=fp_bytes)
-        N_param = self.get_param_memory_bytes(fp_bytes=fp_bytes)
-        N_state = batch * sum(Hs) * fp_bytes
-        N_F = self.F.numel() * fp_bytes
-
-        if self.mode == "original":
-            N_intermediate = (
-                batch * time_steps * sum(Hs) * fp_bytes
-                + N_F
-            )
-        elif self.mode == "accum":
-            N_intermediate = (
-                batch * sum(Hs) * fp_bytes
-                + N_F
-            )
-        else:
-            raise RuntimeError(f"Invalid mode: {self.mode!r}")
-
-        N_grad = self.get_param_memory_bytes(fp_bytes=fp_bytes)
-
-        return N_input + N_param + N_state + N_intermediate + N_grad
+        return {
+            "memory": {
+                "input": B * T * d0_eff,
+                "param": A + V,
+                "state": B * U,
+                "rate_buffer": B * U,
+                "feedback_matrix": C * d0,
+                "output_error": B * C,
+                "input_perturbation": B * d0,
+                "grad": A + V,
+            },
+            "compute": {
+                "two_forward_phases": 2 * B * T * (A + V + U),
+                "feedback_projection_and_error": B * (C * d0 + C),
+                "update": B * (A + V),
+            },
+            "access": {
+                "two_forward_phases": 2 * B * T * (F + Y),
+                "state_and_rate": 4 * B * T * U,
+                "feedback_projection": B * (C * d0 + C + d0),
+                "update": B * (P + Y),
+                "param_read_write": 2 * (A + V),
+            },
+        }

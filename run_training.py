@@ -87,6 +87,8 @@ DEFAULT = dict(
     EPOCHS                      = 10,       # safe default; each run overrides up to max 10
     MAX_SAMPLES                 = None,
     DTYPE                       = "fp32",   # "fp32", "fp16", "bf16" for both train + eval
+    THEORY_ALPHA                = 1.0,      # arithmetic-cost coefficient for theoretical time proxy
+    THEORY_BETA                 = 1.0,      # memory-access coefficient for theoretical time proxy
 
     # Evaluation
     TEST_EVERY_EPOCH            = False,
@@ -105,182 +107,200 @@ DEFAULT = dict(
     RECURRENT        = False,
     INIT_TYPE        = "default",
     NORM             = None,
+    HIDDEN_BIAS      = False,
+    HEAD_BIAS        = False,
 
     # Backprop
     BP_AGG           = "mean",
     BP_LR            = 2e-3,
+    BP_OPTIMIZER     = "adam",
 
     # FF
     FF_ALPHA         = 0.6,
     FF_LR            = 2e-3,
+    FF_OPTIMIZER     = "adam",
 
     # E-Prop
     EP_LR_IN         = 1e-3,
     EP_LR_REC        = 1e-3,
     EP_LR_OUT        = 2e-3,
+    EP_OPTIMIZER     = "adam",
     EP_DROP_DIAG     = True,
     EP_WEIGHT_CLIP   = 1.5,
 
     # PEPITA
     PEP_MODE         = "accum",
     PEP_LR           = 1e-2,
+    PEP_OPTIMIZER    = "adam",
     PEP_MAX_REL_STEP = 0.05,
     PEP_MOD_RATIO    = 0.1,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # EXPERIMENTS
-RUNS = [
-        # # ── HAR (Human Activity Recognition) ───────────────────────────────────────────────────────
-        # {
-        #     **DEFAULT,
-        #     "RUN_ID": "har-bp",
-        #     "DATASET": "har",
-        #     "LEARNER": "bp",
-        #     "EPOCHS": 10,
-        #     "BATCH_SIZE": 128,
-        #     "HIDDEN_SIZES": [128],
-        #     "TRANSFORM": HAR_PIPELINE,
-        # },
-        #
-        # # ── MNIST (static repeated frames) ───────────────────────────────────────
-        # {
-        #     **DEFAULT,
-        #     "RUN_ID": "mnist-static-bp",
-        #     "DATASET": "mnist",
-        #     "LEARNER": "bp",
-        #     "EPOCHS": 10,
-        #     "BATCH_SIZE": 128,
-        #     "HIDDEN_SIZES": [128],
-        #     "TRANSFORM": MNIST_STATIC_PIPELINE,
-        # },
-        #
-        # # ── MNIST (rate-coded spikes)  ────────────────────────────────
-        # {
-        #     **DEFAULT,
-        #     "RUN_ID": "mnist-rate-bp",
-        #     "DATASET": "mnist",
-        #     "LEARNER": "bp",
-        #     "EPOCHS": 10,
-        #     "BATCH_SIZE": 128,
-        #     "HIDDEN_SIZES": [128],
-        #     "TRANSFORM": MNIST_RATE_PIPELINE,
-        # },
-        #
-        # # ── Speech Commands ────────────────────────────────────────
-        # {
-        #     **DEFAULT,
-        #     "RUN_ID": "sc-bp",
-        #     "DATASET": "speech_commands",
-        #     "LEARNER": "bp",
-        #     "EPOCHS": 10,
-        #     "BATCH_SIZE": 128,
-        #     "HIDDEN_SIZES": [128],
-        #     "MAX_SAMPLES": 10000,
-        #     "TRANSFORM": SC_PIPELINE,
-        #     "DATASET_KW": {
-        #         "class_filter": ["yes", "no", "stop"],
-        #         "equal_per_class":True,
-        #     },
-        # },
-        #
-        # # ── ESC-50 (environmental audio) ─────────────────────────────────────────
-        # {
-        #     **DEFAULT,
-        #     "RUN_ID": "esc50-bp",
-        #     "DATASET": "esc50",
-        #     "LEARNER": "bp",
-        #     "EPOCHS": 10,
-        #     "BATCH_SIZE": 128,
-        #     "HIDDEN_SIZES": [128],
-        #     "TRANSFORM": ESC50_PIPELINE,
-        #     "DATASET_KW": {
-        #         "class_filter": ["dog", "rain", "siren", "helicopter"],
-        #         "equal_per_class": True,
-        #         "duration": 1
-        #     },
-        # },
-        #
-        # # ── UrbanSound8K (urban audio) ───────────────────────────────────────────
-        # {
-        #     **DEFAULT,
-        #     "RUN_ID": "urban8k-bp",
-        #     "DATASET": "urban8k",
-        #     "LEARNER": "bp",
-        #     "EPOCHS": 10,
-        #     "BATCH_SIZE": 128,
-        #     "HIDDEN_SIZES": [128],
-        #     "TRANSFORM": URBAN8K_PIPELINE,
-        #     "DATASET_KW": {
-        #         "class_filter": ["dog_bark", "siren", "gun_shot"],
-        #         "equal_per_class": True,
-        #     }
-        # },
-        #
-        # # ── PAMAP2 (physical activity) ────────────────────────────────────
-        # {
-        #     **DEFAULT,
-        #     "RUN_ID": "pamap2-bp",
-        #     "DATASET": "pamap2",
-        #     "LEARNER": "bp",
-        #     "EPOCHS": 10,
-        #     "BATCH_SIZE": 128,
-        #     "HIDDEN_SIZES": [128],
-        #     "TRANSFORM": PAMAP2_PIPELINE,
-        #     "DATASET_KW": {
-        #         "equal_per_class": True,
-        #         "time_steps": 128,
-        #     },
-        # },
-        #
-        # # ── MIT-BIH (ECG) ─────────────────────────────────────────────
-        # {
-        #     **DEFAULT,
-        #     "RUN_ID": "mitbih-bp",
-        #     "DATASET": "mitbih",
-        #     "LEARNER": "bp",
-        #     "EPOCHS": 10,
-        #     "BATCH_SIZE": 128,
-        #     "HIDDEN_SIZES": [128],
-        #     "TRANSFORM": MITBIH_PIPELINE,
-        #     "MAX_SAMPLES": 2000,
-        #     "DATASET_KW": {
-        #         "two_class": True,
-        #         "equal_per_class": True
-        #     },
-        # },
-        #
-        # # ── DVS128 Gesture (neuromorphic) ────────────────────────────────────────
-        # {
-        #     **DEFAULT,
-        #     "RUN_ID": "dvs-bp",
-        #     "DATASET": "dvs_gesture",
-        #     "LEARNER": "bp",
-        #     "EPOCHS": 10,
-        #     "BATCH_SIZE": 128,
-        #     "HIDDEN_SIZES": [128],
-        #     "TRANSFORM": DVS_GESTURE_PIPELINE,
-        #     "DATASET_KW": {
-        #         "class_filter": ["hand_clap", "right_hand_wave", "left_hand_wave", "right_arm_cw"],
-        #     },
-        # },
-        #
-        # # ── Large-Scale Audio Dataset ─────────────────────────────
-        # {
-        #     **DEFAULT,
-        #     "RUN_ID": "large-scale-audio-bp",
-        #     "DATASET": "large_scale_audio",
-        #     "LEARNER": "bp",
-        #     "EPOCHS": 10,
-        #     "BATCH_SIZE": 128,
-        #     "HIDDEN_SIZES": [128],
-        #     "TRANSFORM": LARGE_SCALE_AUDIO_PIPELINE,
-        #     "DATASET_KW": {
-        #         "duration": 3.0,
-        #         "equal_per_class": True,
-        #     },
-        # },
-    ]
+#
+# Keep the existing per-dataset configuration in one place, then expand it over
+# every learner/method below. This avoids maintaining separate hand-written RUNS
+# entries for each dataset × method combination.
+
+METHODS = (
+    "bp",
+    "ff",
+    "eprop",
+    "pepita",
+)
+
+DATASET_CONFIGS = [
+    # ── HAR (Human Activity Recognition) ─────────────────────────────────────
+    {
+        "RUN_ID_PREFIX": "har",
+        "DATASET": "har",
+        "EPOCHS": 10,
+        "BATCH_SIZE": 128,
+        "HIDDEN_SIZES": [128],
+        "TRANSFORM": HAR_PIPELINE,
+    },
+
+    # ── MNIST (static repeated frames) ───────────────────────────────────────
+    {
+        "RUN_ID_PREFIX": "mnist-static",
+        "DATASET": "mnist",
+        "EPOCHS": 10,
+        "BATCH_SIZE": 128,
+        "HIDDEN_SIZES": [128],
+        "TRANSFORM": MNIST_STATIC_PIPELINE,
+    },
+
+    # ── Speech Commands ──────────────────────────────────────────────────────
+    {
+        "RUN_ID_PREFIX": "sc",
+        "DATASET": "speech_commands",
+        "EPOCHS": 10,
+        "BATCH_SIZE": 128,
+        "HIDDEN_SIZES": [128],
+        "MAX_SAMPLES": 10000,
+        "TRANSFORM": SC_PIPELINE,
+        "DATASET_KW": {
+            "class_filter": ["yes", "no", "stop"],
+            "equal_per_class": True,
+        },
+    },
+
+    # ── ESC-50 (environmental audio) ─────────────────────────────────────────
+    {
+        "RUN_ID_PREFIX": "esc50",
+        "DATASET": "esc50",
+        "EPOCHS": 10,
+        "BATCH_SIZE": 128,
+        "HIDDEN_SIZES": [128],
+        "TRANSFORM": ESC50_PIPELINE,
+        "DATASET_KW": {
+            "class_filter": ["dog", "rain", "siren", "helicopter"],
+            "equal_per_class": True,
+            "duration": 1,
+        },
+    },
+
+    # ── UrbanSound8K (urban audio) ───────────────────────────────────────────
+    {
+        "RUN_ID_PREFIX": "urban8k",
+        "DATASET": "urban8k",
+        "EPOCHS": 10,
+        "BATCH_SIZE": 128,
+        "HIDDEN_SIZES": [128],
+        "TRANSFORM": URBAN8K_PIPELINE,
+        "DATASET_KW": {
+            "class_filter": ["dog_bark", "siren", "gun_shot"],
+            "equal_per_class": True,
+        },
+    },
+
+    # ── PAMAP2 (physical activity) ───────────────────────────────────────────
+    {
+        "RUN_ID_PREFIX": "pamap2",
+        "DATASET": "pamap2",
+        "EPOCHS": 10,
+        "BATCH_SIZE": 128,
+        "HIDDEN_SIZES": [128],
+        "TRANSFORM": PAMAP2_PIPELINE,
+        "DATASET_KW": {
+            "equal_per_class": True,
+            "time_steps": 128,
+        },
+    },
+
+    # ── MIT-BIH (ECG) ────────────────────────────────────────────────────────
+    {
+        "RUN_ID_PREFIX": "mitbih",
+        "DATASET": "mitbih",
+        "EPOCHS": 10,
+        "BATCH_SIZE": 128,
+        "HIDDEN_SIZES": [128],
+        "TRANSFORM": MITBIH_PIPELINE,
+        "MAX_SAMPLES": 2000,
+        "DATASET_KW": {
+            "two_class": True,
+            "equal_per_class": True,
+        },
+    },
+
+    # ── DVS128 Gesture (neuromorphic) ────────────────────────────────────────
+    {
+        "RUN_ID_PREFIX": "dvs",
+        "DATASET": "dvs_gesture",
+        "EPOCHS": 10,
+        "BATCH_SIZE": 128,
+        "HIDDEN_SIZES": [128],
+        "TRANSFORM": DVS_GESTURE_PIPELINE,
+        "DATASET_KW": {
+            "class_filter": [
+                "hand_clap",
+                "right_hand_wave",
+                "left_hand_wave",
+                "right_arm_cw",
+            ],
+        },
+    },
+
+    # ── Large-Scale Audio Dataset ────────────────────────────────────────────
+    {
+        "RUN_ID_PREFIX": "large-scale-audio",
+        "DATASET": "large_scale_audio",
+        "EPOCHS": 10,
+        "BATCH_SIZE": 128,
+        "HIDDEN_SIZES": [128],
+        "TRANSFORM": LARGE_SCALE_AUDIO_PIPELINE,
+        "DATASET_KW": {
+            "duration": 3.0,
+            "equal_per_class": True,
+        },
+    },
+]
+
+
+def build_runs(dataset_configs=DATASET_CONFIGS, methods=METHODS):
+    """Build all dataset × method experiment configs from existing defaults."""
+    runs = []
+    for dataset_cfg in dataset_configs:
+        run_id_prefix = dataset_cfg["RUN_ID_PREFIX"]
+        for method in methods:
+            run = {
+                **DEFAULT,
+                **dataset_cfg,
+                "RUN_ID": f"{run_id_prefix}-{method}",
+                "LEARNER": method,
+            }
+            run.pop("RUN_ID_PREFIX")
+
+            # Keep each run isolated if a runner mutates DATASET_KW internally.
+            if "DATASET_KW" in run:
+                run["DATASET_KW"] = dict(run["DATASET_KW"])
+
+            runs.append(run)
+    return runs
+
+
+RUNS = build_runs()
 
 # ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":

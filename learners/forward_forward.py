@@ -27,6 +27,7 @@ class FFLearner(BaseLearner):
         gain: float = 5.0,
         lr: float = 1e-3,
         total_epochs: int = 10,
+        optimizer: str = "adam",
         adam_eps: float = 1e-8
     ):
         # augment first layer input with K label channels
@@ -45,10 +46,16 @@ class FFLearner(BaseLearner):
         L = len(self.model.fcs)
         self.epochs_per_layer = max(1, total_epochs // max(1, L))
 
+        optimizer = optimizer.lower()
         self.layer_opts = []
         for i in range(L):
-            params = list(self.model.fcs[i].parameters()) + list(self.model.lifs[i].parameters())
-            self.layer_opts.append(torch.optim.Adam(params, lr=lr, eps=adam_eps))
+            params = [self.model.fcs[i].weight]
+            if optimizer == "adam":
+                self.layer_opts.append(torch.optim.Adam(params, lr=lr, eps=adam_eps))
+            elif optimizer == "sgd":
+                self.layer_opts.append(torch.optim.SGD(params, lr=lr))
+            else:
+                raise ValueError(f"Unknown optimizer: {optimizer}")
 
         # biases off, like your original
         for fc in self.model.fcs:
@@ -65,18 +72,13 @@ class FFLearner(BaseLearner):
         return SNNCore(self.cfg, self.meta["n_classes"])
 
     def _refresh_requires_grad(self):
-        """
-        Train only the current layer's weights + its LIF params.
-        Other layers are frozen.
-        """
         L = len(self.model.fcs)
         for i in range(L):
             req = (i == self.current_layer)
             for p in self.model.fcs[i].parameters():
-                # only learn weights, no bias
                 p.requires_grad = (req and p is self.model.fcs[i].weight)
             for p in self.model.lifs[i].parameters():
-                p.requires_grad = req
+                p.requires_grad = False
 
     # ---------- utilities ----------
 
@@ -292,33 +294,39 @@ class FFLearner(BaseLearner):
             state.update({"layer": self.current_layer, "layer_advanced": True})
         return state
 
-    def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
-        """
-        N_training = N_input + N_param + N_state + N_intermediate + N_grad
+    def _theory_components(self, batch: int, time_steps: int, dims: dict) -> dict:
+        B, T = int(batch), int(time_steps)
+        A, U = dims["A"], dims["U"]
+        d = dims["d"]
+        a = dims["a"]
+        tilde_inputs = dims["tilde_inputs"]
+        f_l = dims["f_l"]
+        p_l = dims["p_l"]
+        L = dims["L"]
+        d0_eff = dims["tilde_d0"]
 
-          N_input        = B * T * d0
-          N_param        = get_param_memory_bytes()
-          N_state        = B * sum_{l=1}^{L-1} d_l + B * T * max_l d_l
-          N_intermediate = B * T * max_l d_l
-          N_grad         = max_l (d_{l-1} * d_l + d_l)
+        state_terms = [B * sum(d[:k]) + B * T * d[k] for k in range(L)] if L else [0]
+        intermediate_terms = [B * T * (tilde_inputs[k] + d[k]) for k in range(L)] if L else [0]
+        grad_terms = list(a) if a else [0]
 
-        For FF, d0 is the effective first-layer input dimension
-        (original input dimension + C label channels).
-        """
-        fcs = self.model.fcs
-        Hs = [fc.out_features for fc in fcs]
+        repeated_forward = sum((L - l + 1) * f_l[l - 1] for l in range(1, L + 1))
+        repeated_compute = sum((L - l + 2) * (a[l - 1] + d[l - 1]) for l in range(1, L + 1))
 
-        if not Hs:
-            return 0
-
-        in_dims = [fcs[0].in_features] + [fc.out_features for fc in fcs[:-1]]
-        max_h = max(Hs)
-
-        N_input = self.get_input_memory_bytes(batch, time_steps, fp_bytes=fp_bytes)
-        N_param = self.get_param_memory_bytes(fp_bytes=fp_bytes)
-
-        N_state = (batch * sum(Hs[:-1]) + batch * time_steps * max_h) * fp_bytes
-        N_intermediate = batch * time_steps * max_h * fp_bytes
-        N_grad = max(din * hout + hout for din, hout in zip(in_dims, Hs)) * fp_bytes
-
-        return N_input + N_param + N_state + N_intermediate + N_grad
+        return {
+            "memory": {
+                "input": B * T * d0_eff,
+                "param": A,
+                "state": max(state_terms),
+                "intermediate": max(intermediate_terms),
+                "grad": max(grad_terms),
+            },
+            "compute": {
+                "layerwise_positive_negative": 2 * B * T * repeated_compute,
+            },
+            "access": {
+                "repeated_forward": 2 * B * T * repeated_forward,
+                "temporal_neuron": 2 * B * T * U,
+                "local_update": 2 * B * T * sum(p_l),
+                "param_read_write": 2 * A,
+            },
+        }

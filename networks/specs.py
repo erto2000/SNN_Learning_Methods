@@ -11,6 +11,7 @@ class LayerSpec:
     dim_out: int
     recurrent: bool = False
     norm:   NormType = None   # "layernorm" | "batchnorm" | None
+    bias: bool = True
 
 @dataclass
 class NetConfig:
@@ -20,4 +21,5 @@ class NetConfig:
     slope: float = 25.0
     threshold: float = 1.0
     head: Optional[HeadType] = "logits"  # "logits" | "lif" | None
+    head_bias: bool = True
     init: str = "default"

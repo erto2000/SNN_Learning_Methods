@@ -52,14 +52,15 @@ def _make_learner(cfg, meta, device, g: Dict[str, Any]):
         raise ValueError(f"Unknown learner: {name}")
 
     if name == "bp":
-        return LearnerCls(cfg, meta, device, agg=g["BP_AGG"], lr=g["BP_LR"])
+        return LearnerCls(cfg, meta, device, agg=g["BP_AGG"], lr=g["BP_LR"], optimizer=g.get("BP_OPTIMIZER", "adam"))
     if name == "ff":
-        return LearnerCls(cfg, meta, device, alpha=g["FF_ALPHA"], lr=g["FF_LR"], total_epochs=g["EPOCHS"])
+        return LearnerCls(cfg, meta, device, alpha=g["FF_ALPHA"], lr=g["FF_LR"], total_epochs=g["EPOCHS"], optimizer=g.get("FF_OPTIMIZER", "adam"))
     if name == "eprop":
         return LearnerCls(
             cfg, meta, device,
             lr_in=g["EP_LR_IN"], lr_rec=g["EP_LR_REC"], lr_out=g["EP_LR_OUT"],
             drop_diag=g["EP_DROP_DIAG"], weight_clip=g["EP_WEIGHT_CLIP"],
+            optimizer=g.get("EP_OPTIMIZER", "adam"),
         )
     if name == "pepita":
         return LearnerCls(
@@ -68,6 +69,7 @@ def _make_learner(cfg, meta, device, g: Dict[str, Any]):
             lr=g["PEP_LR"],
             max_rel_step=g["PEP_MAX_REL_STEP"],
             target_modulation_ratio=g["PEP_MOD_RATIO"],
+            optimizer=g.get("PEP_OPTIMIZER", "adam"),
         )
     raise ValueError(f"Unhandled learner: {name}")
 
@@ -92,6 +94,7 @@ def _print_memory_info(
     batch_size: int,
     time_steps: int | None,
     fp_bytes: int,
+    theory: Dict[str, Any] | None = None,
 ) -> None:
     mb = 1024 ** 2
     static_mb = static_bytes / mb if static_bytes is not None else float("nan")
@@ -107,6 +110,15 @@ def _print_memory_info(
             f"[Memory] dtype={fp_bytes*8}-bit | "
             f"param={static_mb:.2f} MB | train_batch=n/a"
         )
+
+    if theory:
+        if "error" in theory:
+            print(f"[Theory] unavailable: {theory['error']}")
+        else:
+            compute = theory.get("compute", {}).get("total_scalars")
+            access = theory.get("access", {}).get("total_scalars")
+            proxy = theory.get("time_proxy", {}).get("value")
+            print(f"[Theory] compute={compute} | access={access} | time_proxy={proxy}")
 
 
 # ---------- core ----------
@@ -157,17 +169,25 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                 runtime_dtype = str_to_dtype(g.get("DTYPE", "fp32"))
                 learner.model.to(device=device, dtype=runtime_dtype)
 
-                # Memory estimates (uses effective runtime model dtype)
+                # Theoretical scalar-cost estimates use the effective runtime dtype.
                 fp_bytes = _infer_fp_bytes(learner.model)
                 time_steps = meta.get("time_steps")
                 static_mem_bytes = learner.get_param_memory_bytes(fp_bytes=fp_bytes)
                 train_mem_bytes = None
+                theory_costs = None
                 if time_steps is not None:
-                    train_mem_bytes = learner.get_training_memory_bytes(
-                        batch=g["BATCH_SIZE"],
-                        time_steps=time_steps,
-                        fp_bytes=fp_bytes,
-                    )
+                    try:
+                        theory_costs = learner.get_theoretical_costs(
+                            batch=g["BATCH_SIZE"],
+                            time_steps=time_steps,
+                            fp_bytes=fp_bytes,
+                            alpha=g.get("THEORY_ALPHA", 1.0),
+                            beta=g.get("THEORY_BETA", 1.0),
+                        )
+                        train_mem_bytes = theory_costs["memory"]["total_bytes"]
+                    except Exception as theory_error:
+                        theory_costs = {"error": str(theory_error)}
+                        train_mem_bytes = None
 
                 # Pretty header
                 _print_header(run_id, g, meta)
@@ -177,6 +197,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                     batch_size=g["BATCH_SIZE"],
                     time_steps=time_steps,
                     fp_bytes=fp_bytes,
+                    theory=theory_costs,
                 )
 
                 time_eval_enabled = bool(g.get("TIME_EVAL", False))
@@ -235,6 +256,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
             static_loc = locals().get("static_mem_bytes")
             train_loc = locals().get("train_mem_bytes")
             time_steps_loc = locals().get("time_steps")
+            theory_loc = locals().get("theory_costs")
             if fp_bytes_loc is not None and static_loc is not None:
                 memory_info = {
                     "fp_bytes": fp_bytes_loc,
@@ -242,6 +264,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                     "training_bytes_per_batch": train_loc,
                     "batch_size": g.get("BATCH_SIZE"),
                     "time_steps": time_steps_loc,
+                    "theory": theory_loc,
                 }
 
         return {

@@ -6,8 +6,9 @@ from networks.snn_core import SNNCore
 
 class EpropLearner(BaseLearner):
     """
-    E-Prop with single-pass online update (manual grads).
-    Forward returns a logits vector per sample using cumulative rate code.
+    E-Prop with single-pass online gradient construction.
+    Eligibility traces define the gradient estimate; the estimate can be
+    applied with SGD or Adam. Forward uses a cumulative rate-code readout.
     """
     def __init__(
         self,
@@ -19,10 +20,12 @@ class EpropLearner(BaseLearner):
         lr_out: float = 1e-3,
         drop_diag: bool = True,
         weight_clip: Optional[float] = 1.5,
+        optimizer: str = "adam",
+        adam_eps: float = 1e-8,
     ):
         super().__init__(net_cfg, meta, device)
 
-        # Disable autograd on model params; updates are manual
+        # E-PROP supplies gradients explicitly; no autograd graph is required.
         for p in self.model.parameters():
             p.requires_grad = False
 
@@ -32,9 +35,38 @@ class EpropLearner(BaseLearner):
         self.lr_out = lr_out
         self.drop_diag = drop_diag
         self.weight_clip = weight_clip
+        self.optimizer_name = optimizer.lower()
 
         if getattr(self.model, "head_lif", None) is not None:
             raise ValueError("EpropLearner expects cfg.head == 'logits' (linear head).")
+
+        # E-PROP computes its own gradient estimates from eligibility traces.
+        # The optimizer only determines how those gradient estimates are applied.
+        # Separate parameter groups preserve the learner's input/recurrent/output
+        # learning-rate controls for both SGD and Adam.
+        param_groups = [
+            {"params": [fc.weight for fc in self.model.fcs], "lr": self.lr_in},
+        ]
+
+        recurrent_params = [
+            self.model.Wrecs[l]
+            for l in range(len(self.model.Wrecs))
+            if self.rec_flags[l]
+        ]
+        if recurrent_params:
+            param_groups.append({"params": recurrent_params, "lr": self.lr_rec})
+
+        head_params = [self.model.head.weight]
+        if self.model.head.bias is not None:
+            head_params.append(self.model.head.bias)
+        param_groups.append({"params": head_params, "lr": self.lr_out})
+
+        if self.optimizer_name == "adam":
+            self.opt = torch.optim.Adam(param_groups, eps=adam_eps)
+        elif self.optimizer_name == "sgd":
+            self.opt = torch.optim.SGD(param_groups)
+        else:
+            raise ValueError(f"Unknown optimizer: {optimizer}")
 
     def _build_model(self):
         return SNNCore(self.cfg, self.meta["n_classes"])
@@ -197,17 +229,23 @@ class EpropLearner(BaseLearner):
         if db_out is not None:
             db_out = grad_logits.sum(dim=0)
 
-        # -------- 4) apply updates (normalize by batch size) --------
+        # -------- 4) apply E-PROP gradients through the selected optimizer --------
+        # dW_* are loss-gradient estimates. Normalizing by B preserves the
+        # previous mean-batch update convention; Adam/SGD then acts only as
+        # the parameter-update rule.
         norm = max(1, B)
-        for l in range(L):
-            self.model.fcs[l].weight.add_(-(self.lr_in / norm) * dW_ff[l])
-        for l in range(L):
-            if self.rec_flags[l]:
-                self.model.Wrecs[l].add_(-(self.lr_rec / norm) * dW_rec[l])
+        self.opt.zero_grad(set_to_none=True)
 
-        self.model.head.weight.data.add_(-(self.lr_out / norm) * dW_out)
+        for l in range(L):
+            self.model.fcs[l].weight.grad = (dW_ff[l] / norm).detach()
+            if self.rec_flags[l]:
+                self.model.Wrecs[l].grad = (dW_rec[l] / norm).detach()
+
+        self.model.head.weight.grad = (dW_out / norm).detach()
         if db_out is not None:
-            self.model.head.bias.data.add_(-(self.lr_out / norm) * db_out)
+            self.model.head.bias.grad = (db_out / norm).detach()
+
+        self.opt.step()
 
         # keep recurrent weights sane
         self._clamp_rec()
@@ -217,26 +255,34 @@ class EpropLearner(BaseLearner):
 
         return {"loss": final_loss, "acc": acc}
 
-    def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
-        """
-        N_training = N_input + N_param + N_state + N_intermediate + N_grad
+    def _theory_components(self, batch: int, time_steps: int, dims: dict) -> dict:
+        B, T = int(batch), int(time_steps)
+        A, U, V, C = dims["A"], dims["U"], dims["V"], dims["C"]
+        d0_eff = dims["tilde_d0"]
+        d_last = dims["d"][-1] if dims["d"] else 0
+        F, P, Y = dims["F"], dims["P"], dims["Y"]
 
-          N_input        = B * T * d0
-          N_param        = get_param_memory_bytes()
-          N_state        = B * sum_l d_l
-          N_intermediate = B * sum_l d_{l-1} * d_l
-          N_grad         = N_param
-        """
-        Hs = [fc.out_features for fc in self.model.fcs]
-        in_dims = [self.model.fcs[0].in_features] + [fc.out_features for fc in self.model.fcs[:-1]]
-
-        N_input = self.get_input_memory_bytes(batch, time_steps, fp_bytes=fp_bytes)
-        N_param = self.get_param_memory_bytes(fp_bytes=fp_bytes)
-        N_state = batch * sum(Hs) * fp_bytes
-
-        e_ff = sum(batch * din * hout for din, hout in zip(in_dims, Hs))
-        N_intermediate = e_ff * fp_bytes
-
-        N_grad = self.get_param_memory_bytes(fp_bytes=fp_bytes)
-
-        return N_input + N_param + N_state + N_intermediate + N_grad
+        return {
+            "memory": {
+                "input": B * T * d0_eff,
+                "param": A + V,
+                "state": B * U,
+                "eligibility_traces": B * A,
+                "learning_signals": B * U,
+                "final_rate": B * d_last,
+                "output_error": B * C,
+                "grad": A + V,
+            },
+            "compute": {
+                "forward": B * T * (A + V + U),
+                "eligibility": B * T * A,
+                "update": B * (A + V),
+                "output_error": B * C,
+            },
+            "access": {
+                "forward": B * T * (F + Y),
+                "eligibility": 2 * B * T * A,
+                "update": B * (P + Y),
+                "param_read_write": 2 * (A + V),
+            },
+        }

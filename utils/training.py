@@ -26,7 +26,7 @@ def build_cfg(D: int, K: int, g: Dict[str, Any]) -> NetConfig:
     layers = []
     din = D
     for h in g["HIDDEN_SIZES"]:
-        layers.append(LayerSpec(dim_in=din, dim_out=h, recurrent=g["RECURRENT"], norm=g["NORM"]))
+        layers.append(LayerSpec(dim_in=din, dim_out=h, recurrent=g["RECURRENT"], norm=g["NORM"], bias=g.get("HIDDEN_BIAS", True)))
         din = h
     return NetConfig(
         layers=layers,
@@ -35,6 +35,7 @@ def build_cfg(D: int, K: int, g: Dict[str, Any]) -> NetConfig:
         slope=g["SLOPE"],
         threshold=g["THRESHOLD"],
         head=g["HEAD"],
+        head_bias=g.get("HEAD_BIAS", True),
         init=g["INIT_TYPE"],
     )
 
