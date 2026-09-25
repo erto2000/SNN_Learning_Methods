@@ -12,20 +12,23 @@ from utils.common import set_seed, select_device
 from timeseries.registry import get_dataloaders
 from utils.training import build_cfg, run_train_loop, str_to_dtype
 from learners.registry import LEARNER_REGISTRY
+from utils.console import panel, line, section, close, timestamp
 
 
 # ---------- tiny tee to capture console while echoing ----------
 class _TeeIO(io.StringIO):
-    def __init__(self, real_stdout):
+    def __init__(self, real_stdout=None):
         super().__init__()
         self._real = real_stdout
 
     def write(self, s):
-        self._real.write(s)
+        if self._real is not None:
+            self._real.write(s)
         return super().write(s)
 
     def flush(self):
-        self._real.flush()
+        if self._real is not None:
+            self._real.flush()
         return super().flush()
 
 
@@ -75,17 +78,21 @@ def _make_learner(cfg, meta, device, g: Dict[str, Any]):
 
 
 def _print_header(run_id: str, g: Dict[str, Any], meta: Dict[str, Any]) -> None:
-    print(f"\n=== Run: {run_id} ===")
-    print(
-        f"[Data] {g['DATASET'].upper()} | input_dim={meta['input_dim']} | classes={meta['n_classes']} | "
-        f"time_steps={meta.get('time_steps', 'n/a')} | "
-        f"number_of_samples(train/test)={meta['num_train_samples']}/{meta['num_test_samples']} | "
-        f"epoch={g['EPOCHS']} | batch_size={g['BATCH_SIZE']}"
+    panel(f"RUN | {run_id}")
+    line(
+        f"Started {timestamp()}  |  Evaluate {meta['evaluation_split']}  |  Seed {g['SEED']}  |  "
+        f"Split {meta['num_train_samples']}/{meta['num_validation_samples']}/{meta['num_test_samples']} "
+        f"(train/validation/test)"
     )
-    print(
-        f"[Arch] hidden={g['HIDDEN_SIZES']} | norm={g['NORM']} | base_head={g['HEAD']} | "
-        f"recurrent={g['RECURRENT']} | learner={g['LEARNER']}"
+    line(
+        f"{g['DATASET'].upper()}  |  Input {meta['input_dim']} x {meta.get('time_steps', '?')}  |  "
+        f"{meta['n_classes']} classes"
     )
+    line(
+        f"{g['LEARNER'].upper()}  |  Hidden {g['HIDDEN_SIZES']}  |  "
+        f"Batch {g['BATCH_SIZE']}  |  {g['EPOCHS']} epochs  |  {g.get('DTYPE', 'fp32').upper()}"
+    )
+    section("TRAINING")
 
 
 def _print_memory_info(
@@ -122,7 +129,7 @@ def _print_memory_info(
 
 
 # ---------- core ----------
-def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
+def run_one(config: Dict[str, Any], *, tuning: bool = False) -> Dict[str, Any]:
     """
     Runs a single experiment and RETURNS a dict with everything
     (including captured console_log). No file writing here.
@@ -141,7 +148,9 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
         start_dt = datetime.now()
         started_at = start_dt.isoformat(timespec="seconds")
 
-        tee = _TeeIO(real_stdout=os.sys.stdout)
+        # Search trials keep a complete saved log but emit one concise result
+        # from the search script instead of repeating every training detail.
+        tee = _TeeIO(real_stdout=None if tuning else os.sys.stdout)
         with redirect_stdout(tee), redirect_stderr(tee):
             try:
                 # Repro + device
@@ -149,7 +158,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                 device = select_device()
 
                 # Data
-                train_loader, test_loader, meta = get_dataloaders(
+                loaders, meta = get_dataloaders(
                     g["DATASET"],
                     root=g["DATA_ROOT"],
                     batch_size=g["BATCH_SIZE"],
@@ -158,8 +167,14 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                     num_workers=g.get("NUM_WORKERS"),
                     pin_memory=g.get("PIN_MEMORY"),
                     seed=g["SEED"],
+                    data_split=g.get("DATA_SPLIT"),
                     **g.get("DATASET_KW", {}),
                 )
+                train_loader = loaders['train']
+                evaluated_set = 'validation' if tuning else 'test'
+                test_loader = loaders[evaluated_set]
+                meta['evaluation_split'] = evaluated_set
+                meta['num_evaluation_samples'] = len(test_loader.dataset)
 
                 # Model + learner
                 cfg = build_cfg(meta["input_dim"], meta["n_classes"], g)
@@ -169,42 +184,22 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                 runtime_dtype = str_to_dtype(g.get("DTYPE", "fp32"))
                 learner.model.to(device=device, dtype=runtime_dtype)
 
-                # Theoretical scalar-cost estimates use the effective runtime dtype.
+                # Byte-based costs use the model's actual training dtype.
                 fp_bytes = _infer_fp_bytes(learner.model)
                 time_steps = meta.get("time_steps")
                 static_mem_bytes = learner.get_param_memory_bytes(fp_bytes=fp_bytes)
                 train_mem_bytes = None
-                theory_costs = None
-                if time_steps is not None:
-                    try:
-                        theory_costs = learner.get_theoretical_costs(
-                            batch=g["BATCH_SIZE"],
-                            time_steps=time_steps,
-                            fp_bytes=fp_bytes,
-                            alpha=g.get("THEORY_ALPHA", 1.0),
-                            beta=g.get("THEORY_BETA", 1.0),
-                        )
-                        train_mem_bytes = theory_costs["memory"]["total_bytes"]
-                    except Exception as theory_error:
-                        theory_costs = {"error": str(theory_error)}
-                        train_mem_bytes = None
-
+                cost_estimate = None
                 # Pretty header
                 _print_header(run_id, g, meta)
-                _print_memory_info(
-                    static_bytes=static_mem_bytes,
-                    train_bytes=train_mem_bytes,
-                    batch_size=g["BATCH_SIZE"],
-                    time_steps=time_steps,
-                    fp_bytes=fp_bytes,
-                    theory=theory_costs,
-                )
-
                 time_eval_enabled = bool(g.get("TIME_EVAL", False))
                 time_eval_fracs = g.get("TIME_EVAL_FRACS") if time_eval_enabled else None
                 time_eval_include_t1 = bool(g.get("TIME_EVAL_INCLUDE_T1", False)) if time_eval_enabled else False
 
                 # Train
+                from collections import Counter
+                from utils.costs import training_costs
+                cost_profile = Counter()
                 final_stats, epoch_log = run_train_loop(
                     learner,
                     train_loader,
@@ -217,15 +212,27 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                     use_int8_weights=bool(g.get("EVAL_INT8_WEIGHTS", False)),
                     time_eval_fracs=time_eval_fracs,
                     time_eval_include_t1=time_eval_include_t1,
+                    cost_profile=cost_profile,
+                    evaluation_split=meta["evaluation_split"],
                 )
 
-                if not g["TEST_EVERY_EPOCH"]:
-                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    print(
-                        f"[{ts}] [Final Test] "
-                        f"sample_acc:{final_stats['sample_acc']:.2f}% | "
-                        f"window_acc:{final_stats['window_acc']:.2f}%"
-                    )
+                cost_estimate = training_costs(
+                    learner, cost_profile, original_samples=len(train_loader.dataset),
+                    batch=g["BATCH_SIZE"], fp_bytes=fp_bytes,
+                    alpha=g.get("COST_COMPUTE_WEIGHT", 1.0), beta=g.get("COST_ACCESS_WEIGHT", 1.0),
+                )
+                train_mem_bytes = cost_estimate["memory"]["total_bytes"]
+                time_steps = cost_estimate["time_steps"]
+                final_stats["evaluation_split"] = meta["evaluation_split"]
+                section("COST")
+                line(f"{cost_estimate['windows_per_sample']:.2f} windows/sample  |  "
+                     f"Compute {cost_estimate['compute']['total_scalars'] / 1e6:.2f}M  |  "
+                     f"Access {cost_estimate['access']['total_scalars'] / 1e6:.2f}M  |  "
+                     f"Peak {train_mem_bytes / 1024**2:.2f} MB")
+                close(
+                    f"{meta['evaluation_split'].upper()} | "
+                    f"Sample {final_stats['sample_acc']:.2f}%  |  Window {final_stats['window_acc']:.2f}%"
+                )
 
                 status = "ok"
                 error = None
@@ -235,9 +242,8 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                 status = "error"
                 error = f"{type(e).__name__}: {e}"
                 tb = traceback.format_exc()
-                ts_err = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"\n[{ts_err}] [Error] Run '{run_id}' failed:")
-                print(tb)
+                close(f"FAILED | {error}")
+                print(tb, end="" if tb.endswith("\n") else "\n")
                 final_stats, epoch_log = {}, {}
                 meta = locals().get("meta", {})
                 try:
@@ -256,7 +262,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
             static_loc = locals().get("static_mem_bytes")
             train_loc = locals().get("train_mem_bytes")
             time_steps_loc = locals().get("time_steps")
-            theory_loc = locals().get("theory_costs")
+            cost_record = locals().get("cost_estimate")
             if fp_bytes_loc is not None and static_loc is not None:
                 memory_info = {
                     "fp_bytes": fp_bytes_loc,
@@ -264,7 +270,7 @@ def run_one(config: Dict[str, Any]) -> Dict[str, Any]:
                     "training_bytes_per_batch": train_loc,
                     "batch_size": g.get("BATCH_SIZE"),
                     "time_steps": time_steps_loc,
-                    "theory": theory_loc,
+                    "theory": cost_record,  # Existing result files use this key.
                 }
 
         return {
@@ -303,7 +309,7 @@ def summarize(results: List[Dict[str, Any]]) -> None:
     if not results:
         print("No runs executed.")
         return
-    print("\n===== Summary =====")
+    panel("SUMMARY")
     for r in results:
         g = r.get("config", {})
         status = r.get("status", "ok")
@@ -313,13 +319,8 @@ def summarize(results: List[Dict[str, Any]]) -> None:
         epochs = g.get("EPOCHS", "?")
         if status == "ok":
             final_acc = r.get("final", {}).get("sample_acc", float("nan"))
-            print(
-                f"{run_id:>30s} | data={dataset:<10s} | learner={learner:<7s} | "
-                f"status=OK     | E={epochs:<3} | acc={final_acc:6.2f}%"
-            )
+            line(f"{run_id}  |  {final_acc:.2f}%  |  {dataset.upper()} / {learner.upper()} / {epochs} epochs")
         else:
             err_msg = (r.get("error") or "").splitlines()[0][:120]
-            print(
-                f"{run_id:>30s} | data={dataset:<10s} | learner={learner:<7s} | "
-                f"status=FAILED | E={epochs:<3} | acc=   n/a | err: {err_msg}"
-            )
+            line(f"{run_id}  |  FAILED  |  {dataset.upper()} / {learner.upper()}  |  {err_msg}")
+    close(f"{len(results)} run{'s' if len(results) != 1 else ''}")

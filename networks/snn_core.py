@@ -80,9 +80,10 @@ class SNNCore(nn.Module):
                 self.norms.append(nn.Identity())
             self.lifs.append(snn.Leaky(beta=cfg.beta, spike_grad=sg, threshold=cfg.threshold))
 
-            # Recurrence tensor (manual updates by learners if they choose)
+            # BP learns active recurrence through autograd; manual learners
+            # can disable autograd and supply their own recurrent gradients.
             self.Wrec_flags.append(ls.recurrent)
-            Wrec = nn.Parameter(torch.zeros(ls.dim_out, ls.dim_out), requires_grad=False)
+            Wrec = nn.Parameter(torch.zeros(ls.dim_out, ls.dim_out), requires_grad=ls.recurrent)
             self.Wrecs.append(Wrec)
 
         last_dim = cfg.layers[-1].dim_out

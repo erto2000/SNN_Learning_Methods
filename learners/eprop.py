@@ -6,9 +6,12 @@ from networks.snn_core import SNNCore
 
 class EpropLearner(BaseLearner):
     """
-    E-Prop with single-pass online gradient construction.
-    Eligibility traces define the gradient estimate; the estimate can be
-    applied with SGD or Adam. Forward uses a cumulative rate-code readout.
+    E-Prop with online eligibility traces and a final cumulative-spike loss.
+
+    Traces use the backbone's fast-sigmoid surrogate and detached LIF reset.
+    Multilayer learning signals use static feedback through forward weights;
+    they approximate the downstream temporal derivatives rather than BPTT.
+    SGD and Adam apply the same gradient estimates.
     """
     def __init__(
         self,
@@ -37,8 +40,14 @@ class EpropLearner(BaseLearner):
         self.weight_clip = weight_clip
         self.optimizer_name = optimizer.lower()
 
-        if getattr(self.model, "head_lif", None) is not None:
+        if self.model.head is None or self.model.head_lif is not None:
             raise ValueError("EpropLearner expects cfg.head == 'logits' (linear head).")
+        if net_cfg.spike_grad.lower() != "fast_sigmoid":
+            raise ValueError("EpropLearner supports spike_grad='fast_sigmoid' only.")
+        if any(fc.bias is not None for fc in self.model.fcs):
+            raise ValueError("EpropLearner requires hidden biases to be disabled.")
+        if any(ls.norm is not None for ls in net_cfg.layers):
+            raise ValueError("EpropLearner requires hidden normalization to be disabled.")
 
         # E-PROP computes its own gradient estimates from eligibility traces.
         # The optimizer only determines how those gradient estimates are applied.
@@ -73,8 +82,8 @@ class EpropLearner(BaseLearner):
 
     @staticmethod
     def _surrogate_fast_sigmoid(u: torch.Tensor, slope: float) -> torch.Tensor:
-        sig = torch.sigmoid(slope * u)
-        return slope * sig * (1.0 - sig)
+        # Same derivative as snntorch.surrogate.fast_sigmoid.
+        return (1.0 + slope * u.abs()).pow(-2)
 
     @torch.no_grad()
     def _clamp_rec(self):
@@ -129,19 +138,15 @@ class EpropLearner(BaseLearner):
     @torch.no_grad()
     def train_step(self, X: torch.Tensor, y: torch.Tensor) -> Dict[str, float]:
         """
-        Single-batch online update over sequence length T.
+        Accumulate local spike eligibilities online, then apply the final loss.
 
-        Change vs your original version:
-        - Eligibilities are still updated online at each time step.
-        - But the loss / learning signal is computed ONCE at the end
-          from the final cumulative rate code (r_sum).
-        - This avoids summing CE gradients at every time step and
-          keeps the scale of the update reasonable.
+        The membrane eligibility is a filtered presynaptic signal. Multiplying
+        it by the current spike derivative gives the spike eligibility, which
+        must be summed over time because the readout sums all output spikes.
         """
+        self.model.train()
         K = self.meta["n_classes"]
-        beta = self.cfg.beta
         slope = self.cfg.slope
-        th = self.cfg.threshold
 
         X = X.to(self.device)  # [B, T, D]
         y = y.to(self.device)  # [B]
@@ -152,17 +157,14 @@ class EpropLearner(BaseLearner):
         Hs = [fc.out_features for fc in self.model.fcs]
         in_dims = [self.model.fcs[0].in_features] + [fc.out_features for fc in self.model.fcs[:-1]]
 
-        # eligibilities: e_ff:[B, in_l, H_l], e_rec:[B, H_l, H_l]
+        # Filtered presynaptic signals and accumulated spike eligibilities.
+        # The local membrane derivative ignores paths through other neurons.
+        pre_ff = [torch.zeros(B, din, device=X.device, dtype=X.dtype) for din in in_dims]
+        pre_rec = [torch.zeros(B, Hs[i], device=X.device, dtype=X.dtype) if self.rec_flags[i] else None
+                   for i in range(L)]
         e_ff = [torch.zeros(B, in_dims[i], Hs[i], device=X.device, dtype=X.dtype) for i in range(L)]
         e_rec = [torch.zeros(B, Hs[i], Hs[i], device=X.device, dtype=X.dtype) if self.rec_flags[i] else None
                  for i in range(L)]
-
-        # grads (same shapes as weights)
-        dW_ff = [torch.zeros_like(self.model.fcs[i].weight) for i in range(L)]
-        dW_rec = [torch.zeros_like(self.model.Wrecs[i]) if self.rec_flags[i] else None
-                  for i in range(L)]
-        dW_out = torch.zeros_like(self.model.head.weight)
-        db_out = torch.zeros_like(self.model.head.bias) if self.model.head.bias is not None else None
 
         # cumulative rate code from last hidden layer
         H_last = Hs[-1]
@@ -170,35 +172,26 @@ class EpropLearner(BaseLearner):
 
         # -------- 1) unroll in time: update eligibilities + r_sum only --------
         for t in range(T):
-            # store previous membrane for surrogate gradient
-            v_prev_list = [m.clone() for m in state.mems]
+            # Recurrence in SNNCore consumes the preceding timestep's spikes.
+            previous_spikes = state.spikes
 
-            # forward one step, get spikes + pre-activations
-            _, _, state, head_mem, layer_spikes, pres = self.model.forward_step(
-                X[:, t, :], state, head_mem, need_pre=True
+            _, _, state, head_mem, layer_spikes, _ = self.model.forward_step(
+                X[:, t, :], state, head_mem
             )
 
             z_last = layer_spikes[-1]
             r_sum = r_sum + z_last  # cumulative spike count (rate code)
 
-            # surrogate derivatives for each layer
-            psis = []
-            for l, pre in enumerate(pres):
-                u = beta * v_prev_list[l] + pre - th
-                psis.append(self._surrogate_fast_sigmoid(u, slope))
-
-            # update feedforward eligibilities
-            e_ff[0] = beta * e_ff[0] + X[:, t, :].unsqueeze(2) * psis[0].unsqueeze(1)
-            if self.rec_flags[0]:
-                spk0 = layer_spikes[0]
-                e_rec[0] = beta * e_rec[0] + spk0.unsqueeze(2) * psis[0].unsqueeze(1)
-
-            for l in range(1, L):
-                pre_l = layer_spikes[l - 1]
-                e_ff[l] = beta * e_ff[l] + pre_l.unsqueeze(2) * psis[l].unsqueeze(1)
+            for l, lif in enumerate(self.model.lifs):
+                # The returned membrane includes snnTorch's delayed reset.
+                psi = self._surrogate_fast_sigmoid(state.mems[l] - lif.threshold, slope)
+                beta = lif.beta.clamp(0, 1)
+                presynaptic = X[:, t, :] if l == 0 else layer_spikes[l - 1]
+                pre_ff[l] = beta * pre_ff[l] + presynaptic
+                e_ff[l].add_(pre_ff[l].unsqueeze(2) * psi.unsqueeze(1))
                 if self.rec_flags[l]:
-                    spk_l = layer_spikes[l]
-                    e_rec[l] = beta * e_rec[l] + spk_l.unsqueeze(2) * psis[l].unsqueeze(1)
+                    pre_rec[l] = beta * pre_rec[l] + previous_spikes[l]
+                    e_rec[l].add_(pre_rec[l].unsqueeze(2) * psi.unsqueeze(1))
 
         # -------- 2) single loss / learning signal at final time --------
         W_out = self.model.head.weight
@@ -208,43 +201,29 @@ class EpropLearner(BaseLearner):
         probs = torch.softmax(logits, dim=1)
         grad_logits = probs - F.one_hot(y, num_classes=K).to(probs.dtype)  # [B,K]
 
-        # layer-wise learning signals (backprop through static readout)
+        # Approximate layer-wise feedback; this omits downstream spike/time
+        # derivatives for earlier hidden layers, as in the original learner.
         L_sig: List[Optional[torch.Tensor]] = [None for _ in range(L)]
         L_sig[L - 1] = grad_logits @ W_out               # [B, H_last]
         for l in range(L - 1, 0, -1):
             W_l = self.model.fcs[l].weight               # [H_l, H_{l-1}]
             L_sig[l - 1] = L_sig[l] @ W_l               # [B, H_{l-1}]
 
-        # -------- 3) compute weight gradients from eligibilities --------
+        # -------- 3) apply mean-batch gradients from eligibilities --------
+        norm = max(1, B)
+        self.opt.zero_grad(set_to_none=True)
         for l in range(L):
             # e_ff[l]: [B, in_l, H_l], L_sig[l]: [B, H_l]
             g_in_out = torch.einsum("bij,bj->ij", e_ff[l], L_sig[l])  # [in_l, H_l]
-            dW_ff[l] = g_in_out.T  # [H_l, in_l] to match self.model.fcs[l].weight
+            self.model.fcs[l].weight.grad = g_in_out.T / norm
 
             if self.rec_flags[l]:
-                # e_rec[l]: [B, H_l, H_l]
-                dW_rec[l] = torch.einsum("bij,bj->ij", e_rec[l], L_sig[l])  # [H_l, H_l]
+                # Wrec uses [presynaptic, postsynaptic] orientation in SNNCore.
+                self.model.Wrecs[l].grad = torch.einsum("bij,bj->ij", e_rec[l], L_sig[l]) / norm
 
-        dW_out = grad_logits.T @ r_sum  # [K,H_last]
-        if db_out is not None:
-            db_out = grad_logits.sum(dim=0)
-
-        # -------- 4) apply E-PROP gradients through the selected optimizer --------
-        # dW_* are loss-gradient estimates. Normalizing by B preserves the
-        # previous mean-batch update convention; Adam/SGD then acts only as
-        # the parameter-update rule.
-        norm = max(1, B)
-        self.opt.zero_grad(set_to_none=True)
-
-        for l in range(L):
-            self.model.fcs[l].weight.grad = (dW_ff[l] / norm).detach()
-            if self.rec_flags[l]:
-                self.model.Wrecs[l].grad = (dW_rec[l] / norm).detach()
-
-        self.model.head.weight.grad = (dW_out / norm).detach()
-        if db_out is not None:
-            self.model.head.bias.grad = (db_out / norm).detach()
-
+        self.model.head.weight.grad = grad_logits.T @ r_sum / norm
+        if b_out is not None:
+            b_out.grad = grad_logits.mean(dim=0)
         self.opt.step()
 
         # keep recurrent weights sane
@@ -255,7 +234,7 @@ class EpropLearner(BaseLearner):
 
         return {"loss": final_loss, "acc": acc}
 
-    def _theory_components(self, batch: int, time_steps: int, dims: dict) -> dict:
+    def _cost_components(self, batch: int, time_steps: int, dims: dict) -> dict:
         B, T = int(batch), int(time_steps)
         A, U, V, C = dims["A"], dims["U"], dims["V"], dims["C"]
         d0_eff = dims["tilde_d0"]
@@ -276,12 +255,14 @@ class EpropLearner(BaseLearner):
             "compute": {
                 "forward": B * T * (A + V + U),
                 "eligibility": B * T * A,
+                "spatial_learning_signal": B * (A + V),
                 "update": B * (A + V),
                 "output_error": B * C,
             },
             "access": {
                 "forward": B * T * (F + Y),
                 "eligibility": 2 * B * T * A,
+                "spatial_learning_signal": B * (P + Y),
                 "update": B * (P + Y),
                 "param_read_write": 2 * (A + V),
             },

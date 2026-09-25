@@ -50,6 +50,7 @@ def save_training_curves(run_dir: str, summary: Dict[str, Any]) -> None:
                 row.append(str(v) if v is not None else "")
             f.write(",".join(row) + "\n")
 
+    evaluation_label = summary.get("meta", {}).get("evaluation_split", "test").title()
     # Plots
     loss = _epoch_series(epoch_log, "loss")
     acc_tr = _epoch_series(epoch_log, "acc")
@@ -64,9 +65,9 @@ def save_training_curves(run_dir: str, summary: Dict[str, Any]) -> None:
     if any(v is not None for v in acc_tr):
         ax.plot(epochs, acc_tr, label="Train Acc (%)", color="#1f77b4", linewidth=2)
     if any(v is not None for v in acc_te_sample):
-        ax.plot(epochs, acc_te_sample, label="Test Sample Acc (%)", color="#2ca02c", linewidth=2)
+        ax.plot(epochs, acc_te_sample, label=f"{evaluation_label} Sample Acc (%)", color="#2ca02c", linewidth=2)
     if any(v is not None for v in acc_te_window):
-        ax.plot(epochs, acc_te_window, label="Test Window Acc (%)", color="#ff7f0e", linewidth=2)
+        ax.plot(epochs, acc_te_window, label=f"{evaluation_label} Window Acc (%)", color="#ff7f0e", linewidth=2)
 
     ax.set_xlabel("Epoch")
     ax.set_title("Training Curves")
@@ -90,7 +91,7 @@ def save_final_card(run_dir: str, summary: Dict[str, Any]) -> None:
         f"Learner: {config.get('LEARNER', '?')}",
         f"Epochs: {config.get('EPOCHS', '?')}",
         f"Hidden: {config.get('HIDDEN_SIZES', '?')}",
-        f"TestEveryEpoch: {config.get('TEST_EVERY_EPOCH', '?')}",
+        f"Evaluation: {final.get('evaluation_split', 'test')}",
         f"Final sample_acc: {final.get('sample_acc', 'n/a')}",
         f"Final window_acc: {final.get('window_acc', 'n/a')}",
         f"Avg spikes/sample: {final.get('avg_spike_count', 'n/a')}",

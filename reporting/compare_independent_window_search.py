@@ -19,11 +19,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from timeseries.splitting import split_report_fields
 
 
 RESULTS_DIR = "results"
 OUT_DIR = os.path.join(RESULTS_DIR, "comparisons", "window_hop_independent")
-LEARNER_ORDER = ["bp", "eprop", "ff", "pepita"]
+LEARNER_ORDER = ["bp", "ff", "eprop", "pepita"]
 EXPERIMENT_ORDER = ["window", "hop"]
 PHASE_MARKERS = {1: "o", 2: "^"}
 EXP_PHASE_MARKERS = {
@@ -34,10 +35,10 @@ EXP_PHASE_MARKERS = {
 }
 
 THEORY_TRADEOFF_PLOTS = [
-    ("theory_memory_mb", "theoretical memory (MB)", "sample_acc_vs_theory_memory.png", "sample_acc vs theoretical memory"),
-    ("theory_compute_scalars", "theoretical compute (scalar ops)", "sample_acc_vs_theory_compute.png", "sample_acc vs theoretical compute"),
-    ("theory_access_scalars", "theoretical memory access (scalar accesses)", "sample_acc_vs_theory_access.png", "sample_acc vs theoretical memory access"),
-    ("theory_time_proxy", "theoretical time proxy", "sample_acc_vs_theory_time_proxy.png", "sample_acc vs theoretical time proxy"),
+    ("theory_memory_mb", "estimated memory (MB)", "sample_acc_vs_theory_memory.png", "sample_acc vs estimated memory"),
+    ("theory_compute_scalars", "compute per original-sequence batch (scalar ops)", "sample_acc_vs_theory_compute.png", "sample_acc vs estimated compute"),
+    ("theory_access_scalars", "accesses per original-sequence batch (scalars)", "sample_acc_vs_theory_access.png", "sample_acc vs estimated memory access"),
+    ("theory_time_proxy", "estimated time proxy", "sample_acc_vs_theory_time_proxy.png", "sample_acc vs estimated time proxy"),
 ]
 
 
@@ -177,7 +178,17 @@ def parse_study_name(study: str) -> Dict[str, Optional[Any]]:
     return out
 
 
+def dataset_label(run_id: str, dataset: str) -> str:
+    """Identify MNIST encodings by the Optuna run prefix, not the source dataset."""
+    if run_id.startswith("mnist_static-"):
+        return "mnist_static"
+    if run_id.startswith("mnist_rate-"):
+        return "mnist_rate"
+    return dataset
+
+
 def load_run_summaries(results_dir: str = RESULTS_DIR) -> pd.DataFrame:
+    from timeseries.splitting import split_report_fields
     rows: List[Dict[str, Any]] = []
 
     pattern = os.path.join(results_dir, "runs", "*", "summary.json")
@@ -193,6 +204,9 @@ def load_run_summaries(results_dir: str = RESULTS_DIR) -> pd.DataFrame:
         run_id = s.get("run_id", "")
 
         parsed = parse_run_id(run_id)
+        # Historical test-tuned runs are a different protocol.
+        if final.get("evaluation_split") != "validation" or not cfg.get('DATA_SPLIT'):
+            continue
         experiment = parsed["experiment"]
 
         # This comparison script is specifically for the independent window/hop runner.
@@ -212,12 +226,16 @@ def load_run_summaries(results_dir: str = RESULTS_DIR) -> pd.DataFrame:
             hop_ratio = float(hop) / float(L)
 
         rows.append({
+            **split_report_fields(s.get('meta', {})),
             "run_id": run_id,
-            "dataset": cfg.get("DATASET"),
+            "dataset": dataset_label(run_id, cfg.get("DATASET")),
             "learner": cfg.get("LEARNER"),
             "epochs": cfg.get("EPOCHS"),
             "status": s.get("status"),
             "sample_acc": final.get("sample_acc"),
+            "evaluation_split": "validation",
+            "theory_work_scope": theory.get("work_scope"),
+            "windows_per_sample": theory.get("windows_per_sample"),
             "win_L": L,
             "hop": hop,
             "hop_ratio": hop_ratio,
@@ -357,6 +375,7 @@ def save_all_trials_csv(df: pd.DataFrame, out_dir: str) -> str:
     out_path = os.path.join(out_dir, "all_trials.csv")
 
     cols = [
+        *split_report_fields({}),
         "run_id",
         "dataset",
         "learner",
@@ -378,6 +397,7 @@ def save_all_trials_csv(df: pd.DataFrame, out_dir: str) -> str:
         "fp_bytes",
         "memory_batch_size",
         "memory_time_steps",
+        "evaluation_split", "theory_work_scope", "windows_per_sample",
         "theory_memory_bytes",
         "theory_memory_mb",
         "theory_memory_scalars",
@@ -394,8 +414,12 @@ def save_all_trials_csv(df: pd.DataFrame, out_dir: str) -> str:
 
 def save_best_csv(df: pd.DataFrame, out_dir: str) -> str:
     ensure_dir(out_dir)
+    # Prefer the refined training budget; fall back only if that phase has no results.
+    latest = df.groupby(["dataset", "learner", "experiment"])["phase"].transform("max")
+    df = df[df["phase"] == latest].copy()
     idx = df.groupby(["dataset", "learner", "experiment"])["sample_acc"].idxmax()
     best = df.loc[idx, [
+        *split_report_fields({}),
         "dataset",
         "learner",
         "experiment",
@@ -412,6 +436,7 @@ def save_best_csv(df: pd.DataFrame, out_dir: str) -> str:
         "training_mb_per_batch",
         "static_bytes",
         "static_mb",
+        "evaluation_split", "theory_work_scope", "windows_per_sample",
         "theory_memory_bytes",
         "theory_memory_mb",
         "theory_memory_scalars",
@@ -435,6 +460,7 @@ def save_best_per_phase_csv(df: pd.DataFrame, out_dir: str) -> str:
 
     idx = data.groupby(["dataset", "learner", "experiment", "phase"])["sample_acc"].idxmax()
     best = data.loc[idx, [
+        *split_report_fields({}),
         "dataset",
         "learner",
         "experiment",
@@ -449,6 +475,7 @@ def save_best_per_phase_csv(df: pd.DataFrame, out_dir: str) -> str:
         "energy_per_sample_pj",
         "training_mb_per_batch",
         "static_mb",
+        "evaluation_split", "theory_work_scope", "windows_per_sample",
         "theory_memory_bytes",
         "theory_memory_mb",
         "theory_memory_scalars",
@@ -465,6 +492,7 @@ def save_best_per_phase_csv(df: pd.DataFrame, out_dir: str) -> str:
 
 def export_trials_csv(df_sub: pd.DataFrame, out_path: str) -> None:
     cols = [
+        *split_report_fields({}),
         "run_id",
         "experiment",
         "phase",
@@ -484,6 +512,7 @@ def export_trials_csv(df_sub: pd.DataFrame, out_path: str) -> None:
         "fp_bytes",
         "memory_batch_size",
         "memory_time_steps",
+        "evaluation_split", "theory_work_scope", "windows_per_sample",
         "theory_memory_bytes",
         "theory_memory_mb",
         "theory_memory_scalars",
@@ -498,6 +527,7 @@ def export_trials_csv(df_sub: pd.DataFrame, out_path: str) -> None:
 
 def export_cross_method_csv(df_ds: pd.DataFrame, out_path: str) -> None:
     cols = [
+        *split_report_fields({}),
         "run_id",
         "dataset",
         "learner",
@@ -1062,7 +1092,7 @@ def plot_all_methods_method_vs_accuracy(df_ds: pd.DataFrame, out_path: str, data
 
     ax.set_title(f"{dataset} | sample_acc vs method")
     ax.set_xlabel("method")
-    ax.set_ylabel("sample_acc")
+    ax.set_ylabel("Validation sample accuracy (%)")
     ax.set_xticks(list(x_positions.values()))
     ax.set_xticklabels(list(x_positions.keys()))
     ax.grid(True, axis="y", alpha=0.25)
@@ -1091,7 +1121,7 @@ def add_per_method_theory_tradeoff_plots(
             out_path=p,
             title=f"{dataset} | {learner} | {title_suffix}",
             x_label=x_label,
-            y_label="sample_acc",
+            y_label="Validation sample accuracy (%)",
             color_label="hop ratio",
         )
         saved.append(p)
@@ -1113,7 +1143,7 @@ def add_cross_method_theory_tradeoff_plots(
             out_path=p,
             title=f"{dataset} | all methods | {title_suffix}",
             x_label=x_label,
-            y_label="sample_acc",
+            y_label="Validation sample accuracy (%)",
             color_by_accuracy=False,
         )
         saved.append(p)
@@ -1143,7 +1173,7 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             out_path=p,
             title=f"{dataset} | {learner} | sample_acc vs window length",
             x_label="window length",
-            y_label="sample_acc",
+            y_label="Validation sample accuracy (%)",
         )
         saved.append(p)
 
@@ -1214,7 +1244,7 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             out_path=p,
             title=f"{dataset} | {learner} | sample_acc vs hop ratio",
             x_label="hop ratio",
-            y_label="sample_acc",
+            y_label="Validation sample accuracy (%)",
         )
         saved.append(p)
 
@@ -1226,7 +1256,7 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             out_path=p,
             title=f"{dataset} | {learner} | sample_acc vs hop",
             x_label="hop",
-            y_label="sample_acc",
+            y_label="Validation sample accuracy (%)",
         )
         saved.append(p)
 
@@ -1298,7 +1328,7 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             out_path=p,
             title=f"{dataset} | {learner} | sample_acc vs training memory",
             x_label="training memory per batch (MB)",
-            y_label="sample_acc",
+            y_label="Validation sample accuracy (%)",
             color_label="hop ratio",
         )
         saved.append(p)
@@ -1314,7 +1344,7 @@ def make_per_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             out_path=p,
             title=f"{dataset} | {learner} | accuracy vs energy per sample",
             x_label="energy per sample (pJ)",
-            y_label="sample_acc",
+            y_label="Validation sample accuracy (%)",
             color_label="window length",
         )
         saved.append(p)
@@ -1348,7 +1378,7 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             out_path=p,
             title=f"{dataset} | all methods | sample_acc vs window length",
             x_label="window length",
-            y_label="sample_acc",
+            y_label="Validation sample accuracy (%)",
         )
         saved.append(p)
 
@@ -1408,7 +1438,7 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             out_path=p,
             title=f"{dataset} | all methods | sample_acc vs hop ratio",
             x_label="hop ratio",
-            y_label="sample_acc",
+            y_label="Validation sample accuracy (%)",
         )
         saved.append(p)
 
@@ -1420,7 +1450,7 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             out_path=p,
             title=f"{dataset} | all methods | sample_acc vs hop",
             x_label="hop",
-            y_label="sample_acc",
+            y_label="Validation sample accuracy (%)",
         )
         saved.append(p)
 
@@ -1481,7 +1511,7 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             out_path=p,
             title=f"{dataset} | all methods | sample_acc vs training memory",
             x_label="training memory per batch (MB)",
-            y_label="sample_acc",
+            y_label="Validation sample accuracy (%)",
             color_by_accuracy=False,
         )
         saved.append(p)
@@ -1496,7 +1526,7 @@ def make_cross_method_plots(df: pd.DataFrame, out_root: str) -> List[str]:
             out_path=p,
             title=f"{dataset} | all methods | accuracy vs energy per sample",
             x_label="energy per sample (pJ)",
-            y_label="sample_acc",
+            y_label="Validation sample accuracy (%)",
             color_by_accuracy=False,
         )
         saved.append(p)
@@ -1539,6 +1569,8 @@ def print_run_count_summary(df: pd.DataFrame) -> None:
 
 def main() -> None:
     ensure_dir(OUT_DIR)
+    from utils.optuna_support import export_final_tests
+    print(f"Final test table: {export_final_tests(RESULTS_DIR, OUT_DIR, 'independent')}")
 
     df_runs = load_run_summaries(RESULTS_DIR)
     if df_runs.empty:

@@ -1,41 +1,4 @@
-# analyze_theoretical_costs.py
-#
-# Uses experiment configs directly from run_training.py (RUNS list).
-# Each RUN is treated as its own memory scenario keyed by RUN_ID.
-#
-# For every scenario:
-#   - loads real dataset metadata by probing one transformed sample
-#   - computes theoretical memory, compute, access, and time-proxy costs for all learners
-#   - writes per-scenario CSV + plots for theoretical memory, compute, access, and time proxy
-#
-# Also writes:
-#   - overview by scenario (RUN_ID)
-#   - overview by dataset (aggregated from scenario baseline memory)
-#
-# Output layout:
-#   results/theory_costs/
-#     overview_scenarios_training_memory.png
-#     overview_scenarios_theory_compute.png
-#     overview_scenarios_theory_access.png
-#     overview_scenarios_theory_time_proxy.png
-#     overview_scenarios_base_memory.csv
-#     overview_datasets_training_memory.png
-#     overview_datasets_theory_compute.png
-#     overview_datasets_theory_access.png
-#     overview_datasets_theory_time_proxy.png
-#     overview_datasets_base_memory.csv
-#     {run_id}/
-#       0_base_memory.csv
-#       1_training_memory.png
-#       2_training_memory_vs_hidden_size.csv
-#       2_training_memory_vs_hidden_size.png
-#       4_dynamic_memory_vs_batch_size.csv
-#       4_memory_vs_batch_size.png
-#       5_dynamic_memory_vs_time_steps.csv
-#       5_memory_vs_time_steps.png
-#       6_training_memory_vs_num_layers.csv
-#       6_training_memory_vs_num_layers.png
-
+"""Estimate learner memory and work across configured dataset scenarios."""
 from __future__ import annotations
 import os
 import csv
@@ -53,10 +16,10 @@ from utils.training import build_cfg
 from utils.runner import _make_learner, _infer_fp_bytes
 from timeseries.registry import get_dataloaders
 from timeseries.transforms import SlidingWindow, AdaptiveSlidingWindow, Compose
-from run_training import RUNS
+from experiment_config import RUNS
 
 # ── output / sweep constants ──────────────────────────────────────────────────
-OUT_ROOT = "./results/theory_costs"
+OUT_ROOT = "./results/cost_analysis"
 
 # Overview graphs only
 OVERVIEW_LOG_SCALE = True
@@ -98,9 +61,9 @@ LEARNER_STYLES = {
 }
 
 ADDITIONAL_THEORY_PLOTS = [
-    ("theory_compute_scalars", "Theoretical Compute", "Scalar operations", "theory_compute"),
-    ("theory_access_scalars", "Theoretical Memory Access", "Scalar accesses", "theory_access"),
-    ("theory_time_proxy", "Theoretical Time Proxy", "Cost units", "theory_time_proxy"),
+    ("theory_compute_scalars", "Estimated Compute", "Scalar operations", "theory_compute"),
+    ("theory_access_scalars", "Estimated Memory Access", "Scalar accesses", "theory_access"),
+    ("theory_time_proxy", "Estimated Time Proxy", "Cost units", "theory_time_proxy"),
 ]
 
 
@@ -162,7 +125,7 @@ def _load_meta(g: dict) -> dict:
     meta["time_steps"] reflects window length when SlidingWindow is present.
     Raises on failure (dataset not downloaded, bad config, etc.).
     """
-    _, _, meta = get_dataloaders(
+    _, meta = get_dataloaders(
         dataset=g["DATASET"],
         root=g.get("DATA_ROOT", "./data"),
         batch_size=1,
@@ -171,6 +134,7 @@ def _load_meta(g: dict) -> dict:
         num_workers=0,
         pin_memory=False,
         seed=g.get("SEED", 123),
+        data_split=g.get("DATA_SPLIT"),
         **{k: v for k, v in g.get("DATASET_KW", {}).items()},
     )
     return meta
@@ -191,7 +155,7 @@ def _get_memory(
     batch: int,
     time_steps: int,
 ) -> dict:
-    """Return theoretical cost fields for one learner/scenario. Does not load data."""
+    """Return estimated cost fields for one learner/scenario. Does not load data."""
     g = _make_g(base_g, learner_name, hidden_sizes)
     cfg = build_cfg(meta["input_dim"], meta["n_classes"], g)
     m = dict(meta)
@@ -205,22 +169,30 @@ def _get_memory(
         )
         return _empty_cost_result()
 
+    from utils.training import str_to_dtype
+    learner.model.to(dtype=str_to_dtype(g.get("DTYPE", "fp32")))
     fp = _infer_fp_bytes(learner.model)
     param_bytes = learner.get_param_memory_bytes(fp_bytes=fp)
-    alpha = float(base_g.get("THEORY_ALPHA", 1.0))
-    beta = float(base_g.get("THEORY_BETA", 1.0))
+    alpha = float(base_g.get("COST_COMPUTE_WEIGHT", 1.0))
+    beta = float(base_g.get("COST_ACCESS_WEIGHT", 1.0))
 
+    windows = 1
+    if meta.get("window_length"):
+        ratio = meta["window_hop"] / meta["window_length"]
+        hop = max(1, round(time_steps * ratio))
+        windows = max(1, (meta["pre_window_time_steps"] - time_steps) // hop + 1)
     try:
-        theory = learner.get_theoretical_costs(
+        theory = learner.estimate_costs(
             batch=batch,
             time_steps=time_steps,
             fp_bytes=fp,
             alpha=alpha,
             beta=beta,
+            num_windows=windows,
         )
     except Exception as e:
         warnings.warn(
-            f"Could not compute theoretical costs for learner='{learner_name}' "
+            f"Could not compute estimated costs for learner='{learner_name}' "
             f"run='{base_g.get('RUN_ID', '?')}' hidden={hidden_sizes}: {e}"
         )
         theory = {}
@@ -241,8 +213,8 @@ def _get_memory(
         "theory_compute_scalars": int(compute.get("total_scalars") or 0),
         "theory_access_scalars": int(access.get("total_scalars") or 0),
         "theory_time_proxy": float(time_proxy.get("value") or 0.0),
-        "theory_alpha": float(time_proxy.get("alpha", alpha)),
-        "theory_beta": float(time_proxy.get("beta", beta)),
+        "compute_weight": float(time_proxy.get("alpha", alpha)),
+        "access_weight": float(time_proxy.get("beta", beta)),
     }
 
 
@@ -257,8 +229,8 @@ def _empty_cost_result() -> dict:
         "theory_compute_scalars": 0,
         "theory_access_scalars": 0,
         "theory_time_proxy": 0.0,
-        "theory_alpha": 1.0,
-        "theory_beta": 1.0,
+        "compute_weight": 1.0,
+        "access_weight": 1.0,
     }
 
 
@@ -270,8 +242,8 @@ def _cost_csv_fields(cost: dict) -> dict:
         "theory_compute_scalars": cost.get("theory_compute_scalars"),
         "theory_access_scalars": cost.get("theory_access_scalars"),
         "theory_time_proxy": cost.get("theory_time_proxy"),
-        "theory_alpha": cost.get("theory_alpha"),
-        "theory_beta": cost.get("theory_beta"),
+        "compute_weight": cost.get("compute_weight"),
+        "access_weight": cost.get("access_weight"),
     }
 
     theory = cost.get("theory", {}) or {}
@@ -1201,18 +1173,34 @@ def _scenario_label(g: dict) -> str:
     return g.get("DATASET", "unknown").upper().replace("_", " ")
 
 
+def unique_scenarios(runs):
+    """Each scenario already compares all methods; omit duplicated method rows."""
+    import json
+    seen, scenarios = set(), []
+    for run in runs:
+        config = {k: v for k, v in run.items() if k not in ("RUN_ID", "LEARNER")}
+        key = json.dumps(config, sort_keys=True, default=lambda obj: {
+            "type": type(obj).__name__, "state": vars(obj) if hasattr(obj, "__dict__") else str(obj)})
+        if key not in seen:
+            seen.add(key)
+            scenario = dict(run)
+            scenario["RUN_ID"] = run.get("RUN_ID", run["DATASET"]).rsplit("-", 1)[0]
+            scenarios.append(scenario)
+    return scenarios
+
+
 def main() -> None:
     _dir(OUT_ROOT)
 
     if not RUNS:
-        print("No runs configured. Add at least one run in run_training.py and try again.")
+        print("No runs configured. Add a dataset configuration in experiment_config.py.")
         return
 
     print(f"Output: {os.path.abspath(OUT_ROOT)}\n")
 
     all_results: dict[str, dict] = {}
 
-    for idx, g in enumerate(RUNS):
+    for idx, g in enumerate(unique_scenarios(RUNS)):
         run_id = _run_id(g, idx)
         ds_label = _scenario_label(g)
         out_dir = _dir(os.path.join(OUT_ROOT, _slug(run_id)))
@@ -1283,7 +1271,7 @@ def main() -> None:
         OUT_ROOT,
         metric_key="theory_compute_scalars",
         ylabel="Scalar operations",
-        title="Theoretical Compute per Learner",
+        title="Estimated Compute per Learner",
         filename="overview_scenarios_theory_compute.png",
     )
     _plot_overview_metric(
@@ -1291,7 +1279,7 @@ def main() -> None:
         OUT_ROOT,
         metric_key="theory_access_scalars",
         ylabel="Scalar accesses",
-        title="Theoretical Memory Access per Learner",
+        title="Estimated Memory Access per Learner",
         filename="overview_scenarios_theory_access.png",
     )
     _plot_overview_metric(
@@ -1299,7 +1287,7 @@ def main() -> None:
         OUT_ROOT,
         metric_key="theory_time_proxy",
         ylabel="Cost units",
-        title="Theoretical Time Proxy per Learner",
+        title="Estimated Time Proxy per Learner",
         filename="overview_scenarios_theory_time_proxy.png",
     )
     write_dataset_overview_csv(all_results, OUT_ROOT)
@@ -1309,7 +1297,7 @@ def main() -> None:
         OUT_ROOT,
         metric_key="theory_compute_scalars",
         ylabel="Scalar operations",
-        title="Datasets — Sum of Scenario Theoretical Compute per Learner",
+        title="Datasets — Sum of Scenario Estimated Compute per Learner",
         filename="overview_datasets_theory_compute.png",
     )
     _plot_dataset_overview_metric(
@@ -1317,7 +1305,7 @@ def main() -> None:
         OUT_ROOT,
         metric_key="theory_access_scalars",
         ylabel="Scalar accesses",
-        title="Datasets — Sum of Scenario Theoretical Memory Access per Learner",
+        title="Datasets — Sum of Scenario Estimated Memory Access per Learner",
         filename="overview_datasets_theory_access.png",
     )
     _plot_dataset_overview_metric(
@@ -1325,7 +1313,7 @@ def main() -> None:
         OUT_ROOT,
         metric_key="theory_time_proxy",
         ylabel="Cost units",
-        title="Datasets — Sum of Scenario Theoretical Time Proxy per Learner",
+        title="Datasets — Sum of Scenario Estimated Time Proxy per Learner",
         filename="overview_datasets_theory_time_proxy.png",
     )
     print(f"Done. All graphs and CSVs under {os.path.abspath(OUT_ROOT)}")

@@ -32,7 +32,7 @@ class BaseLearner(ABC):
         """Single-batch update. Returns logs like {'loss': float, 'acc': float[%]}."""
         ...
 
-    def _theory_dimensions(self) -> dict:
+    def _cost_dimensions(self) -> dict:
         fcs = getattr(self.model, "fcs", None)
         if fcs is None or len(fcs) == 0:
             return {
@@ -72,31 +72,43 @@ class BaseLearner(ABC):
             "L": len(d),
         }
 
-    def _theory_components(self, batch: int, time_steps: int, dims: dict) -> dict:
-        raise NotImplementedError(f"{type(self).__name__} does not define theoretical costs.")
+    def _cost_components(self, batch: int, time_steps: int, dims: dict) -> dict:
+        raise NotImplementedError(f"{type(self).__name__} does not define estimated costs.")
 
-    def get_theoretical_costs(
+    def estimate_costs(
         self,
         batch: int,
         time_steps: int,
         fp_bytes: int = 4,
         alpha: float = 1.0,
         beta: float = 1.0,
+        num_windows: float = 1.0,
     ) -> dict:
-        dims = self._theory_dimensions()
-        comps = self._theory_components(batch, time_steps, dims)
+        if batch < 1 or time_steps < 1 or num_windows <= 0:
+            raise ValueError("Batch size, time steps and number of windows must be positive")
+        if alpha < 0 or beta < 0:
+            raise ValueError("Estimated time coefficients must be nonnegative")
+        dims = self._cost_dimensions()
+        comps = self._cost_components(batch, time_steps, dims)
 
         memory_components = {k: int(v) for k, v in comps.get("memory", {}).items()}
         compute_components = {k: int(v) for k, v in comps.get("compute", {}).items()}
         access_components = {k: int(v) for k, v in comps.get("access", {}).items()}
+        # Repeated windows multiply total work; their working memory is reused.
+        compute_components = {k: v * num_windows for k, v in compute_components.items()}
+        access_components = {k: v * num_windows for k, v in access_components.items()}
 
         memory_scalars = int(sum(memory_components.values()))
-        compute_scalars = int(sum(compute_components.values()))
-        access_scalars = int(sum(access_components.values()))
+        compute_scalars = sum(compute_components.values())
+        access_scalars = sum(access_components.values())
         time_proxy = float(alpha) * compute_scalars + float(beta) * access_scalars
 
         return {
             "method": type(self).__name__,
+            "model_version": "algorithmic-window-v3",
+            "work_scope": "per_batch_of_original_sequences",
+            "memory_scope": "peak_sequential_window_working_set",
+            "windows_per_sample": num_windows,
             "batch_size": int(batch),
             "time_steps": int(time_steps),
             "fp_bytes": int(fp_bytes),
@@ -168,7 +180,7 @@ class BaseLearner(ABC):
         return N_input + N_param + N_state
 
     def get_training_memory_bytes(self, batch: int, time_steps: int, fp_bytes: int = 4) -> int:
-        return int(self.get_theoretical_costs(batch, time_steps, fp_bytes=fp_bytes)["memory"]["total_bytes"])
+        return int(self.estimate_costs(batch, time_steps, fp_bytes=fp_bytes)["memory"]["total_bytes"])
 
     def _layer_fanouts(self) -> list[int]:
         """

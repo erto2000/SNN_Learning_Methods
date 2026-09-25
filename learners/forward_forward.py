@@ -11,11 +11,8 @@ class FFLearner(BaseLearner):
     Forward-Forward (greedy, layerwise). Forward returns class scores (goodness)
     per sample without exposing temporal internals.
 
-    This version is tuned for performance:
-    - Keeps your original normalization and loss (which worked well).
-    - Still trains one layer at a time (greedy).
-    - FIXES multilayer training by using proper temporal unrolling
-      in `_goodness_for_layer` for deeper layers (no more collapse hack).
+    Each layer uses normalized input currents and a local contrastive loss.
+    Positive and negative examples always carry different class labels.
     """
 
     def __init__(
@@ -30,6 +27,12 @@ class FFLearner(BaseLearner):
         optimizer: str = "adam",
         adam_eps: float = 1e-8
     ):
+        if meta["n_classes"] < 2:
+            raise ValueError("FFLearner needs at least two classes for negative labels.")
+        if any(layer.bias for layer in net_cfg.layers):
+            raise ValueError("FFLearner requires HIDDEN_BIAS=False.")
+        if any(layer.recurrent or layer.norm is not None for layer in net_cfg.layers):
+            raise ValueError("FFLearner requires RECURRENT=False and NORM=None.")
         # augment first layer input with K label channels
         layers = [dataclasses.replace(
             net_cfg.layers[0],
@@ -56,13 +59,6 @@ class FFLearner(BaseLearner):
                 self.layer_opts.append(torch.optim.SGD(params, lr=lr))
             else:
                 raise ValueError(f"Unknown optimizer: {optimizer}")
-
-        # biases off, like your original
-        for fc in self.model.fcs:
-            if fc.bias is not None:
-                with torch.no_grad():
-                    fc.bias.zero_()
-                fc.bias.requires_grad = False
 
         self.current_layer = 0
         self.epoch_in_layer = 0
@@ -260,8 +256,11 @@ class FFLearner(BaseLearner):
 
         # Positive / negative batches
         X_pos = self._add_label_channels(X, y)
-        perm  = torch.randperm(y.size(0), device=self.device)
-        X_neg = self._add_label_channels(X, y[perm])
+        # A permutation can leave labels unchanged, especially in binary or
+        # single-class batches. Draw uniformly from the other K-1 labels.
+        offsets = torch.randint(1, self.meta["n_classes"], y.shape, device=y.device)
+        y_neg = (y + offsets) % self.meta["n_classes"]
+        X_neg = self._add_label_channels(X, y_neg)
 
         Gpos = self._goodness_for_layer(X_pos, layer_idx)
         Gneg = self._goodness_for_layer(X_neg, layer_idx)
@@ -294,7 +293,7 @@ class FFLearner(BaseLearner):
             state.update({"layer": self.current_layer, "layer_advanced": True})
         return state
 
-    def _theory_components(self, batch: int, time_steps: int, dims: dict) -> dict:
+    def _cost_components(self, batch: int, time_steps: int, dims: dict) -> dict:
         B, T = int(batch), int(time_steps)
         A, U = dims["A"], dims["U"]
         d = dims["d"]

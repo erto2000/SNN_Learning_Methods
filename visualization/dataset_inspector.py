@@ -8,7 +8,8 @@ import numpy as np
 import torch
 from torch.utils.data import Subset, DataLoader
 
-from timeseries.registry import _REGISTRY as DS_REGISTRY, Compose
+from timeseries.registry import get_dataloaders
+from timeseries.transforms import Compose
 from timeseries.core import MapDataset
 from timeseries.collate import collate_pad
 
@@ -31,27 +32,13 @@ def _set_seed(seed: Optional[int]) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-def _build_raw(dataset: str, root: str, max_samples: Optional[int], dataset_kwargs: Optional[Dict[str, Any]] = None) -> Tuple[torch.utils.data.Dataset, torch.utils.data.Dataset, List[str], dir]:
-    name = dataset.lower()
-    if name not in DS_REGISTRY:
-        raise ValueError(f"Unknown dataset: {dataset!r}. Registered: {list(DS_REGISTRY)}")
-    build_fn = DS_REGISTRY[name]
-
-    kwargs = dict(dataset_kwargs or {})
-    # keep existing behaviour by default
-    kwargs.setdefault("root", root)
-    kwargs.setdefault("max_samples", max_samples)
-
-    return build_fn(**kwargs)
-
 def _maybe_fit_pipeline(transform, train_ds) -> Any:
     if transform is None:
         return None
     tf = deepcopy(transform)
-    if isinstance(tf, Compose):
-        tf.fit(train_ds)
-    elif hasattr(tf, "fit"):
-        tf.fit(train_ds)
+    if not isinstance(tf, Compose):
+        tf = Compose([tf])
+    tf.fit(train_ds, max_samples=min(2000, len(train_ds)))
     return tf
 
 def _apply_transform(ds, transform) -> torch.utils.data.Dataset:
@@ -231,6 +218,7 @@ def build_dataset_viz(
     base_dir: str = "results",
     tag: str = "dataset_viz",
     DATASET_KWARGS: Optional[Dict[str, Any]] = None,
+    DATA_SPLIT: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """
     Orchestrates a single dataset visualization job.
@@ -256,11 +244,13 @@ def build_dataset_viz(
     _ensure_dir(os.path.join(out_dir, "embeddings"))
 
     # ── 1) Raw datasets
-    train_raw, test_raw, class_names, info = _build_raw(DATASET, DATA_ROOT, MAX_SAMPLES, dataset_kwargs=DATASET_KWARGS)
-    split_map = {"train": train_raw, "test": test_raw}
+    loaders, info = get_dataloaders(DATASET, root=DATA_ROOT, max_samples=MAX_SAMPLES,
+        num_workers=0, seed=SEED, data_split=DATA_SPLIT, **(DATASET_KWARGS or {}))
+    split_map = {key: loader.dataset for key, loader in loaders.items()}
+    class_names = info['class_names']
 
     # ── 2) Fit/apply pipeline (if provided)
-    tf = _maybe_fit_pipeline(TRANSFORM, train_raw)
+    tf = _maybe_fit_pipeline(TRANSFORM, split_map['train'])
     split_post = {s: _apply_transform(ds, tf) for s, ds in split_map.items()} if tf is not None else {}
 
     # ── 3) Corpus stats + per-split figures (RAW)
@@ -426,9 +416,10 @@ def build_dataset_viz(
         output_dir=out_dir,
         split_sizes=split_sizes,
         overall_total=int(sum(split_sizes.get(s, 0) for s in SPLITS)),
-        true_total=info.get('true_train_total', 0) + info.get('true_test_total', 0),
-        true_train_total=info.get('true_train_total'),
-        true_test_total=info.get('true_test_total'),
+        available_samples=info['num_samples'],
+        data_split=info['data_split'],
+        split_counts=info['split_counts'],
+        split_percentages=info['split_percentages'],
     )
     summary_path = os.path.join(out_dir, "summary.json")
     with open(summary_path, "w", encoding="utf-8") as f:

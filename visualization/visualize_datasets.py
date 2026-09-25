@@ -1,84 +1,17 @@
 import os
 from visualization.dataset_inspector import build_dataset_viz
-import timeseries.transforms as transforms
+from experiment_config import (
+    DEFAULT, HAR_PIPELINE, MNIST_STATIC_PIPELINE, MNIST_RATE_PIPELINE,
+    SC_PIPELINE, ESC50_PIPELINE, URBAN8K_PIPELINE, PAMAP2_PIPELINE,
+    MITBIH_PIPELINE, LARGE_SCALE_AUDIO_PIPELINE, DVS_GESTURE_PIPELINE,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DEFAULTS (edit as needed)
 BASE_DIR = "results"
 TAG = "all_datasets_overview"
-SEED = 123
-
-# ──────────────────────────────────────────────────────────────────────────────
-# PIPELINES — match exactly what we use in run_training.py
-
-# HAR
-HAR_PIPELINE = transforms.Compose([
-    transforms.ToFloat32(),
-    transforms.Ensure2D(),
-    transforms.ZScore(),
-])
-
-# MNIST: static image to temporal sequence
-MNIST_STATIC_PIPELINE = transforms.Compose([
-    transforms.ToFloat32(),
-    transforms.RepeatStatic(T=50),
-])
-
-# MNIST: rate-coded spikes
-MNIST_RATE_PIPELINE = transforms.Compose([
-    transforms.ToFloat32(),
-    transforms.DeterministicSpikes(gain=0.7, T=20, base_seed=0),  # [1,784] -> [20,784]
-])
-
-# Speech Commands
-SC_PIPELINE = transforms.Compose([
-    transforms.ToFloat32(),
-    transforms.Ensure2D(),                                 # waveform -> [T,1]
-    transforms.ToLogMel(sample_rate=16000, n_mels=64, win_len_ms=25, hop_ms=10),         # -> [F,M]
-    transforms.ZScore(),
-])
-
-# ESC-50: 5s @44100Hz → log-mel(64)
-ESC50_PIPELINE = transforms.Compose([
-    transforms.ToFloat32(),
-    transforms.Ensure2D(),
-    transforms.ToLogMel(sample_rate=44100, n_mels=64, win_len_ms=25, hop_ms=10),
-    transforms.ZScore(),
-])
-
-# UrbanSound8K: 1s-4s @44100Hz → log-mel(64)
-URBAN8K_PIPELINE = transforms.Compose([
-    transforms.ToFloat32(),
-    transforms.Ensure2D(),
-    transforms.ToLogMel(sample_rate=44100, n_mels=64, win_len_ms=25, hop_ms=10),
-    transforms.ZScore(),
-])
-
-# PAMAP2 (IMU)
-PAMAP2_PIPELINE = transforms.Compose([
-    transforms.ToFloat32(),
-    transforms.ZScore(),
-])
-
-# MIT-BIH (ECG)
-MITBIH_PIPELINE = transforms.Compose([
-    transforms.ToFloat32(),
-    transforms.ZScore(),
-])
-
-# Large-Scale Audio: 3s @16kHz → log-mel(64)
-LARGE_SCALE_AUDIO_PIPELINE = transforms.Compose([
-    transforms.ToFloat32(),
-    transforms.ToLogMel(sample_rate=16000, n_mels=64, win_len_ms=25, hop_ms=10),
-    transforms.ZScore(),
-])
-
-# DVS128 Gesture (neuromorphic events)
-DVS_GESTURE_PIPELINE = transforms.Compose([
-    transforms.DownsampleEvents(factor=4),
-    transforms.EventToVoxel(H=32, W=32, bins=200, polarity=True),
-    transforms.ZScore(),
-])
+SEED = DEFAULT['SEED']
+DATA_SPLIT = DEFAULT['DATA_SPLIT']
 
 # ──────────────────────────────────────────────────────────────────────────────
 # VIS “jobs”: each is an inspection you want to run (raw and/or post)
@@ -173,7 +106,7 @@ VIS = [
     #      SEED=SEED),
 ]
 
-# If you need to tweak dataset-specific kwargs (like you do in run_training.py),
+# Adjust dataset-specific options here when inspecting a different sample set.
 # you can add a DATASET_KW dict to any job above, e.g.:
 # dict(..., DATASET_KW={"train_subjects":[101,...], "test_subjects":[109], "min_len":100})
 
@@ -181,6 +114,9 @@ VIS = [
 
 def main():
     for job in VIS:
+        job = dict(job)
+        job.setdefault('DATA_SPLIT', dict(DATA_SPLIT))
+        job.setdefault('SPLITS', ['train', 'validation', 'test'])
         # Split out optional DATASET_KW (build_dataset_viz ignores unknown kwargs)
         dataset_kw = job.pop("DATASET_KW", None)
         if dataset_kw:

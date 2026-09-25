@@ -5,3 +5,4 @@ experimental/data/
 venv/
 optuna_results/
 results/
+tmp/

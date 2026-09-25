@@ -26,7 +26,7 @@ def build_cfg(D: int, K: int, g: Dict[str, Any]) -> NetConfig:
     layers = []
     din = D
     for h in g["HIDDEN_SIZES"]:
-        layers.append(LayerSpec(dim_in=din, dim_out=h, recurrent=g["RECURRENT"], norm=g["NORM"], bias=g.get("HIDDEN_BIAS", True)))
+        layers.append(LayerSpec(dim_in=din, dim_out=h, recurrent=g["RECURRENT"], norm=g["NORM"], bias=g.get("HIDDEN_BIAS", False)))
         din = h
     return NetConfig(
         layers=layers,
@@ -35,7 +35,7 @@ def build_cfg(D: int, K: int, g: Dict[str, Any]) -> NetConfig:
         slope=g["SLOPE"],
         threshold=g["THRESHOLD"],
         head=g["HEAD"],
-        head_bias=g.get("HEAD_BIAS", True),
+        head_bias=g.get("HEAD_BIAS", False),
         init=g["INIT_TYPE"],
     )
 
@@ -218,6 +218,8 @@ def run_train_loop(
     use_int8_weights: bool = False,
     time_eval_fracs=None,
     time_eval_include_t1: bool = False,
+    cost_profile=None,
+    evaluation_split: str = "test",
 ) -> Tuple[Dict[str, Any], Dict[int, Dict[str, float]]]:
     epoch_log: Dict[int, Dict[str, float]] = {}
 
@@ -231,12 +233,14 @@ def run_train_loop(
 
         n_tr, acc_tr_sum, loss_sum, aux_msg = 0, 0.0, 0.0, ""
         for Xp, yp, _, _ in iter_pieces(train_loader, device, chunk_segments=True, dtype=runtime_dtype):
+            if epoch == 1 and cost_profile is not None:
+                cost_profile[int(Xp.shape[1])] += int(Xp.shape[0])
             stats = learner.train_step(Xp, yp)
-            n_tr += 1
+            n_tr += len(yp)
             if "acc" in stats:
-                acc_tr_sum += stats["acc"]
+                acc_tr_sum += stats["acc"] * len(yp)
             if "loss" in stats:
-                loss_sum += stats["loss"]
+                loss_sum += stats["loss"] * len(yp)
             if "layer" in stats:
                 aux_msg = f" | layer:{stats['layer']}"
 
@@ -262,11 +266,9 @@ def run_train_loop(
                 time_eval_include_t1=time_eval_include_t1 if do_time_eval else False,
             )
 
-            print(
-                f"[{ts}] Epoch {epoch:02d} | loss:{loss_avg:.4f} | acc:{acc_avg:.2f}% | "
-                f"test_sample_acc:{stats_te['sample_acc']:.2f}% | "
-                f"test_window_acc:{stats_te['window_acc']:.2f}%{aux_msg}"
-            )
+            width = len(str(epochs))
+            print(f"|  [{ts}] Epoch {epoch:>{width}}/{epochs}  |  Loss {loss_avg:.4f}  |  Train {acc_avg:.2f}%  |  "
+                  f"{evaluation_split.title()} {stats_te['sample_acc']:.2f}%{aux_msg}")
             epoch_log[epoch] = {
                 "loss": loss_avg,
                 "acc": acc_avg,
@@ -274,7 +276,8 @@ def run_train_loop(
                 "timestamp": ts,
             }
         else:
-            print(f"[{ts}] Epoch {epoch:02d} | loss:{loss_avg:.4f} | acc:{acc_avg:.2f}%{aux_msg}")
+            width = len(str(epochs))
+            print(f"|  [{ts}] Epoch {epoch:>{width}}/{epochs}  |  Loss {loss_avg:.4f}  |  Train {acc_avg:.2f}%{aux_msg}")
             epoch_log[epoch] = {
                 "loss": loss_avg,
                 "acc": acc_avg,

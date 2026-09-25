@@ -2,31 +2,24 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "run_training",
+            "name": "run_no_window",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/run_training.py",
+            "program": "${workspaceFolder}/run_no_window.py",
             "console": "integratedTerminal"
         },
         {
-            "name": "compare_results",
+            "name": "compare_no_window_runs",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/compare_results.py",
+            "module": "reporting.compare_no_window_runs",
             "console": "integratedTerminal"
         },
         {
             "name": "visualize_datasets",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/visualize_datasets.py",
-            "console": "integratedTerminal"
-        },
-        {
-            "name": "calculate_memory_requirements",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${workspaceFolder}/calculate_memory_requirements.py",
+            "module": "visualization.visualize_datasets",
             "console": "integratedTerminal"
         },
         {

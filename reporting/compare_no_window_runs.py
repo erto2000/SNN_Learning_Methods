@@ -1,19 +1,4 @@
-# compare_results.py
-"""
-Comparisons for the current run_training.py layout.
-
-Expected run IDs:
-    <prefix>-<learner>
-
-Examples:
-    har-bp
-    har-ff
-    mnist-static-eprop
-    large-scale-audio-pepita
-
-Run:
-    python compare_results.py
-"""
+"""Compare unwindowed runs across datasets and learners."""
 
 from __future__ import annotations
 
@@ -162,6 +147,16 @@ def learner_label(info: Dict[str, Any]) -> str:
     return mapping.get(str(_cfg_value(info, "LEARNER")), str(_cfg_value(info, "LEARNER")))
 
 
+def dataset_label(info: Dict[str, Any]) -> str:
+    """Keep MNIST's temporal encodings distinct in combined tables."""
+    run_id = str(_summary(info).get("run_id") or info.get("id") or "")
+    if run_id.startswith("mnist-static-"):
+        return "mnist_static"
+    if run_id.startswith("mnist-rate-"):
+        return "mnist_rate"
+    return str(_cfg_value(info, "DATASET"))
+
+
 def optimizer_label(info: Dict[str, Any]) -> str:
     learner = str(_cfg_value(info, "LEARNER"))
     if learner == "bp":
@@ -242,6 +237,7 @@ def time_eval_p100(info: Dict[str, Any]) -> Optional[float]:
 
 
 CUSTOM_FUNCS = {
+    "dataset_label": dataset_label,
     "max_train_acc": max_train_acc,
     "best_train_epoch": best_train_epoch,
     "max_sample_acc": max_sample_acc,
@@ -281,8 +277,13 @@ def all_current_runs_pattern() -> str:
 
 def leaderboard_columns():
     return [
+        *[{"name": f"{name}_percent_requested", "value": f"meta.data_split.{name}"}
+          for name in ("train", "validation", "test")],
+        *[{"name": f"{name}_percent_actual", "value": f"meta.split_percentages.{name}"}
+          for name in ("train", "validation", "test")],
+        {"name": "train_samples", "value": "meta.num_train_samples"},
         {"name": "run_id", "value": "run_id"},
-        {"name": "dataset", "value": "config.DATASET"},
+        {"name": "dataset", "func": "dataset_label"},
         {"name": "learner", "value": "config.LEARNER"},
         {"name": "learner_label", "func": "learner_label"},
         {"name": "optimizer", "func": "optimizer_label"},
@@ -291,6 +292,12 @@ def leaderboard_columns():
         {"name": "hidden_total", "func": "hidden_total"},
         {"name": "hidden_depth", "func": "hidden_depth"},
         {"name": "epochs", "value": "config.EPOCHS"},
+        {"name": "evaluation_split", "value": "meta.evaluation_split"},
+        {"name": "validation_samples", "value": "meta.num_validation_samples"},
+        {"name": "test_samples", "value": "meta.num_test_samples"},
+        {"name": "theory_model_version", "value": "memory.theory.model_version"},
+        {"name": "theory_work_scope", "value": "memory.theory.work_scope"},
+        {"name": "windows_per_sample", "value": "memory.theory.windows_per_sample"},
         {"name": "final_sample_acc", "value": "final.sample_acc"},
         {"name": "max_sample_acc", "func": "max_sample_acc"},
         {"name": "max_train_acc", "func": "max_train_acc"},
@@ -321,13 +328,19 @@ def leaderboard_columns():
 def per_epoch_columns():
     return [
         {"name": "run_id", "value": "run_id"},
-        {"name": "dataset", "value": "config.DATASET"},
+        {"name": "dataset", "func": "dataset_label"},
         {"name": "learner", "value": "config.LEARNER"},
         {"name": "epoch", "value": "epoch"},
         {"name": "train_loss", "value": "history.loss"},
         {"name": "train_acc", "value": "history.acc"},
         {"name": "sample_acc", "value": "history.sample_acc"},
         {"name": "window_acc", "value": "history.window_acc"},
+        {"name": "evaluation_split", "value": "meta.evaluation_split"},
+        {"name": "validation_samples", "value": "meta.num_validation_samples"},
+        {"name": "test_samples", "value": "meta.num_test_samples"},
+        {"name": "theory_model_version", "value": "memory.theory.model_version"},
+        {"name": "theory_work_scope", "value": "memory.theory.work_scope"},
+        {"name": "windows_per_sample", "value": "memory.theory.windows_per_sample"},
         {"name": "final_sample_acc", "value": "final.sample_acc"},
     ]
 
@@ -353,16 +366,16 @@ def build_for_group(group: Dict[str, str]):
             },
         },
         {
-            "name": f"[{title}] Theoretical cost bars",
+            "name": f"[{title}] Estimated cost bars",
             "runs": runs,
             "dest": {
                 "type": "plot",
-                "out_path": f"{key}/theoretical_costs",
+                "out_path": f"{key}/estimated_costs",
                 "panels": [
-                    {"x": "run", "y": "func:theory_memory_mb", "plot": "bar", "title": "Theoretical training memory (MB)"},
-                    {"x": "run", "y": "func:theory_compute_scalars", "plot": "bar", "title": "Theoretical compute"},
-                    {"x": "run", "y": "func:theory_access_scalars", "plot": "bar", "title": "Theoretical memory access"},
-                    {"x": "run", "y": "func:theory_time_proxy", "plot": "bar", "title": "Theoretical time proxy"},
+                    {"x": "run", "y": "func:theory_memory_mb", "plot": "bar", "title": "Estimated training memory (MB)"},
+                    {"x": "run", "y": "func:theory_compute_scalars", "plot": "bar", "title": "Compute per batch of original sequences"},
+                    {"x": "run", "y": "func:theory_access_scalars", "plot": "bar", "title": "Accesses per batch of original sequences"},
+                    {"x": "run", "y": "func:theory_time_proxy", "plot": "bar", "title": "Estimated time proxy"},
                 ],
                 "style": {"dpi": 140, "figsize": [12, 8], "tight_layout": True},
             },
@@ -374,10 +387,10 @@ def build_for_group(group: Dict[str, str]):
                 "type": "plot",
                 "out_path": f"{key}/accuracy_cost_tradeoffs",
                 "panels": [
-                    {"x": "func:theory_memory_mb", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical memory"},
-                    {"x": "func:theory_compute_scalars", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical compute"},
-                    {"x": "func:theory_access_scalars", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical access"},
-                    {"x": "func:theory_time_proxy", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical time proxy"},
+                    {"x": "func:theory_memory_mb", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs estimated memory"},
+                    {"x": "func:theory_compute_scalars", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs estimated compute"},
+                    {"x": "func:theory_access_scalars", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs estimated access"},
+                    {"x": "func:theory_time_proxy", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs estimated time proxy"},
                 ],
                 "style": {"dpi": 140, "figsize": [12, 8], "tight_layout": True},
             },
@@ -446,10 +459,10 @@ COMPARISONS.append({
         "type": "plot",
         "out_path": "all_current_runs/accuracy_cost_tradeoffs",
         "panels": [
-            {"x": "func:theory_memory_mb", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical memory"},
-            {"x": "func:theory_compute_scalars", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical compute"},
-            {"x": "func:theory_access_scalars", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical access"},
-            {"x": "func:theory_time_proxy", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs theoretical time proxy"},
+            {"x": "func:theory_memory_mb", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs estimated memory"},
+            {"x": "func:theory_compute_scalars", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs estimated compute"},
+            {"x": "func:theory_access_scalars", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs estimated access"},
+            {"x": "func:theory_time_proxy", "y": "final.sample_acc", "plot": "scatter", "title": "Accuracy vs estimated time proxy"},
         ],
         "style": {"dpi": 140, "figsize": [12, 8], "tight_layout": True},
     },

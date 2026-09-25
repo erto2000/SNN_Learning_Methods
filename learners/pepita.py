@@ -23,8 +23,8 @@ class PepitaLearner(BaseLearner):
     Additions vs a basic PEPITA implementation:
       - Data-driven calibration of F on the first batch so that
         the modulation (e @ F) has a fixed ratio to input magnitude.
-      - Relative step-size control: each update ΔW is constrained so that
-        ||ΔW|| / ||W|| <= max_rel_step.
+      - Optional relative step-size control: when max_rel_step is set,
+        each update obeys ||ΔW|| / ||W|| <= max_rel_step.
     """
 
     VALID_MODES = {"original", "accum"}
@@ -35,8 +35,8 @@ class PepitaLearner(BaseLearner):
         meta,
         device,
         mode: str = "accum",
-        lr: float = 0.01,
-        max_rel_step: float = 0.05,
+        lr: float = 1e-3,
+        max_rel_step: float | None = None,
         target_modulation_ratio: float = 0.1,
         optimizer: str = "adam",
         adam_eps: float = 1e-8,
@@ -49,13 +49,21 @@ class PepitaLearner(BaseLearner):
                 "accum":    apply one update using spike-rate differences, where
                             spike rate = accumulated spike count / T.
             lr: base learning rate.
-            max_rel_step: max allowed relative step size per update
-                          (||ΔW|| / ||W|| <= max_rel_step).
+            max_rel_step: optional relative step bound; None uses plain
+                          optimizer steps (no post-update rescaling).
             target_modulation_ratio: target std((e @ F)) / std(X) on first batch.
             optimizer: parameter update rule applied to the PEPITA directions
                        ("adam" or "sgd").
         """
+        if net_cfg.head != "logits":
+            raise ValueError("PepitaLearner requires a linear logits head.")
+        if net_cfg.head_bias or any(layer.bias for layer in net_cfg.layers):
+            raise ValueError("PepitaLearner requires HIDDEN_BIAS=False and HEAD_BIAS=False.")
+        if any(layer.recurrent or layer.norm is not None for layer in net_cfg.layers):
+            raise ValueError("PepitaLearner requires RECURRENT=False and NORM=None.")
         super().__init__(net_cfg, meta, device)
+        for param in self.model.parameters():
+            param.requires_grad_(False)
 
         if mode not in self.VALID_MODES:
             raise ValueError(f"Unknown PepitaLearner mode: {mode!r}. Expected one of {sorted(self.VALID_MODES)}.")
@@ -433,7 +441,7 @@ class PepitaLearner(BaseLearner):
     # -------------------------------------------------------------------------
     # Memory estimation
     # -------------------------------------------------------------------------
-    def _theory_components(self, batch: int, time_steps: int, dims: dict) -> dict:
+    def _cost_components(self, batch: int, time_steps: int, dims: dict) -> dict:
         B, T = int(batch), int(time_steps)
         A, U, V, C = dims["A"], dims["U"], dims["V"], dims["C"]
         d0 = dims["d0"]
@@ -441,14 +449,15 @@ class PepitaLearner(BaseLearner):
         F, P, Y = dims["F"], dims["P"], dims["Y"]
 
         if self.mode != "accum":
-            raise RuntimeError("Theoretical RATE-PEPITA costs are defined for mode='accum'.")
+            raise RuntimeError("Estimated RATE-PEPITA costs are defined for mode='accum'.")
 
         return {
             "memory": {
                 "input": B * T * d0_eff,
                 "param": A + V,
                 "state": B * U,
-                "rate_buffer": B * U,
+                # Retain accumulated rates from the original and perturbed phases.
+                "rate_buffer": 2 * B * U,
                 "feedback_matrix": C * d0,
                 "output_error": B * C,
                 "input_perturbation": B * d0,

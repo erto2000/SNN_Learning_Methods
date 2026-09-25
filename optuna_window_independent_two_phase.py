@@ -8,6 +8,9 @@ import csv
 from typing import Dict, Any, Tuple, Optional
 
 import optuna
+from utils.optuna_support import create_study, preferred_study, run_final_test, export_final_tests
+from utils.window_search import inspect_training_lengths
+from utils.console import panel, close, timestamp
 
 from utils.runner import run_one
 from visualization.training_results import save_results
@@ -78,66 +81,61 @@ def try_get_baseline_window_from_pipeline(pipeline) -> Optional[Dict[str, int]]:
 # =========================================================
 def get_base_run_config_by_dataset(dataset: str) -> Dict[str, Any]:
     """
-    Pull the exact per-dataset baseline config from run_training.RUNS.
+    Pull the matching dataset configuration used by full-sequence runs.
     """
-    from run_training import RUNS
+    from experiment_config import RUNS
 
     dataset = dataset.lower()
+    requested_prefix = dataset.replace("_", "-")
+    # A dataset can have multiple temporal representations, as with MNIST
+    # static and rate coding. Prefer the explicit run-prefix identity first.
+    for r in RUNS:
+        run_prefix = r["RUN_ID"].rsplit("-", 1)[0].lower()
+        if run_prefix == requested_prefix:
+            return deepcopy(r)
     for r in RUNS:
         if r["DATASET"].lower() == dataset:
             return deepcopy(r)
 
-    raise ValueError(f"No base run config found for dataset={dataset!r} in run_training.RUNS")
+    raise ValueError(f"No run configuration found for dataset={dataset!r}")
 
 
 # =========================================================
-# Dataset length hints
+# Window-length bounds
 # =========================================================
-DATASET_T_HINT = {
-    "har": 128,
-    "speech_commands": 101,
-    "esc50": 101,
-    "urban8k": 436,
-    "pamap2": 128,
-    "mitbih": 360,
-    "dvs_gesture": 200,
-    "large_scale_audio": 301,
-}
-
-
 def _step_for_T(T: int) -> int:
     raw = max(4, T // 16)
     p = 2 ** int(round(math.log2(raw)))
     return int(max(4, min(p, max(8, T // 8))))
 
 
-def bounds_phase1_window(dataset: str) -> Tuple[int, int, int]:
+def bounds_phase1_window(max_time_steps: int) -> Tuple[int, int, int]:
     """
     Broad search for the independent window-length experiment.
     """
-    T = int(DATASET_T_HINT.get(dataset.lower(), 256))
+    T = int(max_time_steps)
     L_min = max(10, int(round(T * 0.10)))
     L_max = max(L_min, int(round(T * 1.0)))
     step = _step_for_T(T)
     return L_min, L_max, step
 
 
-def bounds_phase2_window(best_L: int, *, dataset: str) -> Tuple[int, int, int]:
+def bounds_phase2_window(best_L: int, *, max_time_steps: int) -> Tuple[int, int, int]:
     """
     Refinement search for the independent window-length experiment.
     Uses the user's intended 0.75x .. 1.25x neighborhood around the best
     phase-1 window.
     """
-    T = int(DATASET_T_HINT.get(dataset.lower(), 256))
+    T = int(max_time_steps)
     base_step = _step_for_T(T)
     step = max(2, base_step // 2)
 
     L_min = max(4, int(round(best_L * 0.75)))
-    L_max = max(L_min, int(round(best_L * 1.25)))
+    L_max = min(T, max(L_min, int(round(best_L * 1.25))))
 
     # Snap to step so Optuna gets a valid integer grid.
     L_min = max(step, int(math.floor(L_min / step) * step))
-    L_max = max(L_min, int(math.ceil(L_max / step) * step))
+    L_max = min(T, max(L_min, int(math.ceil(L_max / step) * step)))
     return L_min, L_max, step
 
 
@@ -299,7 +297,7 @@ def best_window_anchor_from_studies(
     study_w2: Optional[optuna.Study],
 ) -> Optional[Dict[str, Any]]:
     """
-    Pick the best completed window-length result across Window P1 and Window P2.
+    Use the refined phase when available, otherwise fall back to Phase 1.
     This result is used as the fixed window length for the hop-ratio experiment.
     """
     candidates = []
@@ -323,7 +321,7 @@ def best_window_anchor_from_studies(
     if not candidates:
         return None
 
-    return max(candidates, key=lambda x: x["value"])
+    return max(candidates, key=lambda x: x["phase"])
 
 
 # =========================================================
@@ -384,15 +382,17 @@ def make_objective(
         pipe0 = remove_window_ops(base_pipeline)
         cfg["TRANSFORM"] = append_sliding_window(pipe0, L=L, hop=hop)
 
-        base_id = cfg.get("RUN_ID", f"{dataset}-{learner}")
+        # Build the identity from the current experiment variant and learner.
+        # The baseline config may have been copied from the first learner entry.
+        base_id = f"{dataset}-{learner}-v3"
         run_id = (
             f"{base_id}-exp{experiment}-p{phase}-{search_mode}-"
             f"optuna-t{trial.number:04d}-L{L}-H{hop}"
         )
         cfg["RUN_ID"] = run_id
 
-        result = run_one(cfg)
-        save_results([result], base_dir=results_dir, make_plots=True)
+        result = run_one(cfg, tuning=True)
+        save_results([result], base_dir=results_dir, make_plots=True, quiet=True)
 
         trial.set_user_attr("experiment", experiment)
         trial.set_user_attr("phase", int(phase))
@@ -405,9 +405,15 @@ def make_objective(
         if result.get("status") != "ok":
             err = result.get("error") or "unknown error"
             trial.set_user_attr("error", err)
+            print(f"|  [{timestamp()}] Trial {trial.number + 1:>2}  |  FAILED  |  {err}")
+            if result.get("traceback"):
+                print(result["traceback"], end="" if result["traceback"].endswith("\n") else "\n")
             raise optuna.TrialPruned(err)
 
-        value = float(result.get("final", {}).get(metric, 0.0))
+        value = float(result["final"][metric])
+        if not math.isfinite(value):
+            raise optuna.TrialPruned("Non-finite validation score")
+        print(f"|  [{timestamp()}] Trial {trial.number + 1:>2}  |  L {L}  |  Hop {hop}  |  Validation {value:.2f}%")
         return value
 
     return objective
@@ -419,7 +425,7 @@ def make_objective(
 def run_all_independent(
     *,
     results_dir: str = "results",
-    db_path: str = "results/optuna/window_hop_independent.db",
+    db_path: str = "results/optuna/window_hop_independent_v3.db",
     metric: str = "sample_acc",
     phase1_trials: int = 20,
     phase1_epochs: int = 5,
@@ -427,6 +433,7 @@ def run_all_independent(
     phase2_epochs: int = 10,
     max_samples_override: Optional[int] = None,
     window_fixed_hop_ratio: float = 1.0,
+    datasets: Optional[list[str]] = None,
 ):
     """
     Runs two experiments per dataset x learner:
@@ -441,12 +448,14 @@ def run_all_independent(
        - Phase 2: refine hop_ratio around best phase-1 value using 0.75x..1.25x
 
     This yields phase1_trials + phase2_trials for each experiment.
-    With the defaults that is 30 + 30 = 60 runs per dataset x learner combination.
+    With the defaults that is 30 + 30 = 60 search runs per dataset x learner,
+    plus two automatically retrained final test runs at the normal epoch budget.
     """
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
     ensure_dir(os.path.dirname(db_path))
     storage = f"sqlite:///{db_path}"
 
-    datasets = [
+    datasets = list(datasets) if datasets is not None else [
         "pamap2",
         "har",
         "dvs_gesture",
@@ -456,22 +465,35 @@ def run_all_independent(
         "urban8k",
         "mitbih",
     ]
-    learners = ["bp", "eprop", "ff", "pepita"]
+    learners = ["bp", "ff", "eprop", "pepita"]
 
     for ds in datasets:
         base_run_cfg = get_base_run_config_by_dataset(ds)
+        base_run_cfg["OPTUNA_METRIC"] = metric
         base_pipeline = deepcopy(base_run_cfg["TRANSFORM"])
+        bounds_cfg = deepcopy(base_run_cfg)
+        if max_samples_override is not None:
+            bounds_cfg["MAX_SAMPLES"] = int(max_samples_override)
+        length_info = inspect_training_lengths(
+            bounds_cfg,
+            remove_window_ops(base_pipeline),
+            max_samples=bounds_cfg.get("WINDOW_BOUND_SAMPLES", 256),
+        )
+        max_time_steps = int(length_info["maximum"])
+        print(
+            f"[Window Bounds] training-only preload "
+            f"{length_info['inspected_samples']}/{length_info['training_samples']} samples | "
+            f"observed T {length_info['minimum']}..{max_time_steps}"
+        )
 
         for learner in learners:
-            print("\n==============================")
-            print(f"Combo: dataset={ds} | learner={learner}")
-            print("==============================")
+            panel(f"SEARCH | {ds.upper()} | {learner.upper()}")
 
             # -----------------------------------------
             # Experiment A: independent window-length
             # -----------------------------------------
             w1_name = f"ws_{ds}_{learner}_window_p1"
-            L1_min, L1_max, step1 = bounds_phase1_window(ds)
+            L1_min, L1_max, step1 = bounds_phase1_window(max_time_steps)
 
             cfg_w1 = deepcopy(base_run_cfg)
             cfg_w1["RUN_ID"] = f"{ds}-{learner}"
@@ -481,7 +503,8 @@ def run_all_independent(
             if max_samples_override is not None:
                 cfg_w1["MAX_SAMPLES"] = int(max_samples_override)
 
-            study_w1 = optuna.create_study(
+            study_w1 = create_study(
+                config=cfg_w1,
                 study_name=w1_name,
                 direction="maximize",
                 storage=storage,
@@ -532,7 +555,9 @@ def run_all_independent(
 
             if best_L is not None:
                 w2_name = f"ws_{ds}_{learner}_window_p2"
-                L2_min, L2_max, step2 = bounds_phase2_window(best_L, dataset=ds)
+                L2_min, L2_max, step2 = bounds_phase2_window(
+                    best_L, max_time_steps=max_time_steps
+                )
 
                 cfg_w2 = deepcopy(base_run_cfg)
                 cfg_w2["RUN_ID"] = f"{ds}-{learner}"
@@ -542,7 +567,8 @@ def run_all_independent(
                 if max_samples_override is not None:
                     cfg_w2["MAX_SAMPLES"] = int(max_samples_override)
 
-                study_w2 = optuna.create_study(
+                study_w2 = create_study(
+                    config=cfg_w2,
                     study_name=w2_name,
                     direction="maximize",
                     storage=storage,
@@ -614,7 +640,8 @@ def run_all_independent(
             if max_samples_override is not None:
                 cfg_h1["MAX_SAMPLES"] = int(max_samples_override)
 
-            study_h1 = optuna.create_study(
+            study_h1 = create_study(
+                config=cfg_h1,
                 study_name=h1_name,
                 direction="maximize",
                 storage=storage,
@@ -665,6 +692,7 @@ def run_all_independent(
                 print("[Hop P2] Skipped because Hop P1 has no COMPLETE trials.")
                 best_hr = None
 
+            study_h2 = None
             if best_hr is not None:
                 h2_name = f"ws_{ds}_{learner}_hop_bestL{hop_anchor_L}_p2"
                 hr2_min, hr2_max = bounds_phase2_hop_ratio(best_hr)
@@ -677,7 +705,8 @@ def run_all_independent(
                 if max_samples_override is not None:
                     cfg_h2["MAX_SAMPLES"] = int(max_samples_override)
 
-                study_h2 = optuna.create_study(
+                study_h2 = create_study(
+                    config=cfg_h2,
                     study_name=h2_name,
                     direction="maximize",
                     storage=storage,
@@ -721,7 +750,27 @@ def run_all_independent(
                 else:
                     print(f"[Hop P2] Skip (already has >= {phase2_trials} COMPLETE trials).")
 
-    print("\n=== Done: all combos processed (window + hop anchored to best window) ===")
+            final_cfg = deepcopy(base_run_cfg)
+            if max_samples_override is not None:
+                final_cfg['MAX_SAMPLES'] = int(max_samples_override)
+            window_phase, window_study = preferred_study(study_w1, study_w2)
+            hop_phase, hop_study = preferred_study(study_h1, study_h2)
+            # Selection is complete before either held-out test evaluation.
+            for experiment, phase, study, ratio in (
+                ('window', window_phase, window_study, window_fixed_hop_ratio),
+                ('hop', hop_phase, hop_study,
+                 float(hop_study.best_params['hop_ratio']) if hop_study is not None else 1.0),
+            ):
+                if study is None:
+                    continue
+                pipeline = append_sliding_window(remove_window_ops(base_pipeline),
+                    L=hop_anchor_L, hop=max(1, round(hop_anchor_L * ratio)))
+                run_final_test(final_cfg, pipeline, study=study, phase=phase,
+                    family='independent', experiment=experiment, dataset=ds, learner=learner,
+                    length=hop_anchor_L, hop_ratio=ratio, results_dir=results_dir)
+            export_final_tests(results_dir, os.path.join(results_dir, 'optuna', 'final_tests', 'independent'), 'independent')
+
+    close("ALL INDEPENDENT SEARCHES COMPLETE")
     print(f"Optuna DB: {db_path}")
     print(f"Optuna exports: {os.path.join(results_dir, 'optuna')}")
 
@@ -729,7 +778,7 @@ def run_all_independent(
 if __name__ == "__main__":
     run_all_independent(
         results_dir="results",
-        db_path="results/optuna/window_hop_independent.db",
+        db_path="results/optuna/window_hop_independent_mnist_10k_v1.db",
         metric="sample_acc",
         phase1_trials=20,
         phase1_epochs=5,
@@ -737,4 +786,5 @@ if __name__ == "__main__":
         phase2_epochs=10,
         max_samples_override=None,
         window_fixed_hop_ratio=1.0,
+        datasets=["mnist_static", "mnist_rate"],
     )

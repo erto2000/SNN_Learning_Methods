@@ -169,6 +169,7 @@ class SlidingWindow(Transform):
 
     def __call__(self, x, y, info):
         T, D = x.shape
+        info = {**info, "pre_window_time_steps": T, "window_length": self.L, "window_hop": self.hop}
 
         # shorter than window -> one padded window
         if T < self.L:
@@ -190,15 +191,23 @@ class SlidingWindow(Transform):
         return X, y, info
 
 class Resample(Transform):
-    def __init__(self, orig_sr: int, new_sr: int):
+    """Resample audio, using per-sample metadata when ``orig_sr`` is omitted."""
+    def __init__(self, new_sr: int, orig_sr: Optional[int] = None):
         assert _HAS_TA, "torchaudio required for Resample."
         import torchaudio
-        self.orig_sr, self.new_sr = int(orig_sr), int(new_sr)
+        self.orig_sr = int(orig_sr) if orig_sr is not None else None
+        self.new_sr = int(new_sr)
     def __call__(self, x, y, info):
         # x:[T,1] waveform
         import torchaudio
+        source_sr = self.orig_sr if self.orig_sr is not None else info.get("sample_rate")
+        if source_sr is None:
+            raise ValueError("Resample requires orig_sr or info['sample_rate']")
+        source_sr = int(source_sr)
+        if source_sr == self.new_sr:
+            return x, y, {**info, "sample_rate": self.new_sr}
         X = x.transpose(0,1)  # [1,T]
-        X = torchaudio.functional.resample(X, self.orig_sr, self.new_sr)
+        X = torchaudio.functional.resample(X, source_sr, self.new_sr)
         return X.transpose(0,1).contiguous(), y, {**info, "sample_rate": self.new_sr}
 
 class RandomTimeCrop(Transform):
@@ -518,6 +527,7 @@ class AdaptiveSlidingWindow(Transform):
         hop = self.hop_global
 
         T, D = x.shape
+        info = {**info, "pre_window_time_steps": T, "window_length": L, "window_hop": hop}
 
         # shorter than window -> one padded window
         if T < L:

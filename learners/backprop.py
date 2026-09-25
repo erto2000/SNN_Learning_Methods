@@ -6,15 +6,18 @@ from networks.snn_core import SNNCore
 
 class BackpropLearner(BaseLearner):
     """
-    Standard backprop with a time-aggregated readout.
-    Aggregation over time: 'mean' | 'sum' | 'last' (default: 'mean').
+    Standard backprop through time with a cumulative temporal readout.
+
+    Summing the per-timestep readout trains on the evidence accumulated over
+    the sequence, matching the rate/count objective used by the other temporal
+    learners. ``mean`` and ``last`` remain available for explicit experiments.
     """
     def __init__(
         self,
         net_cfg,
         meta,
         device,
-        agg: str = "mean",
+        agg: str = "sum",
         lr: float = 1e-3,
         optimizer: str = "adam",
         adam_eps: float = 1e-8,
@@ -84,7 +87,7 @@ class BackpropLearner(BaseLearner):
         acc = (logits.argmax(1) == y).float().mean().item() * 100.0
         return {"loss": float(loss.item()), "acc": acc}
 
-    def _theory_components(self, batch: int, time_steps: int, dims: dict) -> dict:
+    def _cost_components(self, batch: int, time_steps: int, dims: dict) -> dict:
         B, T = int(batch), int(time_steps)
         A, U, V, C = dims["A"], dims["U"], dims["V"], dims["C"]
         d0_eff = dims["tilde_d0"]

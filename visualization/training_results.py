@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os, json
 from typing import Dict, Any, List
+from timeseries.splitting import split_report_fields
 
 def _safe_mkdir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
@@ -14,7 +15,8 @@ def _resolve_eval_dtype(final: Dict[str, Any]) -> Any:
     # Producer uses "dtype", older/newer output code may expect "eval_dtype"
     return final.get("eval_dtype", final.get("dtype"))
 
-def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_plots: bool = True) -> List[str]:
+def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_plots: bool = True,
+                 quiet: bool = False) -> List[str]:
     """
     Save each run as results/<RUN_ID>/summary.json and (optionally) plots.
     Returns list of saved summary.json paths.
@@ -48,7 +50,8 @@ def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_
         # 1) summary.json
         out_path = os.path.join(folder, "summary.json")
         _write_json(payload, out_path)
-        print(f"[Saved] {out_path}")
+        if not quiet:
+            print(f"Saved: {out_path}")
         saved_paths.append(out_path)
 
         final = payload.get("final", {}) or {}
@@ -57,12 +60,14 @@ def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_
 
         # 2) metrics.json (flat, handy for quick reads)
         metrics = {
+            **split_report_fields(payload.get('meta', {})),
             "run_id": run_id,
             "dataset": payload["config"].get("DATASET") if payload.get("config") else None,
             "learner": payload["config"].get("LEARNER") if payload.get("config") else None,
             "epochs": payload["config"].get("EPOCHS") if payload.get("config") else None,
             "status": payload["status"],
 
+            "evaluation_split": final.get("evaluation_split", "test"),
             "final_sample_acc": final.get("sample_acc"),
             "final_window_acc": final.get("window_acc"),
 
@@ -77,6 +82,9 @@ def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_
             "eval_dtype": _resolve_eval_dtype(final),
             "eval_int8_weights": final.get("eval_int8_weights"),
 
+            "theory_model_version": theory.get("model_version"),
+            "theory_work_scope": theory.get("work_scope"),
+            "windows_per_sample": theory.get("windows_per_sample"),
             "theory_memory_bytes": theory.get("memory", {}).get("total_bytes"),
             "theory_memory_scalars": theory.get("memory", {}).get("total_scalars"),
             "theory_compute_scalars": theory.get("compute", {}).get("total_scalars"),
@@ -91,6 +99,6 @@ def save_results(results: List[Dict[str, Any]], base_dir: str = "results", make_
                 from .plotting import save_run_plots
                 save_run_plots(folder, payload)
             except Exception as e:
-                print(f"[save_results] Plotting failed for {run_id}: {e}")
+                print(f"Plotting failed for {run_id}: {e}")
 
     return saved_paths
