@@ -1,4 +1,4 @@
-# visualization/dataset_inspector.py
+"""Build dataset inspection figures from the experiment data partitions."""
 from __future__ import annotations
 import os, json, math, random
 from copy import deepcopy
@@ -6,12 +6,12 @@ from typing import Dict, Any, List, Tuple, Optional
 
 import numpy as np
 import torch
-from torch.utils.data import Subset, DataLoader
+from torch.utils.data import Subset
 
 from timeseries.registry import get_dataloaders
-from timeseries.transforms import Compose
+from timeseries.transforms import Compose, DeterministicSpikes
 from timeseries.core import MapDataset
-from timeseries.collate import collate_pad
+from timeseries.splitting import dataset_labels
 
 from .dataset_visualization import (
     save_class_distribution, save_length_hist, save_pad_ratio,
@@ -19,7 +19,7 @@ from .dataset_visualization import (
     save_examples_mel_specs, save_examples_spike_raster, save_embeddings_scatter,
     save_pipeline_summary, save_counts_json,
     save_examples_multichannel_traces, save_examples_voxel_slices,
-    save_examples_dvs_events_raw,
+    save_examples_dvs_events_raw, save_thesis_examples,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -32,12 +32,15 @@ def _set_seed(seed: Optional[int]) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-def _maybe_fit_pipeline(transform, train_ds) -> Any:
+def _maybe_fit_pipeline(transform, train_ds, seed: int) -> Any:
     if transform is None:
         return None
     tf = deepcopy(transform)
     if not isinstance(tf, Compose):
         tf = Compose([tf])
+    for op in tf.ops:
+        if isinstance(op, DeterministicSpikes):
+            op.base_seed = int(seed)
     tf.fit(train_ds, max_samples=min(2000, len(train_ds)))
     return tf
 
@@ -48,13 +51,8 @@ def _apply_transform(ds, transform) -> torch.utils.data.Dataset:
 
 def _subset_stratified(ds, per_class: int, class_names: List[str], seed: int, max_total: Optional[int] = None) -> Subset:
     rng = random.Random(seed)
-    # collect indices per class
     buckets: Dict[int, List[int]] = {k: [] for k in range(len(class_names))}
-    for i in range(len(ds)):
-        try:
-            _, y, _ = ds[i]
-        except Exception:
-            continue
+    for i, y in enumerate(dataset_labels(ds)):
         if y in buckets:
             buckets[y].append(i)
     # sample
@@ -67,10 +65,13 @@ def _subset_stratified(ds, per_class: int, class_names: List[str], seed: int, ma
         chosen = chosen[:max_total]
     return Subset(ds, sorted(chosen))
 
-def _collect_lengths(ds) -> List[int]:
+def _collect_lengths(ds, max_items: int = 1000, *, events: bool = False) -> List[int]:
     lens = []
-    for i in range(len(ds)):
-        x, _, _ = ds[i]
+    for i in np.linspace(0, len(ds) - 1, min(max_items, len(ds)), dtype=int):
+        x, _, info = ds[int(i)]
+        if events:
+            lens.append(int(info["events"].shape[0]))
+            continue
         if x.dim() == 2:  # [T,D]
             lens.append(int(x.shape[0]))
         elif x.dim() == 3:  # [S,T,D]
@@ -81,8 +82,7 @@ def _collect_lengths(ds) -> List[int]:
 
 def _class_counts(ds, n_classes: int) -> List[int]:
     counts = [0]*n_classes
-    for i in range(len(ds)):
-        _, y, _ = ds[i]
+    for y in dataset_labels(ds):
         if 0 <= y < n_classes:
             counts[y]+=1
     return counts
@@ -197,7 +197,7 @@ def _summarize_pipeline(transform) -> Dict[str, Any]:
                 fit_summary[fk] = {
                     "shape": list(t.shape),
                     "mean": float(t.mean().item()),
-                    "std":  float(t.std().item()),
+                    "std":  float(t.std(unbiased=False).item()),
                 }
 
         ops.append({"op": name, "params": params, "fitted": fit_summary})
@@ -242,6 +242,7 @@ def build_dataset_viz(
     _ensure_dir(os.path.join(out_dir, "examples_raw"))
     _ensure_dir(os.path.join(out_dir, "examples_post"))
     _ensure_dir(os.path.join(out_dir, "embeddings"))
+    _ensure_dir(os.path.join(out_dir, "thesis"))
 
     # ── 1) Raw datasets
     loaders, info = get_dataloaders(DATASET, root=DATA_ROOT, max_samples=MAX_SAMPLES,
@@ -250,7 +251,7 @@ def build_dataset_viz(
     class_names = info['class_names']
 
     # ── 2) Fit/apply pipeline (if provided)
-    tf = _maybe_fit_pipeline(TRANSFORM, split_map['train'])
+    tf = _maybe_fit_pipeline(TRANSFORM, split_map['train'], SEED)
     split_post = {s: _apply_transform(ds, tf) for s, ds in split_map.items()} if tf is not None else {}
 
     # ── 3) Corpus stats + per-split figures (RAW)
@@ -276,9 +277,10 @@ def build_dataset_viz(
         save_counts_json(counts, class_names, os.path.join(out_dir, "corpus", f"class_counts_{split}.json"))
 
         # length histogram (sequence length in time)
-        lens = _collect_lengths(ds_raw)
+        lens = _collect_lengths(ds_raw, events=(DATASET == "dvs_gesture"))
         figs[f"length_hist_{split}"] = save_length_hist(
-            lens, os.path.join(out_dir, "corpus", f"length_hist_{split}.png")
+            lens, os.path.join(out_dir, "corpus", f"length_hist_{split}.png"),
+            events=(DATASET == "dvs_gesture")
         )
 
     # OVERALL across requested SPLITS only
@@ -346,10 +348,7 @@ def build_dataset_viz(
         # POST examples when pipeline exists
         if tf is not None:
             ds_post = split_post[split]
-            selp = _subset_stratified(
-                ds_post, per_class=selection["per_class_examples"],
-                class_names=class_names, seed=SEED, max_total=64
-            )
+            selp = Subset(ds_post, sel.indices)
             selection[f"indices_post_{split}"] = list(selp.indices) if hasattr(selp, "indices") else []
 
             if DATASET == "har":
@@ -362,9 +361,14 @@ def build_dataset_viz(
                     selp, class_names, os.path.join(out_dir, "examples_post", f"mel_specs_{split}.png")
                 )
             elif DATASET == "mnist":
-                figs[f"mnist_time_{split}"] = save_examples_spike_raster(
-                    selp, class_names, os.path.join(out_dir, "examples_post", f"mnist_time_{split}.png")
-                )
+                if ID == "mnist-static":
+                    figs[f"mnist_static_{split}"] = save_examples_mnist_grid(
+                        selp, class_names,
+                        os.path.join(out_dir, "examples_post", f"mnist_static_{split}.png"))
+                else:
+                    figs[f"mnist_spikes_{split}"] = save_examples_spike_raster(
+                        selp, class_names,
+                        os.path.join(out_dir, "examples_post", f"mnist_spikes_{split}.png"))
             elif DATASET in ("esc50", "urban8k", "large_scale_audio"):
                 figs[f"mel_specs_{split}"] = save_examples_mel_specs(
                     selp, class_names, os.path.join(out_dir, "examples_post", f"mel_specs_{split}.png")
@@ -385,6 +389,40 @@ def build_dataset_viz(
                     selp, class_names, os.path.join(out_dir, "examples_post", f"dvs_voxels_{split}.png"),
                     H=128, W=128, bins_hint=200
                 )
+
+    # Thesis figure: two distinct training classes, with each raw record
+    # matched to the exact record passed through the experiment pipeline.
+    train_labels = dataset_labels(split_map["train"])
+    present = sorted(set(train_labels))
+    if len(present) < 2:
+        raise ValueError(f"{ID} needs two training classes for its example figure")
+    example_classes = (present[0], present[-1])
+    example_indices = []
+    for label in example_classes:
+        matching = [i for i, value in enumerate(train_labels) if value == label]
+        example_indices.append(matching[len(matching) // 2])
+    thesis_path = os.path.join(out_dir, "thesis", "representative_examples.png")
+    figs["thesis_examples"] = save_thesis_examples(
+        split_map["train"], split_post["train"], example_indices,
+        class_names, ID, thesis_path)
+    selection["thesis_examples"] = [
+        {"train_index": index, "class": class_names[label]}
+        for index, label in zip(example_indices, example_classes)]
+    captions = {
+        "har": "Three channels from each activity sequence before and after train-fitted Z-score normalization.",
+        "pamap2": "Three channels from each wearable-sensor sequence before and after train-fitted Z-score normalization.",
+        "mitbih": "ECG beats before and after train-fitted Z-score normalization.",
+        "mnist-static": "A handwritten digit and the identical image repeated at three model time steps.",
+        "mnist-rate": "A handwritten digit and its deterministic rate-coded pixel spikes over time.",
+        "sc": "Speech waveform and its normalized log-mel representation.",
+        "esc50": "Environmental-sound waveform and its normalized log-mel representation.",
+        "urban8k": "Urban-sound waveform and its normalized log-mel representation.",
+        "large-scale-audio": "Audio waveform and its normalized log-mel representation.",
+        "dvs": "Raw event locations, colored by polarity, and the most active positive voxel frame after downsampling and normalization.",
+    }
+    with open(os.path.join(out_dir, "thesis", "caption.txt"), "w", encoding="utf-8") as f:
+        f.write(captions[ID] + " The two columns show the same illustrative "
+                "training records.\n")
 
     # ── 6) Embeddings (post only)
     if tf is not None:
@@ -417,6 +455,8 @@ def build_dataset_viz(
         split_sizes=split_sizes,
         overall_total=int(sum(split_sizes.get(s, 0) for s in SPLITS)),
         available_samples=info['num_samples'],
+        length_hist_max_samples=1000,
+        padding_probe_max_samples=64,
         data_split=info['data_split'],
         split_counts=info['split_counts'],
         split_percentages=info['split_percentages'],

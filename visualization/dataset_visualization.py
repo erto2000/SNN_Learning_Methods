@@ -1,4 +1,4 @@
-# visualization/dataset_vizualization.py
+"""Plotting helpers for the dataset inspection report."""
 from __future__ import annotations
 from typing import List, Dict, Any, Optional
 import os
@@ -26,14 +26,15 @@ def save_class_distribution(counts: List[int], class_names: List[str], path: str
     fig.tight_layout()
     fig.savefig(path); plt.close(fig); return path
 
-def save_length_hist(lengths: List[int], path: str) -> str:
+def save_length_hist(lengths: List[int], path: str, *, events: bool = False) -> str:
     if not lengths:
         return ""
     fig, ax = plt.subplots(figsize=(6,4), dpi=140)
     ax.hist(lengths, bins=30, color="#7f7f7f")
-    ax.set_xlabel("T (time steps per sample)")
+    ax.set_xlabel("Events per sample" if events else "Time steps per sample")
     ax.set_ylabel("Count")
-    ax.set_title("Sequence length histogram (raw)")
+    ax.set_title("Raw event counts (sampled)" if events
+                 else "Raw sequence lengths (sampled)")
     ax.grid(True, alpha=0.25)
     fig.tight_layout()
     fig.savefig(path); plt.close(fig); return path
@@ -182,7 +183,7 @@ def save_embeddings_scatter(Z: np.ndarray, y: np.ndarray, class_names: List[str]
 
 def save_pipeline_summary(obj: Dict[str, Any], path: str) -> str:
     with open(path, "w", encoding="utf-8") as f:
-        import json; json.dump(obj, f, indent=2)
+        json.dump(obj, f, indent=2, allow_nan=False)
     return path
 
 def save_counts_json(counts, class_names, json_path):
@@ -227,15 +228,6 @@ def save_examples_voxel_slices(sub: Subset, class_names: List[str], path: str, H
     """
     For DVS-Gesture after EventToVoxel(+optional SlidingWindow): input can be
     [T, H*W*(1 or 2)] or [S, T, H*W*(1 or 2)]. We render a time slice (sum over polarity).
-    """
-    rows, cols = 3, 4
-    fig, axes = plt.subplots(rows, cols, figsize=(12, 7), dpi=140)
-    axes = axes.flatten()
-    i = 0
-    """
-    For DVS-Gesture after EventToVoxel(+optional SlidingWindow):
-    input can be [T, H*W*(1 or 2)] or [S, T, H*W*(1 or 2)].
-    Renders a single time slice (sum over polarity).
     """
     rows, cols = 3, 4
     fig, axes = plt.subplots(rows, cols, figsize=(12, 7), dpi=140)
@@ -317,3 +309,130 @@ def save_examples_dvs_events_raw(sub: Subset, class_names: List[str], path: str,
         ax2.set_ylabel("x")
     for k in range(i, len(axes)): axes[k].axis("off")
     fig.tight_layout(); fig.savefig(path); plt.close(fig); return path
+
+
+def save_thesis_examples(raw_ds: Dataset, post_ds: Dataset, indices: List[int],
+                         class_names: List[str], dataset_id: str, path: str) -> str:
+    """Show the same two training records before and after preprocessing."""
+    titles = {
+        "har": "HAR activity signals", "mnist-static": "MNIST static encoding",
+        "mnist-rate": "MNIST rate encoding", "sc": "Speech Commands audio",
+        "esc50": "ESC-50 environmental audio", "urban8k": "UrbanSound8K audio",
+        "pamap2": "PAMAP2 activity signals", "mitbih": "MIT-BIH ECG",
+        "dvs": "DVS128 Gesture events", "large-scale-audio": "Large-scale audio",
+    }
+    audio = {"sc", "esc50", "urban8k", "large-scale-audio"}
+    sensors = {"har", "pamap2", "mitbih"}
+    if len(indices) != 2:
+        raise ValueError("Thesis comparison requires two training indices")
+
+    fig, axes = plt.subplots(2, 2, figsize=(11.5, 6.6), layout="constrained")
+    mel_image = None
+    for row, index in enumerate(indices):
+        raw, raw_y, raw_info = raw_ds[index]
+        post, post_y, post_info = post_ds[index]
+        if int(raw_y) != int(post_y):
+            raise ValueError(f"Preprocessing changed the label at index {index}")
+        left, right = axes[row]
+        label = class_names[int(raw_y)]
+        left.set_title(f"Raw · {label}", loc="left", fontsize=10)
+        right.set_title(f"Processed · {label}", loc="left", fontsize=10)
+        for ax in (left, right):
+            ax.spines[["top", "right"]].set_visible(False)
+
+        if dataset_id in sensors:
+            for ax, x, processed in ((left, raw, False), (right, post, True)):
+                values = x.detach().cpu().numpy()
+                if values.ndim != 2:
+                    raise ValueError(f"Expected [time, channels] for {dataset_id}")
+                channels = min(1 if dataset_id == "mitbih" else 3, values.shape[1])
+                rate = 360 if dataset_id == "mitbih" else None
+                time = np.arange(len(values)) / rate if rate else np.arange(len(values))
+                for channel in range(channels):
+                    ax.plot(time, values[:, channel], lw=1.1,
+                            color=COLORS[channel], label=f"channel {channel + 1}")
+                ax.set_xlabel("Time (s)" if rate else "Time step")
+                ax.set_ylabel("Z-score" if processed else "Recorded value")
+                ax.grid(alpha=.2)
+                if row == 0 and channels > 1:
+                    ax.legend(loc="upper right", fontsize=7, frameon=False)
+        elif dataset_id in audio:
+            waveform = raw.squeeze(-1).detach().cpu().numpy()
+            sr = int(raw_info["sample_rate"])
+            stride = max(1, len(waveform) // 4000)
+            left.plot(np.arange(0, len(waveform), stride) / sr,
+                      waveform[::stride], color=COLORS[0], lw=.7)
+            left.set_xlabel("Time (s)")
+            left.set_ylabel("Waveform amplitude")
+            left.grid(alpha=.2)
+            mel = post.detach().cpu().numpy()
+            if mel.ndim != 2:
+                raise ValueError("Expected [frames, mel bands] after audio preprocessing")
+            mel_image = right.imshow(mel.T, aspect="auto", origin="lower",
+                                     cmap="magma",
+                                     extent=(0, len(mel), 0, mel.shape[1]),
+                                     vmin=-3, vmax=3)
+            right.set_xlabel("Log-mel frame (10 ms hop)")
+            right.set_ylabel("Mel band")
+        elif dataset_id.startswith("mnist"):
+            image = raw[0].reshape(28, 28).detach().cpu().numpy()
+            left.imshow(image, cmap="gray", vmin=0, vmax=1)
+            left.set_xlabel("Pixel column")
+            left.set_ylabel("Pixel row")
+            if dataset_id == "mnist-static":
+                steps = [0, len(post) // 2, len(post) - 1]
+                frames = [post[t].reshape(28, 28).detach().cpu().numpy()
+                          for t in steps]
+                right.imshow(np.concatenate(frames, axis=1), cmap="gray",
+                             vmin=0, vmax=1)
+                right.set_xticks([14, 42, 70], [f"t={t + 1}" for t in steps])
+                right.set_yticks([])
+                right.set_xlabel("Identical image repeated over time")
+            else:
+                spikes = post.detach().cpu().numpy()
+                steps, pixels = np.nonzero(spikes > .5)
+                right.scatter(steps, pixels, s=.8, color=COLORS[0], rasterized=True)
+                right.set_xlim(-.5, len(spikes) - .5)
+                right.set_ylim(0, spikes.shape[1])
+                right.set_xlabel("Time step")
+                right.set_ylabel("Pixel index with spike")
+        elif dataset_id == "dvs":
+            left.set_title(f"Raw events (all times) · {label}", loc="left", fontsize=10)
+            right.set_title(f"Voxel frame (peak activity) · {label}",
+                            loc="left", fontsize=10)
+            events = raw_info["events"].detach().cpu().numpy()
+            stride = max(1, len(events) // 8000)
+            shown = events[::stride]
+            left.scatter(shown[:, 1], shown[:, 2], s=.35, alpha=.25,
+                         c=np.where(shown[:, 3] > .5, COLORS[3], COLORS[0]),
+                         rasterized=True)
+            left.set_xlim(0, int(raw_info.get("W", 128)))
+            left.set_ylim(int(raw_info.get("H", 128)), 0)
+            left.set_aspect("equal")
+            left.set_xlabel("Sensor x (pixel)")
+            left.set_ylabel("Sensor y (pixel)")
+            if row == 0:
+                left.scatter([], [], color=COLORS[3], label="positive polarity")
+                left.scatter([], [], color=COLORS[0], label="negative polarity")
+                left.legend(loc="upper right", frameon=False, fontsize=7)
+            H, W = int(post_info["H"]), int(post_info["W"])
+            voxel = post.detach().cpu().numpy().reshape(len(post), H, W, -1)
+            positive = np.maximum(voxel, 0)
+            peak = int(np.argmax(positive.sum(axis=(1, 2, 3))))
+            frame = positive[peak].sum(axis=-1)
+            right.imshow(frame, origin="upper", cmap="magma", vmin=0,
+                         vmax=max(1e-6, float(np.percentile(frame, 99.5))))
+            right.set_xlabel(f"Voxel x ({W} pixels); peak bin {peak + 1}/{len(voxel)}")
+            right.set_ylabel(f"Voxel y ({H} pixels)")
+        else:
+            raise ValueError(f"No thesis example renderer for {dataset_id}")
+
+    if mel_image is not None:
+        fig.colorbar(mel_image, ax=axes[:, 1], shrink=.72, pad=.02,
+                     label="Normalized log-mel value")
+    fig.suptitle(f"{titles[dataset_id]}: input and model representation",
+                 fontsize=13, weight="bold")
+    fig.savefig(path, dpi=220, bbox_inches="tight")
+    fig.savefig(os.path.splitext(path)[0] + ".svg", bbox_inches="tight")
+    plt.close(fig)
+    return path
