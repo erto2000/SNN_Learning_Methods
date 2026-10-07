@@ -154,41 +154,66 @@ class RepeatStatic(Transform):
         return x.repeat(self.T, 1), y, info
 
 # ---------- Segmentation ----------
-class SlidingWindow(Transform):
-    """
-    [T,D] -> [S, L, D] with stride 'hop'.
 
-    Behavior:
-      - if T < L: return exactly one padded window
-      - if T >= L: keep only FULL windows that fit completely
-                    (no trailing partial padded window)
+TAIL_RULE = "partial_last_window_v1"
+
+
+def window_spans(length: int, window: int, hop: int) -> list[tuple[int, int]]:
+    """Hop-spaced [start, stop) spans, stopping when a window reaches the end.
+
+    The final span is truncated, never shifted backwards or extended by padding.
+    Overlapping schedules stop at the first span reaching the end, avoiding
+    redundant suffix-only windows. Hops larger than the window retain interior
+    gaps; if the next grid start is outside the sequence, a terminal segment
+    covers the remaining end, bounded by the maximum window length.
+    """
+    length, window, hop = int(length), int(window), int(hop)
+    if min(length, window, hop) <= 0:
+        raise ValueError("Sequence length, window length and hop must be positive")
+    spans = []
+    for start in range(0, length, hop):
+        stop = min(start + window, length)
+        spans.append((start, stop))
+        if stop == length:
+            break
+    if spans[-1][1] < length:
+        # A hop larger than the window can jump beyond the sequence end.
+        # Keep its terminal remainder too, bounded by the maximum window size.
+        start = max(spans[-1][1], length-window)
+        spans.append((start, length))
+    return spans
+
+
+def _segment_windows(x, y, info, length, hop):
+    spans = window_spans(x.shape[0], length, hop)
+    lengths = [stop - start for start, stop in spans]
+    # Rectangular storage only. Collation records the valid lengths, and the
+    # training/evaluation iterator removes this padding before learner calls.
+    out = x.new_zeros((len(spans), max(lengths), x.shape[1]))
+    for i, (start, stop) in enumerate(spans):
+        out[i, :stop-start] = x[start:stop]
+    info = {**info, "pre_window_time_steps": int(x.shape[0]),
+            "window_length": int(length), "window_hop": int(hop),
+            "window_starts": [start for start, _ in spans],
+            "window_lengths": lengths, "window_tail_rule": TAIL_RULE}
+    return out, y, info
+
+
+class SlidingWindow(Transform):
+    """[T,D] -> window storage plus actual lengths; the last window is partial.
+
+    Starts follow the hop grid. Stop after the first window reaching the end.
+    For T < L, return one T-step window. Padding used to stack unequal windows
+    is storage only and is never presented to the learner as extra time steps.
     """
     def __init__(self, length: int, hop: Optional[int] = None):
         self.L = int(length)
-        self.hop = int(hop) if hop and hop > 0 else int(length)
+        self.hop = int(hop) if hop is not None else self.L
+        if min(self.L, self.hop) <= 0:
+            raise ValueError("Window length and hop must be positive")
 
     def __call__(self, x, y, info):
-        T, D = x.shape
-        info = {**info, "pre_window_time_steps": T, "window_length": self.L, "window_hop": self.hop}
-
-        # shorter than window -> one padded window
-        if T < self.L:
-            out = x.new_zeros((1, self.L, D))
-            out[0, :T] = x
-            return out, y, info
-
-        # full windows only
-        starts = range(0, T - self.L + 1, self.hop)
-        segs = [x[s:s + self.L] for s in starts]
-
-        # safety fallback (should not happen when T >= L)
-        if not segs:
-            out = x.new_zeros((1, self.L, D))
-            out[0, :min(T, self.L)] = x[:self.L]
-            return out, y, info
-
-        X = torch.stack(segs, dim=0)
-        return X, y, info
+        return _segment_windows(x, y, info, self.L, self.hop)
 
 class Resample(Transform):
     """Resample audio, using per-sample metadata when ``orig_sr`` is omitted."""
@@ -526,27 +551,5 @@ class AdaptiveSlidingWindow(Transform):
         L = self.L_global
         hop = self.hop_global
 
-        T, D = x.shape
-        info = {**info, "pre_window_time_steps": T, "window_length": L, "window_hop": hop}
-
-        # shorter than window -> one padded window
-        if T < L:
-            out = x.new_zeros((1, L, D))
-            out[0, :T] = x
-            info = {**info, "adaptive_L": L, "adaptive_hop": hop}
-            return out, y, info
-
-        # full windows only
-        starts = range(0, T - L + 1, hop)
-        segs = [x[s:s + L] for s in starts]
-
-        # safety fallback
-        if not segs:
-            out = x.new_zeros((1, L, D))
-            out[0, :min(T, L)] = x[:L]
-            info = {**info, "adaptive_L": L, "adaptive_hop": hop}
-            return out, y, info
-
-        X = torch.stack(segs, dim=0)
-        info = {**info, "adaptive_L": L, "adaptive_hop": hop}
-        return X, y, info
+        X, y, info = _segment_windows(x, y, info, L, hop)
+        return X, y, {**info, "adaptive_L": L, "adaptive_hop": hop}

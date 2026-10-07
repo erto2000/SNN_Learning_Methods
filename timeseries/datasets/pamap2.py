@@ -22,9 +22,11 @@ _IGNORE_LABEL = 0  # "other"/null label in raw stream
 
 # ----- Column layout (per README): keep acc16g(3)+gyro(3)+mag(3) for hand/chest/ankle = 27 dims -----
 def _imu_block_indices(base: int):
+    # Zero-based offsets: temperature=0, acc16g=1:4, acc6g=4:7,
+    # gyro=7:10, mag=10:13, invalid orientation=13:17 (UCI readme).
     acc16 = [base+1, base+2, base+3]
-    gyro  = [base+10, base+11, base+12]
-    mag   = [base+13, base+14, base+15]
+    gyro  = [base+7, base+8, base+9]
+    mag   = [base+10, base+11, base+12]
     return acc16 + gyro + mag
 
 # After time(0), act(1), hr(2) => hand at 3, chest at 20, ankle at 37
@@ -34,6 +36,13 @@ _PAMAP_KEEP_COLS = (
     + _imu_block_indices(_CHEST_BASE)
     + _imu_block_indices(_ANKLE_BASE)
 )  # 27 dims
+
+PAMAP2_CHANNEL_NAMES = [
+    f"{location}_{sensor}_{axis}"
+    for location in ("hand", "chest", "ankle")
+    for sensor in ("acc16g", "gyro", "mag")
+    for axis in ("x", "y", "z")
+]
 
 # --------------------------- Download / Extract utils ---------------------------
 
@@ -211,6 +220,8 @@ class PAMAP2Raw(Dataset):
                     t = torch.from_numpy(seg).to(torch.float32)  # [T,27]
                     info = {
                         "id": len(self.samples),
+                        "channel_names": list(PAMAP2_CHANNEL_NAMES),
+                        "sample_rate": 100,
                         "subject": sid,
                         "length": int(t.shape[0]),
                         "activity_raw": y_raw
@@ -231,6 +242,8 @@ class PAMAP2Raw(Dataset):
                         t = torch.from_numpy(chunk).to(torch.float32)  # [T,27]
                         info = {
                             "id": len(self.samples),
+                            "channel_names": list(PAMAP2_CHANNEL_NAMES),
+                            "sample_rate": 100,
                             "subject": sid,
                             "length": int(t.shape[0]),
                             "activity_raw": y_raw,

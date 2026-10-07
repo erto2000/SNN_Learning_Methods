@@ -53,7 +53,8 @@ class HARDatasetRaw(Dataset):
     def __getitem__(self, i):
         x = self.X[i]            # [T,C]
         y = int(self.y[i])
-        info = {"id": i, "length": x.shape[0], "channels": x.shape[1]}
+        info = {"id": i, "length": x.shape[0], "channels": x.shape[1],
+                "channel_names": list(_HAR_CHS), "sample_rate": 50}
         return x, y, info
 
 def build_har_raw(root: str,

@@ -1,62 +1,67 @@
-from typing import Iterator, Tuple, Optional
 import torch
 import torch.nn.functional as F
 
+
+def _batch_pieces(X, y, extra, device, chunk_segments, dtype):
+    target_dtype = dtype or X.dtype
+    B = X.shape[0]
+    if X.dim() == 3:
+        # Preserve the existing full-sequence batching convention.
+        yield (X.to(device=device, dtype=target_dtype), y.to(device),
+               torch.arange(B, device=device, dtype=torch.long), B)
+        return
+    if X.dim() != 4:
+        raise ValueError(f"Unexpected X.dim()={X.dim()}")
+    seg_mask = extra.get("seg_mask")
+    if seg_mask is None:
+        seg_mask = torch.ones(X.shape[:2], dtype=torch.bool)
+    b_idx, s_idx = torch.where(seg_mask)
+    time_mask = extra.get("time_mask")
+    lengths = (time_mask[b_idx, s_idx].sum(dim=1) if time_mask is not None
+               else torch.full_like(b_idx, X.shape[2]))
+    # Equal-length groups ensure neither forward dynamics nor gradients see
+    # padded time steps. Each window keeps its original sample ID for voting.
+    for length in sorted(lengths.unique().tolist(), reverse=True):
+        if length <= 0:
+            raise ValueError("A valid window must contain at least one time step")
+        positions = torch.where(lengths == length)[0]
+        chunk = B if chunk_segments else max(1, len(positions))
+        for offset in range(0, len(positions), chunk):
+            take = positions[offset:offset+chunk]
+            bi, si = b_idx[take], s_idx[take]
+            yield (X[bi, si, :length].to(device=device, dtype=target_dtype),
+                   y[bi].to(device), bi.to(device), B)
+
+
 @torch.no_grad()
-def iter_pieces(
-        loader,
-        device,
-        *,
-        chunk_segments: bool = False,
-        dtype: Optional[torch.dtype] = None,
-) -> Iterator[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]:
-    """
-    Yields:
-      Xp:[Nseg,T,D], yp:[Nseg], sample_ids:[Nseg], B:int (original batch size)
+def iter_piece_batches(loader, device, *, chunk_segments=False, dtype=None, source_length_profile=None):
+    """Yield one iterator of actual-length pieces per original sample batch.
 
-    Default (chunk_segments=False): old behavior (yields all windows at once).
-    Training (chunk_segments=True): windows are yielded in chunks of size B.
-
-    dtype: if not None, cast X to this dtype.
+    Keep this boundary during evaluation so all windows, including partial
+    tails, contribute to one sample-level vote rather than separate votes.
     """
     for X, y, extra in loader:
-        target_dtype = dtype or X.dtype
+        if source_length_profile is not None:
+            infos = extra.get("infos", [{} for _ in range(len(y))])
+            for index, info in enumerate(infos):
+                length = info.get("pre_window_time_steps")
+                if length is None:
+                    mask = extra.get("time_mask")
+                    length = int(mask[index].sum()) if X.dim() == 3 and mask is not None else X.shape[-2]
+                source_length_profile[int(length)] += 1
+        yield _batch_pieces(X, y, extra, device, chunk_segments, dtype)
 
-        # ----- No windowing: [B,T,D] -----
-        if X.dim() == 3:
-            B = X.shape[0]
-            Xp = X.to(device=device, dtype=target_dtype)
-            yp = y.to(device)
-            sample_ids = torch.arange(B, device=device, dtype=torch.long)
-            yield Xp, yp, sample_ids, B
-            continue
 
-        # ----- Windowed: [B,S,T,D] -----
-        if X.dim() == 4:
-            seg_mask = extra.get("seg_mask")
-            if seg_mask is None:
-                seg_mask = torch.ones(X.shape[:2], dtype=torch.bool)
+@torch.no_grad()
+def iter_pieces(loader, device, *, chunk_segments=False, dtype=None, source_length_profile=None):
+    """Yield Xp:[N,T,D], labels, original sample IDs and original batch size.
 
-            B, S, T, D = X.shape
-            b_idx, s_idx = torch.where(seg_mask)
-            if b_idx.numel() == 0:
-                continue
-
-            Xf = X[b_idx, s_idx].to(device=device, dtype=target_dtype)  # [Nseg,T,D]
-            yf = y[b_idx].to(device)                                    # [Nseg]
-            sid = b_idx.to(device)                                      # [Nseg]
-
-            if not chunk_segments:
-                yield Xf, yf, sid, B
-            else:
-                # chunk windows so each step sees <= B windows
-                Nseg = Xf.shape[0]
-                for i in range(0, Nseg, B):
-                    j = min(i + B, Nseg)
-                    yield Xf[i:j], yf[i:j], sid[i:j], B
-            continue
-
-        raise ValueError(f"Unexpected X.dim()={X.dim()}")
+    Windowed pieces are grouped by actual temporal length. Training chunks
+    contain at most B windows. Storage padding never reaches a learner.
+    """
+    for pieces in iter_piece_batches(loader, device, chunk_segments=chunk_segments, dtype=dtype,
+                                     source_length_profile=source_length_profile):
+        yield from pieces
 
 
 @torch.no_grad()

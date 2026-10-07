@@ -49,7 +49,11 @@ def collate_pad(batch: List[Tuple[torch.Tensor, int, Dict[str, Any]]]):
             S, T, _ = x.shape
             X[b, :S, :T] = x
             seg_mask[b, :S] = True
-            time_mask[b, :S, :T] = True
+            lengths = infos[b].get("window_lengths", [T] * S)
+            if len(lengths) != S or any(int(t) < 1 or int(t) > T for t in lengths):
+                raise ValueError("Invalid per-window lengths in sample metadata")
+            for segment, length in enumerate(lengths):
+                time_mask[b, segment, :int(length)] = True
         return (X, y, {"seg_mask": seg_mask, "time_mask": time_mask, "infos": infos})
 
     else:

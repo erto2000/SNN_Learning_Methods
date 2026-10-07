@@ -219,6 +219,7 @@ def build_dataset_viz(
     tag: str = "dataset_viz",
     DATASET_KWARGS: Optional[Dict[str, Any]] = None,
     DATA_SPLIT: Optional[Dict[str, float]] = None,
+    INCLUDE_COMBINED_EXAMPLE: bool = False,
 ) -> Dict[str, Any]:
     """
     Orchestrates a single dataset visualization job.
@@ -231,7 +232,8 @@ def build_dataset_viz(
       - selection indices + summary.json
 
     Returns:
-      dict(out_dir, figs, summary_path, pipeline_ops)
+      dict(out_dir, figs, summary_path, pipeline_ops), plus a single cloned
+      raw/processed training record when INCLUDE_COMBINED_EXAMPLE is True.
     """
     _set_seed(SEED)
 
@@ -409,8 +411,8 @@ def build_dataset_viz(
         {"train_index": index, "class": class_names[label]}
         for index, label in zip(example_indices, example_classes)]
     captions = {
-        "har": "Three channels from each activity sequence before and after train-fitted Z-score normalization.",
-        "pamap2": "Three channels from each wearable-sensor sequence before and after train-fitted Z-score normalization.",
+        "har": "All nine channels (body acceleration, body gyroscope, total acceleration; x/y/z) at 50 Hz, before and after train-fitted Z-score normalization. Raw acceleration is in g and angular velocity in rad/s.",
+        "pamap2": "All 27 channels (16g acceleration, gyroscope, magnetometer; x/y/z at hand, chest, ankle) at 100 Hz, before and after train-fitted Z-score normalization. Raw units are m/s², rad/s, and µT, respectively.",
         "mitbih": "ECG beats before and after train-fitted Z-score normalization.",
         "mnist-static": "A handwritten digit and the identical image repeated at three model time steps.",
         "mnist-rate": "A handwritten digit and its deterministic rate-coded pixel spikes over time.",
@@ -418,7 +420,7 @@ def build_dataset_viz(
         "esc50": "Environmental-sound waveform and its normalized log-mel representation.",
         "urban8k": "Urban-sound waveform and its normalized log-mel representation.",
         "large-scale-audio": "Audio waveform and its normalized log-mel representation.",
-        "dvs": "Raw event locations, colored by polarity, and the most active positive voxel frame after downsampling and normalization.",
+        "dvs": "Raw event locations, colored by polarity, and three evenly spaced voxel frames after downsampling and normalization show the gesture evolving over time. Frame timestamps mark bin centers in seconds from the first event. All three frames share a brightness scale; positive normalized activity is summed over both polarities for display.",
     }
     with open(os.path.join(out_dir, "thesis", "caption.txt"), "w", encoding="utf-8") as f:
         f.write(captions[ID] + " The two columns show the same illustrative "
@@ -465,4 +467,18 @@ def build_dataset_viz(
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
-    return dict(out_dir=out_dir, figs=figs, summary_path=summary_path, pipeline_ops=pipe_json)
+    artifacts = dict(out_dir=out_dir, figs=figs, summary_path=summary_path, pipeline_ops=pipe_json)
+    if INCLUDE_COMBINED_EXAMPLE:
+        index = example_indices[0]
+        # Retain only the plotted record, not a view holding an entire dataset.
+        def snapshot(item):
+            x, y, metadata = item
+            metadata = {key: value.detach().cpu().clone() if isinstance(value, torch.Tensor)
+                        else deepcopy(value) for key, value in metadata.items()}
+            return x.detach().cpu().clone(), int(y), metadata
+        artifacts["combined_example"] = dict(
+            dataset_id=ID, train_index=index,
+            label=class_names[example_classes[0]],
+            raw=snapshot(split_map["train"][index]),
+            post=snapshot(split_post["train"][index]))
+    return artifacts

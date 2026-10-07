@@ -3,7 +3,7 @@ import torch
 from typing import Dict, Any, Tuple, Optional
 from datetime import datetime
 from networks.specs import NetConfig, LayerSpec
-from utils.segments import iter_pieces, majority_vote
+from utils.segments import iter_pieces, iter_piece_batches, majority_vote
 from networks.int8_linear import convert_linear_to_int8
 from utils.energy import compute_energy_breakdown
 
@@ -115,53 +115,48 @@ def eval_epoch(
     total_activity_samples = 0
 
     try:
-        for Xw, yw, sample_ids, B in iter_pieces(test_loader, device, dtype=runtime_dtype):
-            logits, activity = learner.forward(Xw, return_activity=True)
+        for pieces in iter_piece_batches(test_loader, device, chunk_segments=True, dtype=runtime_dtype):
+            batch_preds, batch_ids = [], []
+            partial_preds = {}
+            gt_per_sample = None
+            for Xw, yw, sample_ids, B in pieces:
+                logits, activity = learner.forward(Xw, return_activity=True)
+                preds_w = logits.argmax(dim=-1)
+                correct_windows += (preds_w == yw).sum().item()
+                total_windows += yw.numel()
+                batch_preds.append(preds_w)
+                batch_ids.append(sample_ids)
+                if gt_per_sample is None:
+                    gt_per_sample = torch.full((B,), -1, dtype=torch.long, device=yw.device)
+                gt_per_sample.index_copy_(0, sample_ids, yw)
 
-            preds_w = logits.argmax(dim=-1)
-            correct_windows += (preds_w == yw).sum().item()
-            total_windows += yw.numel()
+                for key, T_eval in _time_eval_specs(Xw.shape[1], time_eval_fracs, time_eval_include_t1):
+                    logits_t = (logits if T_eval == Xw.shape[1] else
+                                learner.forward(Xw[:, :T_eval, :], return_activity=False))
+                    preds_t = logits_t.argmax(dim=-1)
+                    partial_preds.setdefault(key, []).append(preds_t)
+                    time_eval_window_correct[key] = time_eval_window_correct.get(key, 0) + (preds_t == yw).sum().item()
+                    time_eval_window_total[key] = time_eval_window_total.get(key, 0) + yw.numel()
 
-            gt_per_sample = torch.empty(B, dtype=torch.long, device=yw.device)
-            gt_per_sample[:] = -1
-            gt_per_sample.index_copy_(0, sample_ids, yw)
-            gt_per_sample = torch.where(
-                gt_per_sample < 0,
-                torch.zeros_like(gt_per_sample),
-                gt_per_sample,
-            )
+                total_spike_count += float(activity["total_spike_count"])
+                total_synops += float(activity["synaptic_operations"])
+                total_neuron_slots += float(activity["num_neuron_slots"])
+                total_neuron_updates += float(activity["neuron_updates"])
+                total_input_mac_ops += float(activity["input_mac_ops"])
+                total_activity_samples += int(activity["num_samples"])
 
-            preds_sample = majority_vote(preds_w, sample_ids, num_classes=n_classes, B=B)
-
+            if not batch_preds:
+                continue
+            if (gt_per_sample < 0).any():
+                raise ValueError("Evaluation batch contains a sample with no valid windows")
+            ids = torch.cat(batch_ids)
+            preds_sample = majority_vote(torch.cat(batch_preds), ids, num_classes=n_classes, B=B)
             sample_correct += (preds_sample == gt_per_sample).sum().item()
             sample_total += B
-
-            for key, T_eval in _time_eval_specs(Xw.shape[1], time_eval_fracs, time_eval_include_t1):
-                if T_eval == Xw.shape[1]:
-                    logits_t = logits
-                else:
-                    logits_t = learner.forward(Xw[:, :T_eval, :], return_activity=False)
-
-                preds_w_t = logits_t.argmax(dim=-1)
-
-                time_eval_window_correct[key] = time_eval_window_correct.get(key, 0) + (
-                    preds_w_t == yw
-                ).sum().item()
-                time_eval_window_total[key] = time_eval_window_total.get(key, 0) + yw.numel()
-
-                preds_sample_t = majority_vote(preds_w_t, sample_ids, num_classes=n_classes, B=B)
-
-                time_eval_sample_correct[key] = time_eval_sample_correct.get(key, 0) + (
-                    preds_sample_t == gt_per_sample
-                ).sum().item()
+            for key, predictions in partial_preds.items():
+                preds_t = majority_vote(torch.cat(predictions), ids, num_classes=n_classes, B=B)
+                time_eval_sample_correct[key] = time_eval_sample_correct.get(key, 0) + (preds_t == gt_per_sample).sum().item()
                 time_eval_sample_total[key] = time_eval_sample_total.get(key, 0) + B
-
-            total_spike_count += float(activity["total_spike_count"])
-            total_synops += float(activity["synaptic_operations"])
-            total_neuron_slots += float(activity["num_neuron_slots"])
-            total_neuron_updates += float(activity["neuron_updates"])
-            total_input_mac_ops += float(activity["input_mac_ops"])
-            total_activity_samples += int(activity["num_samples"])
 
     finally:
         if orig_dtype is not None:
@@ -219,6 +214,7 @@ def run_train_loop(
     time_eval_fracs=None,
     time_eval_include_t1: bool = False,
     cost_profile=None,
+    cost_source_profile=None,
     evaluation_split: str = "test",
 ) -> Tuple[Dict[str, Any], Dict[int, Dict[str, float]]]:
     epoch_log: Dict[int, Dict[str, float]] = {}
@@ -232,7 +228,9 @@ def run_train_loop(
         learner.model.train()
 
         n_tr, acc_tr_sum, loss_sum, aux_msg = 0, 0.0, 0.0, ""
-        for Xp, yp, _, _ in iter_pieces(train_loader, device, chunk_segments=True, dtype=runtime_dtype):
+        for Xp, yp, _, _ in iter_pieces(
+                train_loader, device, chunk_segments=True, dtype=runtime_dtype,
+                source_length_profile=cost_source_profile if epoch == 1 else None):
             if epoch == 1 and cost_profile is not None:
                 cost_profile[int(Xp.shape[1])] += int(Xp.shape[0])
             stats = learner.train_step(Xp, yp)

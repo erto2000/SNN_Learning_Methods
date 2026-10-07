@@ -58,27 +58,9 @@ def _iter_subset(sub: Subset, max_items: int = 48):
         yield sub[i]
 
 def save_examples_har_traces(sub: Subset, class_names: List[str], path: str, overlay_segments: bool=False) -> str:
-    # Expect x: [T,D] raw or [S,T,D] post (overlay_segments=True)
-    rows, cols = 3, 3  # show up to 9 small multiples
-    fig, axes = plt.subplots(rows, cols, figsize=(10,8), dpi=140, sharex=False)
-    axes = axes.flatten()
-    i = 0
-    for x, y, _ in _iter_subset(sub, max_items=rows*cols):
-        ax = axes[i]; i += 1
-        if x.dim() == 2:
-            ax.plot(x.cpu().numpy())
-        elif x.dim() == 3:
-            if overlay_segments:
-                for s in range(min(x.shape[0], 6)):
-                    ax.plot(x[s].cpu().numpy(), alpha=0.7)
-            else:
-                ax.plot(x[0].cpu().numpy())
-        ax.set_title(class_names[y], fontsize=9)
-        ax.grid(True, alpha=0.2)
-    for k in range(i, len(axes)):
-        axes[k].axis("off")
-    fig.tight_layout()
-    fig.savefig(path); plt.close(fig); return path
+    return save_examples_multichannel_traces(
+        sub, class_names, path, overlay_segments=overlay_segments)
+
 
 def save_examples_waveforms(sub: Subset, class_names: List[str], path: str) -> str:
     rows, cols = 3, 3
@@ -198,31 +180,48 @@ def save_counts_json(counts, class_names, json_path):
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
 
-def save_examples_multichannel_traces(sub: Subset, class_names: List[str], path: str, overlay_segments: bool=False, max_channels: int = 6) -> str:
+def save_examples_multichannel_traces(sub: Subset, class_names: List[str], path: str, overlay_segments: bool=False, max_channels: Optional[int] = None) -> str:
     """
     Generic multi-sensor line plots for [T,D] (or [S,T,D] if overlaying segments).
-    For D large, we only plot the first 'max_channels' dims.
+    Show all channels unless max_channels explicitly limits them.
     """
     rows, cols = 3, 3
-    fig, axes = plt.subplots(rows, cols, figsize=(10, 8), dpi=140, sharex=False)
+    fig, axes = plt.subplots(rows, cols, figsize=(11, 9), dpi=140)
     axes = axes.flatten()
+    handles, names = [], []
     i = 0
-    for x, y, _ in _iter_subset(sub, max_items=rows*cols):
-        ax = axes[i]; i += 1
-        if x.dim() == 2:
-            X = x[:, :max_channels].cpu().numpy()
-            ax.plot(X)
-        elif x.dim() == 3:
-            # overlay a few segments
-            S = min(x.shape[0], 5)
-            for s in range(S):
-                X = x[s, :, :max_channels].cpu().numpy()
-                ax.plot(X, alpha=0.7)
+    for x, y, info in _iter_subset(sub, max_items=rows * cols):
+        ax = axes[i]
+        i += 1
+        segments = [x] if x.dim() == 2 else list(x[:5] if overlay_segments else x[:1])
+        for segment_index, segment in enumerate(segments):
+            values = segment[:, :max_channels].detach().cpu().numpy()
+            labels = info.get("channel_names", [f"channel {j + 1}" for j in range(values.shape[1])])
+            rate = info.get("sample_rate")
+            time = np.arange(len(values)) / rate if rate else np.arange(len(values))
+            for channel in range(values.shape[1]):
+                line, = ax.plot(time, values[:, channel], lw=.8,
+                                color=COLORS[channel % len(COLORS)],
+                                linestyle=("-", "--", ":")[channel // len(COLORS) % 3],
+                                alpha=.7 if overlay_segments else 1,
+                                label=labels[channel])
+                if i == 1 and segment_index == 0:
+                    handles.append(line)
+                    names.append(labels[channel])
         ax.set_title(class_names[y], fontsize=9)
-        ax.grid(True, alpha=0.2)
-    for k in range(i, len(axes)): axes[k].axis("off")
-    fig.tight_layout()
-    fig.savefig(path); plt.close(fig); return path
+        ax.set_xlabel("Time (s)" if info.get("sample_rate") else "Time step", fontsize=8)
+        ax.tick_params(labelsize=7)
+        ax.grid(True, alpha=.2)
+    for ax in axes[i:]:
+        ax.axis("off")
+    legend_height = .025 * int(np.ceil(len(names) / 3))
+    if handles:
+        fig.legend(handles, names, loc="lower center", ncol=3, fontsize=7, frameon=False)
+    fig.tight_layout(rect=(0, legend_height, 1, 1))
+    fig.savefig(path)
+    plt.close(fig)
+    return path
+
 
 def save_examples_voxel_slices(sub: Subset, class_names: List[str], path: str, H: int, W: int, bins_hint: int = 200) -> str:
     """
@@ -311,128 +310,234 @@ def save_examples_dvs_events_raw(sub: Subset, class_names: List[str], path: str,
     fig.tight_layout(); fig.savefig(path); plt.close(fig); return path
 
 
+DATASET_TITLES = {
+    "har": "HAR", "mnist-static": "MNIST static", "mnist-rate": "MNIST rate",
+    "sc": "Speech Commands", "esc50": "ESC-50", "urban8k": "UrbanSound8K",
+    "pamap2": "PAMAP2", "mitbih": "MIT-BIH", "dvs": "DVS128 Gesture",
+    "large-scale-audio": "Large-scale audio",
+}
+
+
+def _sensor_groups(dataset_id: str):
+    """Channel groups in the exact order returned by the raw loaders."""
+    if dataset_id == "har":
+        return [("Body acceleration", "g"), ("Body gyroscope", "rad/s"),
+                ("Total acceleration", "g")]
+    return [(f"{location} {sensor}", unit)
+            for location in ("Hand", "Chest", "Ankle")
+            for sensor, unit in (("acceleration (±16g)", "m/s²"),
+                                 ("gyroscope", "rad/s"), ("magnetometer", "µT"))]
+
+
+def _plot_sensor_channels(ax, x, info, dataset_id, *, processed, title):
+    """Separate sensor groups so traces with different physical units never mix."""
+    values = x.detach().cpu().numpy()
+    groups = _sensor_groups(dataset_id)
+    if values.ndim != 2 or values.shape[1] != 3 * len(groups):
+        raise ValueError(f"Expected {3 * len(groups)} channels for {dataset_id}")
+    sample_rate = float(info.get("sample_rate", 50 if dataset_id == "har" else 100))
+    time = np.arange(len(values)) / sample_rate
+    spec = ax.get_subplotspec().subgridspec(len(groups), 1)
+    fig = ax.figure
+    ax.remove()
+    first = None
+    for group, (name, unit) in enumerate(groups):
+        panel = fig.add_subplot(spec[group], sharex=first)
+        if first is None:
+            first = panel
+        for channel, axis in enumerate(("x", "y", "z")):
+            panel.plot(time, values[:, 3 * group + channel], lw=.85,
+                       color=COLORS[channel], label=axis)
+        panel.set_ylabel("Z-score" if processed else unit, fontsize=8)
+        panel.text(.01, .95, name, transform=panel.transAxes,
+                   va="top", fontsize=8,
+                   bbox=dict(facecolor="white", alpha=.75, edgecolor="none", pad=1))
+        panel.spines[["top", "right"]].set_visible(False)
+        panel.grid(alpha=.2)
+        panel.tick_params(labelsize=7, labelbottom=(group == len(groups) - 1))
+        if group == 0:
+            panel.set_title(title, loc="left", fontsize=10)
+            panel.legend(loc="upper right", ncol=3, fontsize=7, frameon=False)
+        if group == len(groups) - 1:
+            panel.set_xlabel("Time (s)", fontsize=9)
+
+
+def _plot_dvs_sequence(ax, post, post_info, raw_info, label):
+    """Three spatial snapshots with elapsed time and a shared brightness scale."""
+    H, W = int(post_info["H"]), int(post_info["W"])
+    voxel = post.detach().cpu().numpy().reshape(len(post), H, W, -1)
+    indices = np.linspace(0, len(voxel) - 1, 3, dtype=int)
+    frames = np.maximum(voxel[indices], 0).sum(axis=-1)
+    vmax = max(1e-6, float(np.percentile(frames, 99.5)))
+    events = raw_info["events"]
+    duration = (float(events[:, 0].max()) - float(events[:, 0].min()) + 1e-6
+                if len(events) else None)
+
+    fig = ax.figure
+    grid = ax.get_subplotspec().subgridspec(3, 3, height_ratios=[.18, 1, .22])
+    ax.remove()
+    heading = fig.add_subplot(grid[0, :])
+    heading.set_axis_off()
+    heading.text(0, .5, f"Processed sequence · {label}",
+                 transform=heading.transAxes, va="center", fontsize=10)
+    for column, (index, frame) in enumerate(zip(indices, frames)):
+        panel = fig.add_subplot(grid[1, column])
+        panel.imshow(frame, origin="upper", cmap="magma", vmin=0, vmax=vmax)
+        timestamp = (f"t = {(index + .5) * duration / len(voxel):.2f} s\n"
+                     if duration is not None else "")
+        panel.set_title(f"{timestamp}Bin {index + 1}/{len(voxel)}", fontsize=8)
+        panel.set_xticks([0, W // 2, W - 1])
+        panel.set_yticks([0, H // 2, H - 1])
+        panel.tick_params(labelsize=7, labelleft=(column == 0))
+        panel.set_xlabel("x (pixel)", fontsize=8)
+        if column == 0:
+            panel.set_ylabel("y (pixel)", fontsize=8)
+    timeline = fig.add_subplot(grid[2, :])
+    timeline.set_axis_off()
+    timeline.annotate("", xy=(.97, .85), xytext=(.03, .85),
+                      xycoords="axes fraction", arrowprops=dict(arrowstyle="->", lw=1.2))
+    timeline.text(.5, .2, "Time from first event (s)" if duration is not None
+                  else "Time bin", transform=timeline.transAxes,
+                  ha="center", va="center", fontsize=9)
+
+
+def _plot_example_pair(left, right, example, *, show_legend=True):
+    dataset_id = example["dataset_id"]
+    raw, raw_y, raw_info = example["raw"]
+    post, post_y, post_info = example["post"]
+    if int(raw_y) != int(post_y):
+        raise ValueError("Preprocessing changed the example label")
+    label = example["label"]
+    audio = {"sc", "esc50", "urban8k", "large-scale-audio"}
+    mel_image = None
+    left.set_title(f"Raw · {label}", loc="left", fontsize=10)
+    right.set_title(f"Processed · {label}", loc="left", fontsize=10)
+    for ax in (left, right):
+        ax.spines[["top", "right"]].set_visible(False)
+
+    if dataset_id in {"har", "pamap2"}:
+        _plot_sensor_channels(left, raw, raw_info, dataset_id, processed=False,
+                              title=f"Raw · {label}")
+        _plot_sensor_channels(right, post, post_info, dataset_id, processed=True,
+                              title=f"Processed · {label}")
+    elif dataset_id == "mitbih":
+        rate = float(raw_info.get("sample_rate", raw_info.get("fs", 360)))
+        for ax, x, processed in ((left, raw, False), (right, post, True)):
+            values = x.detach().cpu().numpy()
+            ax.plot(np.arange(len(values)) / rate, values[:, 0],
+                    lw=1.1, color=COLORS[0])
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Z-score" if processed else "ECG (mV)")
+            ax.grid(alpha=.2)
+    elif dataset_id in audio:
+        waveform = raw.squeeze(-1).detach().cpu().numpy()
+        sr = int(raw_info["sample_rate"])
+        stride = max(1, len(waveform) // 4000)
+        left.plot(np.arange(0, len(waveform), stride) / sr,
+                  waveform[::stride], color=COLORS[0], lw=.7)
+        left.set_xlabel("Time (s)")
+        left.set_ylabel("Waveform amplitude")
+        left.grid(alpha=.2)
+        mel = post.detach().cpu().numpy()
+        if mel.ndim != 2:
+            raise ValueError("Expected [frames, mel bands] after audio preprocessing")
+        mel_image = right.imshow(mel.T, aspect="auto", origin="lower",
+                                 cmap="magma",
+                                 extent=(0, len(mel), 0, mel.shape[1]),
+                                 vmin=-3, vmax=3)
+        right.set_xlabel("Log-mel frame (10 ms hop)")
+        right.set_ylabel("Mel band")
+    elif dataset_id.startswith("mnist"):
+        image = raw[0].reshape(28, 28).detach().cpu().numpy()
+        left.imshow(image, cmap="gray", vmin=0, vmax=1)
+        left.set_xlabel("Pixel column")
+        left.set_ylabel("Pixel row")
+        if dataset_id == "mnist-static":
+            steps = [0, len(post) // 2, len(post) - 1]
+            frames = [post[t].reshape(28, 28).detach().cpu().numpy()
+                      for t in steps]
+            right.imshow(np.concatenate(frames, axis=1), cmap="gray",
+                         vmin=0, vmax=1)
+            right.set_xticks([14, 42, 70], [f"t={t + 1}" for t in steps])
+            right.set_yticks([])
+            right.set_xlabel("Identical image repeated over time")
+        else:
+            spikes = post.detach().cpu().numpy()
+            steps, pixels = np.nonzero(spikes > .5)
+            right.scatter(steps, pixels, s=.8, color=COLORS[0], rasterized=True)
+            right.set_xlim(-.5, len(spikes) - .5)
+            right.set_ylim(0, spikes.shape[1])
+            right.set_xlabel("Time step")
+            right.set_ylabel("Pixel index with spike")
+    elif dataset_id == "dvs":
+        left.set_title(f"Raw events (all times) · {label}", loc="left", fontsize=10)
+        events = raw_info["events"].detach().cpu().numpy()
+        stride = max(1, len(events) // 8000)
+        shown = events[::stride]
+        left.scatter(shown[:, 1], shown[:, 2], s=.35, alpha=.25,
+                     c=np.where(shown[:, 3] > .5, COLORS[3], COLORS[0]),
+                     rasterized=True)
+        left.set_xlim(0, int(raw_info.get("W", 128)))
+        left.set_ylim(int(raw_info.get("H", 128)), 0)
+        left.set_aspect("equal")
+        left.set_xlabel("Sensor x (pixel)")
+        left.set_ylabel("Sensor y (pixel)")
+        if show_legend:
+            left.scatter([], [], color=COLORS[3], label="positive polarity")
+            left.scatter([], [], color=COLORS[0], label="negative polarity")
+            left.legend(loc="upper right", frameon=False, fontsize=7)
+        _plot_dvs_sequence(right, post, post_info, raw_info, label)
+    else:
+        raise ValueError(f"No thesis example renderer for {dataset_id}")
+
+    return mel_image
+
+
+def _example_height(dataset_id):
+    return {"har": 4.2, "pamap2": 9.0}.get(dataset_id, 3.2)
+
+
+def _save_example_figure(examples, path, title, *, dataset_headings):
+    if not examples:
+        raise ValueError("At least one dataset example is required")
+    heights = [_example_height(item["dataset_id"]) for item in examples]
+    fig = plt.figure(figsize=(12, sum(heights) + .6), layout="constrained")
+    grid = fig.add_gridspec(len(examples), 2, height_ratios=heights)
+    try:
+        for row, example in enumerate(examples):
+            left = fig.add_subplot(grid[row, 0])
+            right = fig.add_subplot(grid[row, 1])
+            if dataset_headings:
+                name = DATASET_TITLES[example["dataset_id"]]
+                example = {**example, "label": f"{name} · {example['label']}"}
+            mel = _plot_example_pair(left, right, example, show_legend=(row == 0 or dataset_headings))
+            if mel is not None:
+                fig.colorbar(mel, ax=right, shrink=.72, pad=.02,
+                             label="Normalized log-mel value")
+        fig.suptitle(title, fontsize=13, weight="bold")
+        fig.savefig(path, dpi=220, bbox_inches="tight")
+        fig.savefig(os.path.splitext(path)[0] + ".svg", bbox_inches="tight")
+    finally:
+        plt.close(fig)
+    return path
+
+
 def save_thesis_examples(raw_ds: Dataset, post_ds: Dataset, indices: List[int],
                          class_names: List[str], dataset_id: str, path: str) -> str:
     """Show the same two training records before and after preprocessing."""
-    titles = {
-        "har": "HAR activity signals", "mnist-static": "MNIST static encoding",
-        "mnist-rate": "MNIST rate encoding", "sc": "Speech Commands audio",
-        "esc50": "ESC-50 environmental audio", "urban8k": "UrbanSound8K audio",
-        "pamap2": "PAMAP2 activity signals", "mitbih": "MIT-BIH ECG",
-        "dvs": "DVS128 Gesture events", "large-scale-audio": "Large-scale audio",
-    }
-    audio = {"sc", "esc50", "urban8k", "large-scale-audio"}
-    sensors = {"har", "pamap2", "mitbih"}
     if len(indices) != 2:
         raise ValueError("Thesis comparison requires two training indices")
+    examples = []
+    for index in indices:
+        raw, post = raw_ds[index], post_ds[index]
+        examples.append(dict(dataset_id=dataset_id, raw=raw, post=post,
+                             label=class_names[int(raw[1])], train_index=index))
+    return _save_example_figure(
+        examples, path, f"{DATASET_TITLES[dataset_id]}: input and model representation",
+        dataset_headings=False)
 
-    fig, axes = plt.subplots(2, 2, figsize=(11.5, 6.6), layout="constrained")
-    mel_image = None
-    for row, index in enumerate(indices):
-        raw, raw_y, raw_info = raw_ds[index]
-        post, post_y, post_info = post_ds[index]
-        if int(raw_y) != int(post_y):
-            raise ValueError(f"Preprocessing changed the label at index {index}")
-        left, right = axes[row]
-        label = class_names[int(raw_y)]
-        left.set_title(f"Raw · {label}", loc="left", fontsize=10)
-        right.set_title(f"Processed · {label}", loc="left", fontsize=10)
-        for ax in (left, right):
-            ax.spines[["top", "right"]].set_visible(False)
 
-        if dataset_id in sensors:
-            for ax, x, processed in ((left, raw, False), (right, post, True)):
-                values = x.detach().cpu().numpy()
-                if values.ndim != 2:
-                    raise ValueError(f"Expected [time, channels] for {dataset_id}")
-                channels = min(1 if dataset_id == "mitbih" else 3, values.shape[1])
-                rate = 360 if dataset_id == "mitbih" else None
-                time = np.arange(len(values)) / rate if rate else np.arange(len(values))
-                for channel in range(channels):
-                    ax.plot(time, values[:, channel], lw=1.1,
-                            color=COLORS[channel], label=f"channel {channel + 1}")
-                ax.set_xlabel("Time (s)" if rate else "Time step")
-                ax.set_ylabel("Z-score" if processed else "Recorded value")
-                ax.grid(alpha=.2)
-                if row == 0 and channels > 1:
-                    ax.legend(loc="upper right", fontsize=7, frameon=False)
-        elif dataset_id in audio:
-            waveform = raw.squeeze(-1).detach().cpu().numpy()
-            sr = int(raw_info["sample_rate"])
-            stride = max(1, len(waveform) // 4000)
-            left.plot(np.arange(0, len(waveform), stride) / sr,
-                      waveform[::stride], color=COLORS[0], lw=.7)
-            left.set_xlabel("Time (s)")
-            left.set_ylabel("Waveform amplitude")
-            left.grid(alpha=.2)
-            mel = post.detach().cpu().numpy()
-            if mel.ndim != 2:
-                raise ValueError("Expected [frames, mel bands] after audio preprocessing")
-            mel_image = right.imshow(mel.T, aspect="auto", origin="lower",
-                                     cmap="magma",
-                                     extent=(0, len(mel), 0, mel.shape[1]),
-                                     vmin=-3, vmax=3)
-            right.set_xlabel("Log-mel frame (10 ms hop)")
-            right.set_ylabel("Mel band")
-        elif dataset_id.startswith("mnist"):
-            image = raw[0].reshape(28, 28).detach().cpu().numpy()
-            left.imshow(image, cmap="gray", vmin=0, vmax=1)
-            left.set_xlabel("Pixel column")
-            left.set_ylabel("Pixel row")
-            if dataset_id == "mnist-static":
-                steps = [0, len(post) // 2, len(post) - 1]
-                frames = [post[t].reshape(28, 28).detach().cpu().numpy()
-                          for t in steps]
-                right.imshow(np.concatenate(frames, axis=1), cmap="gray",
-                             vmin=0, vmax=1)
-                right.set_xticks([14, 42, 70], [f"t={t + 1}" for t in steps])
-                right.set_yticks([])
-                right.set_xlabel("Identical image repeated over time")
-            else:
-                spikes = post.detach().cpu().numpy()
-                steps, pixels = np.nonzero(spikes > .5)
-                right.scatter(steps, pixels, s=.8, color=COLORS[0], rasterized=True)
-                right.set_xlim(-.5, len(spikes) - .5)
-                right.set_ylim(0, spikes.shape[1])
-                right.set_xlabel("Time step")
-                right.set_ylabel("Pixel index with spike")
-        elif dataset_id == "dvs":
-            left.set_title(f"Raw events (all times) · {label}", loc="left", fontsize=10)
-            right.set_title(f"Voxel frame (peak activity) · {label}",
-                            loc="left", fontsize=10)
-            events = raw_info["events"].detach().cpu().numpy()
-            stride = max(1, len(events) // 8000)
-            shown = events[::stride]
-            left.scatter(shown[:, 1], shown[:, 2], s=.35, alpha=.25,
-                         c=np.where(shown[:, 3] > .5, COLORS[3], COLORS[0]),
-                         rasterized=True)
-            left.set_xlim(0, int(raw_info.get("W", 128)))
-            left.set_ylim(int(raw_info.get("H", 128)), 0)
-            left.set_aspect("equal")
-            left.set_xlabel("Sensor x (pixel)")
-            left.set_ylabel("Sensor y (pixel)")
-            if row == 0:
-                left.scatter([], [], color=COLORS[3], label="positive polarity")
-                left.scatter([], [], color=COLORS[0], label="negative polarity")
-                left.legend(loc="upper right", frameon=False, fontsize=7)
-            H, W = int(post_info["H"]), int(post_info["W"])
-            voxel = post.detach().cpu().numpy().reshape(len(post), H, W, -1)
-            positive = np.maximum(voxel, 0)
-            peak = int(np.argmax(positive.sum(axis=(1, 2, 3))))
-            frame = positive[peak].sum(axis=-1)
-            right.imshow(frame, origin="upper", cmap="magma", vmin=0,
-                         vmax=max(1e-6, float(np.percentile(frame, 99.5))))
-            right.set_xlabel(f"Voxel x ({W} pixels); peak bin {peak + 1}/{len(voxel)}")
-            right.set_ylabel(f"Voxel y ({H} pixels)")
-        else:
-            raise ValueError(f"No thesis example renderer for {dataset_id}")
-
-    if mel_image is not None:
-        fig.colorbar(mel_image, ax=axes[:, 1], shrink=.72, pad=.02,
-                     label="Normalized log-mel value")
-    fig.suptitle(f"{titles[dataset_id]}: input and model representation",
-                 fontsize=13, weight="bold")
-    fig.savefig(path, dpi=220, bbox_inches="tight")
-    fig.savefig(os.path.splitext(path)[0] + ".svg", bbox_inches="tight")
-    plt.close(fig)
-    return path
+def save_combined_examples(examples: List[Dict[str, Any]], path: str,
+                           title: str = "Dataset examples: input and model representation") -> str:
+    """One training record per dataset, with matching raw/processed columns."""
+    return _save_example_figure(examples, path, title, dataset_headings=True)

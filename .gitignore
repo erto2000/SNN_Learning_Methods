@@ -1,8 +1,52 @@
 .idea/
+/.codex/
+/.codex-remote-attachments/
 __pycache__/
 data/
 experimental/data/
 venv/
 optuna_results/
 results/
+/output/
+/tests/
 tmp/
+
+# Python caches, test output, and package builds
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.egg-info/
+/build/
+/dist/
+
+# Local environments and configuration
+.venv/
+env/
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Logs and LaTeX build intermediates
+*.log
+*.aux
+*.blg
+*.fdb_latexmk
+*.fls
+*.lof
+*.lot
+*.synctex.gz
+*.toc
+*.xdv
+*.out
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

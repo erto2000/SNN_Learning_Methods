@@ -59,5 +59,7 @@ def get_dataloaders(dataset, root='./data', batch_size=128, max_samples=None,
         num_test_samples=len(subsets['test']), time_steps=time_steps,
         windows_per_sample=int(x0.shape[0]) if x0.dim() == 3 else 1,
         pre_window_time_steps=sample_info.get('pre_window_time_steps', time_steps),
-        window_length=sample_info.get('window_length'), window_hop=sample_info.get('window_hop'))
+        window_length=sample_info.get('window_length'), window_hop=sample_info.get('window_hop'),
+        window_lengths=sample_info.get('window_lengths'),
+        window_tail_rule=sample_info.get('window_tail_rule'))
     return loaders, metadata

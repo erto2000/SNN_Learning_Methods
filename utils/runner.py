@@ -200,6 +200,7 @@ def run_one(config: Dict[str, Any], *, tuning: bool = False) -> Dict[str, Any]:
                 from collections import Counter
                 from utils.costs import training_costs
                 cost_profile = Counter()
+                cost_source_profile = Counter()
                 final_stats, epoch_log = run_train_loop(
                     learner,
                     train_loader,
@@ -213,12 +214,14 @@ def run_one(config: Dict[str, Any], *, tuning: bool = False) -> Dict[str, Any]:
                     time_eval_fracs=time_eval_fracs,
                     time_eval_include_t1=time_eval_include_t1,
                     cost_profile=cost_profile,
+                    cost_source_profile=cost_source_profile,
                     evaluation_split=meta["evaluation_split"],
                 )
 
                 cost_estimate = training_costs(
                     learner, cost_profile, original_samples=len(train_loader.dataset),
                     batch=g["BATCH_SIZE"], fp_bytes=fp_bytes,
+                    source_length_counts=cost_source_profile,
                     alpha=g.get("COST_COMPUTE_WEIGHT", 1.0), beta=g.get("COST_ACCESS_WEIGHT", 1.0),
                 )
                 train_mem_bytes = cost_estimate["memory"]["total_bytes"]
