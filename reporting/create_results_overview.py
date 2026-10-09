@@ -17,6 +17,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from matplotlib.ticker import FuncFormatter, LogLocator
 import numpy as np
 import pandas as pd
 
@@ -49,6 +50,138 @@ TITLES = ('Computation', 'Memory accesses', 'Time (cost proxy)')
 Y_LABELS = ('Arithmetic work (million model units)', 'Scalar accesses (millions)', 'Time cost (million units)')
 STYLES = dict(zip(METHODS, ['-', '--', '-.', ':']))
 DEFAULT_OUTPUT = PROJECT_ROOT / 'results/results_overview'
+
+# Published capacity references, not measured free memory for training. Embedded
+# memory capacities use binary multiples; banks and external RAM remain distinct
+# hardware resources and are not added together here.
+MEMORY_REFERENCES = (
+    ('nrf5340', 'nRF5340 application core', .5, '512 kB RAM',
+     'https://docs.nordicsemi.com/r/bundle/ps_nrf5340/page/chapters/soc_overview/doc/soc_overview.html-memory'),
+    ('stm32h743', 'STM32H743', 1, 'up to 1 MB RAM',
+     'https://www.st.com/en/microcontrollers-microprocessors/stm32h743ag.html'),
+    ('esp32s3_n8r8', 'ESP32-S3-DevKitC-1-N8R8', 8, '8 MB external PSRAM',
+     'https://documentation.espressif.com/esp-dev-kits/en/latest/esp32s3/esp32-s3-devkitc-1/user_guide_v1.0.html'),
+    ('duo', 'Milk-V Duo (original)', 64, '64 MB DRAM',
+     'https://milkv.io/docs/duo/overview'),
+    ('duo256m', 'Milk-V Duo 256M', 256, '256 MB DRAM',
+     'https://milkv.io/docs/duo/overview'),
+    ('pi_zero2w', 'Raspberry Pi Zero 2 W', 512, '512 MB SDRAM',
+     'https://www.raspberrypi.com/products/raspberry-pi-zero-2-w/'),
+)
+
+
+def memory_reference_data(fraction=1.0):
+    return pd.DataFrame([dict(reference_id=key, device=device,
+        published_capacity=published, capacity_bytes=int(mib*MIB),
+        training_budget_fraction=fraction, budget_bytes=int(mib*MIB*fraction),
+        source_url=url, specification_checked='2026-10-08')
+        for key, device, mib, published, url in MEMORY_REFERENCES])
+
+
+def accuracy_memory_data(baselines):
+    """Keep the tested batch, architecture, accuracy and saved peak working set."""
+    base, final, _, summaries = load()
+    final = final[final.experiment.eq('hop') & final.dataset.isin(baselines)]
+    rows = []
+    for selected in final.itertuples():
+        baseline = base[base.dataset.eq(selected.dataset) & base.learner.eq(selected.learner)]
+        if len(baseline) != 1:
+            raise ValueError(f'Missing baseline for {selected.dataset}/{selected.learner}')
+        baseline = next(baseline.itertuples())
+        meta = baselines[selected.dataset]
+        for setting, run, accuracy in [('full_sequence', baseline, baseline.final_sample_acc),
+                                       ('windowed', selected, selected.test_sample_acc)]:
+            summary = summaries[run.run_id]
+            checked_run_cost(run, summary, meta)
+            theory = summary['memory']['theory']
+            memory = theory['memory']['total_bytes']
+            if not np.isfinite(memory) or memory <= 0 or not np.isfinite(accuracy) or not 0 <= accuracy <= 100:
+                raise ValueError(f'Invalid accuracy or peak memory in {run.run_id}')
+            # Reject stale comparison exports rather than silently mixing them
+            # with observations from a different run or memory convention.
+            if not np.isclose(run.theory_memory_bytes, memory, rtol=0, atol=1):
+                raise ValueError(f'Exported peak memory disagrees with {run.run_id}')
+            rows.append(dict(dataset=selected.dataset, learner=selected.learner,
+                setting=setting, run_id=run.run_id, test_accuracy_pct=accuracy,
+                memory_bytes=int(memory), memory_mib=memory/MIB,
+                batch_size=meta['batch_size'], hidden_width=meta['baseline_hidden_width'],
+                hidden_layers=meta['baseline_hidden_layers'],
+                fp_bytes=summary['memory'].get('fp_bytes', 4),
+                window_length=int(selected.win_L) if setting == 'windowed' else None,
+                hop=int(selected.hop) if setting == 'windowed' else None,
+                memory_source='saved_run_summary',
+                window_tail_rule=summary['meta'].get('window_tail_rule', 'historical_unchanged')))
+    data = pd.DataFrame(rows)
+    if len(data) != len(baselines)*8 or data.duplicated(['dataset', 'learner', 'setting']).any():
+        raise ValueError('Incomplete accuracy/memory comparison matrix')
+    return data
+
+
+def memory_budget_data(points, references):
+    data = points.merge(references, how='cross')
+    data['fits_modelled_memory'] = data.memory_bytes <= data.budget_bytes
+    data['remaining_budget_bytes'] = data.budget_bytes - data.memory_bytes
+    return data
+
+
+def plot_accuracy_memory(dataset, points, references, out):
+    fig, ax = plt.subplots(figsize=(10, 6.3))
+    low, high = points.memory_mib.min()*.72, points.memory_mib.max()*1.45
+    visible = references[(references.budget_bytes/MIB).between(low, high)]
+    if visible.empty:
+        # Include the nearest reference on the right when none crosses the data.
+        above = references[references.budget_bytes/MIB >= points.memory_mib.max()]
+        visible = above.head(1)
+        if not visible.empty:
+            high = max(high, visible.budget_bytes.iloc[0]/MIB*1.25)
+    for ref in visible.itertuples():
+        x = ref.budget_bytes/MIB
+        ax.axvline(x, color='#777777', ls='--', lw=1, alpha=.65, zorder=1)
+        short_name = {'nrf5340': 'nRF5340', 'stm32h743': 'STM32H743',
+                      'esp32s3_n8r8': 'ESP32-S3 N8R8', 'duo': 'Milk-V Duo',
+                      'duo256m': 'Milk-V Duo 256M', 'pi_zero2w': 'Pi Zero 2 W'}[ref.reference_id]
+        ax.text(x, 1.012, f'{x:g} MiB\n{short_name}',
+                transform=ax.get_xaxis_transform(), ha='center', va='bottom',
+                fontsize=8, color='#555555')
+    for method in METHODS:
+        d = points[points.learner.eq(method)].set_index('setting')
+        full, window = d.loc['full_sequence'], d.loc['windowed']
+        ax.annotate('', xy=(window.memory_mib, window.test_accuracy_pct),
+                    xytext=(full.memory_mib, full.test_accuracy_pct),
+                    arrowprops=dict(arrowstyle='-|>', color=COLOR[method], lw=1.8,
+                                    shrinkA=7, shrinkB=7, mutation_scale=12), zorder=2)
+        ax.scatter(full.memory_mib, full.test_accuracy_pct, marker='o', s=75,
+                   facecolors='white', edgecolors=COLOR[method], linewidths=1.8, zorder=4)
+        ax.scatter(window.memory_mib, window.test_accuracy_pct, marker='D', s=65,
+                   color=COLOR[method], edgecolors='white', linewidths=.6, zorder=5)
+    ax.set_xscale('log')
+    ax.set_xlim(low, high)
+    ax.xaxis.set_major_locator(LogLocator(base=2, numticks=12))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _: f'{value:g}'))
+    ax.xaxis.set_minor_formatter(plt.NullFormatter())
+    acc_min, acc_max = points.test_accuracy_pct.min(), points.test_accuracy_pct.max()
+    pad = max(3, (acc_max-acc_min)*.18)
+    ax.set_ylim(max(0, acc_min-pad), min(100.8, acc_max+pad))
+    ax.set_xlabel('Estimated peak training memory (MiB, logarithmic scale)')
+    ax.set_ylabel('Test accuracy (%)')
+    ax.spines[['top', 'right']].set_visible(False)
+    ax.grid(axis='y', alpha=.2)
+    ax.set_axisbelow(True)
+    fig.suptitle(NAME[dataset] + ' - Accuracy within a memory budget', fontsize=13, y=.99)
+    method_handles = [Line2D([0], [0], color=COLOR[m], lw=2, label=LABEL[m]) for m in METHODS]
+    fig.legend(handles=method_handles, loc='lower center', bbox_to_anchor=(.5, .083),
+               ncol=4, frameon=False)
+    fig.legend(handles=[Line2D([0], [0], marker='o', color='#444444', markerfacecolor='white',
+               ls='', markersize=7, label='Full sequence'),
+               Line2D([0], [0], marker='D', color='#444444', ls='', markersize=6,
+               label='Selected window')], loc='lower center', bbox_to_anchor=(.5, .04),
+               ncol=2, frameon=False)
+    fig.subplots_adjust(left=.085, right=.985, bottom=.245, top=.90)
+    path = out/dataset/'06_accuracy_memory_budget'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for ext in ('pdf', 'svg', 'png'):
+        fig.savefig(path.with_suffix('.'+ext), dpi=180, bbox_inches='tight')
+    plt.close(fig)
 
 
 def read_csv(path: Path, columns: set[str]) -> pd.DataFrame:
@@ -286,8 +419,7 @@ def plot_coefficient_sweep(dataset, data, out):
     ax.spines[['top','right']].set_visible(False); ax.grid(alpha=.2)
     ax.set_ylim(bottom=0)
     finish(fig, NAME[dataset] + ' - Full-sequence time coefficient sweep',
-           out/dataset/'05_time_coefficient_sweep',
-           subtitle='Total weight = 2; dashed line: computation = 1, memory access = 1')
+           out/dataset/'05_time_coefficient_sweep')
 
 
 def style(ax):
@@ -297,19 +429,15 @@ def style(ax):
     ax.set_axisbelow(True)
 
 
-def finish(fig, title, path, *, subtitle=None, legend=True, bar_legend=False):
+def finish(fig, title, path, *, legend=True, bar_legend=False):
     fig.suptitle(title, fontsize=13, y=.99)
-    top = .92
-    if subtitle:
-        fig.text(.5, .94, subtitle, ha='center', va='top', fontsize=9)
-        top = .89
     if legend:
         handles = ([Patch(facecolor=COLOR[m], label=LABEL[m]) for m in METHODS]
                    if bar_legend else
                    [Line2D([0],[0], color=COLOR[m], linestyle=STYLES[m],
                            linewidth=2, label=LABEL[m]) for m in METHODS])
         fig.legend(handles=handles, ncol=4, loc='lower center', frameon=False)
-    fig.tight_layout(rect=(0, .07 if legend else .02, 1, top))
+    fig.tight_layout(rect=(0, .07 if legend else .02, 1, 1))
     path.parent.mkdir(parents=True, exist_ok=True)
     for ext in ['pdf','svg','png']:
         fig.savefig(path.with_suffix('.'+ext), dpi=180, bbox_inches='tight')
@@ -416,12 +544,18 @@ def gallery(datasets, output):
       '<h1>Memory, computation, and memory-access figures</h1>',
       '<p>Run comparisons use the costs and window-length profiles saved with each experiment. '
       'New runs include truncated final windows; historical runs retain their recorded preprocessing.</p>',
+      '<p><a href="accuracy_memory_README.md">Accuracy/memory chart notes and hardware sources</a>'
+      '<a href="accuracy_memory.csv">Accuracy/memory values</a>'
+      '<a href="memory_budget_comparison.csv">Memory-budget comparisons</a></p>',
       '<nav>'+''.join(f'<a href="#{d}">{escape(NAME[d])}</a>' for d in datasets)+'</nav>']
     for dataset in datasets:
         html.append(f'<article id="{dataset}"><h2>{escape(NAME[dataset])}</h2>')
         names = ['01_computation_and_access_scaling', '02_windowing_cost_comparison',
-                 '03_training_memory_scaling', '04_memory_case_study', '05_time_coefficient_sweep']
+                 '03_training_memory_scaling', '04_memory_case_study', '05_time_coefficient_sweep',
+                 '06_accuracy_memory_budget']
         for name in names:
+            if not (output/dataset/(name+'.png')).exists():
+                continue
             path=f'{dataset}/{name}'
             html.append(f'<p><a href="{path}.pdf">PDF</a><a href="{path}.svg">SVG</a></p>'
                         f'<img loading="lazy" src="{path}.png" alt="{escape(NAME[dataset]+": "+name)}">')
@@ -433,12 +567,63 @@ def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--datasets',nargs='+',choices=DATASETS,default=list(DATASETS))
     parser.add_argument('--output-dir',type=Path,default=DEFAULT_OUTPUT)
+    parser.add_argument('--accuracy-memory-only', action='store_true',
+                        help='Generate the accuracy/memory charts without replacing other cost charts')
+    parser.add_argument('--memory-budget-fraction', type=float, default=1.0,
+                        help='Fraction of each published memory capacity available to training (default: 1)')
     args=parser.parse_args(argv)
     if len(set(args.datasets)) != len(args.datasets):
         parser.error('Duplicate dataset IDs')
+    if not 0 < args.memory_budget_fraction <= 1:
+        parser.error('--memory-budget-fraction must be greater than 0 and at most 1')
     output=args.output_dir.resolve()
     output.mkdir(parents=True,exist_ok=True)
     meta=load_baselines(args.datasets)
+    plt.rcParams.update({'font.size':10,'pdf.fonttype':42,'svg.fonttype':'none'})
+    points = accuracy_memory_data(meta)
+    references = memory_reference_data(args.memory_budget_fraction)
+    points.to_csv(output/'accuracy_memory.csv', index=False)
+    references.to_csv(output/'memory_budget_references.csv', index=False)
+    memory_budget_data(points, references).to_csv(output/'memory_budget_comparison.csv', index=False)
+    (output/'accuracy_memory_README.md').write_text(
+        '# Accuracy within a memory budget\n\n'
+        'Each dataset has 06_accuracy_memory_budget.pdf, .svg and .png. '
+        'Colors identify learning methods. Open circles show full-sequence runs; '
+        'filled diamonds show the validation-selected window/hop runs evaluated on the test set. '
+        'Arrows connect those two observed results. The x axis is logarithmic.\n\n'
+        'Accuracy, configured batch size, architecture and numerical precision are retained '
+        'from saved experiments; no hypothetical networks or smaller batches are substituted. '
+        'Peak memory comes from each run summary and is checked against the comparison export. '
+        'The plotted data match the thesis main-table quantities. Historical accuracy is not rerun.\n\n'
+        'Dashed lines use published hardware memory capacities as reference budgets. '
+        'Only nearby lines are shown to keep each chart readable. Device names, original capacity '
+        'wording and source URLs are in memory_budget_references.csv. '
+        'Capacities are expressed in binary bytes for comparison with MiB. The STM32 reference '
+        'is its advertised nominal upper capacity; its memory is banked. ESP32 uses external '
+        'PSRAM only; its internal SRAM is not added. The original 64 MB Milk-V Duo is a '
+        'historical, discontinued reference.\n\n'
+        f'Training budget fraction: {args.memory_budget_fraction:g}. At 1, lines are optimistic '
+        'capacity ceilings, with no software/OS overhead reserved. Use '
+        '`--memory-budget-fraction 0.75`, for example, to allocate 75% to the modelled working set. '
+        'This fraction is an assumption, not a measurement of available memory. '
+        'Analytical fit does not establish successful device deployment or measured runtime. '
+        'The cost-model scope remains unchanged, including exclusion of optimizer-state memory.\n\n'
+        'accuracy_memory.csv contains all plotted points and source run IDs. '
+        'memory_budget_comparison.csv checks every point against every reference, '
+        'including references outside the displayed range. `fits_modelled_memory` means '
+        'memory_bytes <= budget_bytes. Negative remaining_budget_bytes denotes an overrun.\n\n'
+        'Run `python -m reporting.create_results_overview` for all six figures, or add '
+        '`--accuracy-memory-only` to preserve the other existing chart exports.\n\n'
+        '## Published specifications\n\n'+''.join(
+            f'- [{r.device}]({r.source_url}): {r.published_capacity}.\n'
+            for r in references.itertuples()), encoding='utf-8')
+    for dataset in args.datasets:
+        plot_accuracy_memory(dataset, points[points.dataset.eq(dataset)], references, output)
+    if args.accuracy_memory_only:
+        gallery(args.datasets, output)
+        print(f'Saved accuracy/memory figures for {len(args.datasets)} datasets; '
+              f'validated {len(points)} observations; gallery: {output / "index.html"}')
+        return
     theory=theoretical_data(meta)
     selected=selected_data(meta)
     theory, selected = add_time_proxy(theory, selected)
@@ -449,7 +634,6 @@ def main(argv=None):
     theory.to_csv(output/'theoretical_scaling.csv',index=False)
     selected.to_csv(output/'selected_vs_full.csv',index=False)
     (output/'configurations.json').write_text(json.dumps(meta,indent=2),encoding='utf-8')
-    plt.rcParams.update({'font.size':10,'pdf.fonttype':42,'svg.fonttype':'none'})
     for dataset in args.datasets:
         plot_theory(dataset,meta[dataset],theory[theory.dataset.eq(dataset)],output)
         dataset_selected = selected[selected.dataset.eq(dataset)]
@@ -458,7 +642,7 @@ def main(argv=None):
         plot_memory(dataset, theory[theory.dataset.eq(dataset)], output)
         plot_memory_case_study(dataset, memory_cases[memory_cases.dataset.eq(dataset)], output)
         plot_coefficient_sweep(dataset, sweep[sweep.dataset.eq(dataset)], output)
-        print(f'Saved 5 figures for {dataset}',flush=True)
+        print(f'Saved 6 figures for {dataset}',flush=True)
     gallery(args.datasets,output)
     (output/'README.md').write_text("""# Results overview
 
@@ -479,6 +663,15 @@ Run `python -m reporting.create_results_overview`; optional arguments are
    increases from 0 to 2 and memory-access weight decreases from 2 to 0.
    The total budget is 2. The midpoint (1, 1) exactly matches the equal-weight
    time costs in the other figures. Values are in time_coefficient_sweep.csv.
+
+6. **Accuracy within a memory budget**: observed full-sequence and selected-window
+   accuracy versus estimated peak training memory. Arrows connect each method's
+   runs; dashed lines mark published hardware memory capacities. Values, feasibility
+   comparisons and hardware source links are in accuracy_memory.csv,
+   memory_budget_comparison.csv and memory_budget_references.csv. See
+   accuracy_memory_README.md for assumptions. Use --accuracy-memory-only to add
+   these figures without replacing the other existing cost charts, or
+   --memory-budget-fraction 0.75 to reserve 25% of each capacity for other uses.
 
 Time panels use time_proxy = computation + memory accesses (both weights 1).
 Windowed/full time ratios divide these sums, not the individual cost ratios.

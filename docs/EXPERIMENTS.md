@@ -59,11 +59,23 @@ best-validation, and final-test tables. It keeps MNIST Static and Rate distinct.
 It writes figures to `results/results_overview/`; open `index.html` to browse
 them. Each dataset has computation and memory-access scaling, windowed versus
 full-sequence training costs, training-memory scaling, and the four-configuration
-memory case study, plus a full-sequence time-coefficient sweep. PDF, SVG, PNG,
+memory case study, a full-sequence time-coefficient sweep, and an accuracy versus
+memory-budget chart using the actual full-sequence and selected-window runs. PDF, SVG, PNG,
 and underlying CSV values are exported.
 
 Use `--datasets har pamap2` or `--output-dir PATH` to select datasets or output.
 The generator uses saved metadata and learner cost equations without training.
+
+The accuracy/memory figure uses open circles for full sequences and filled
+diamonds for selected windows, connected by an arrow for each method. Published
+device memory capacities provide reference lines, with source URLs exported to
+`memory_budget_references.csv`. These are capacity ceilings, not measured free
+memory or deployment claims. `--memory-budget-fraction 0.75` allocates 75% of
+each reference capacity to the modelled training working set. All configurations
+retain their tested batch size, architecture and accuracy. Values and comparisons
+are exported to `accuracy_memory.csv` and `memory_budget_comparison.csv`.
+Use `--accuracy-memory-only` to add these figures while preserving the other
+existing cost-chart exports, including locally recalculated historical charts.
 
 The former `create_compute_access_charts.py`, `create_figure2_by_dataset.py`,
 and `analyze_costs.py` entry points have been consolidated into this script.
