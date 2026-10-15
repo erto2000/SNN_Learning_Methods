@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from .base import BaseLearner
 from networks.snn_core import SNNCore
@@ -36,17 +37,27 @@ class BackpropLearner(BaseLearner):
     def _build_model(self):
         return SNNCore(self.cfg, self.meta["n_classes"])
 
-    def _aggregate(self, seq_BTK: torch.Tensor) -> torch.Tensor:
+    def _aggregate(self, seq_BTK: torch.Tensor, time_mask: torch.Tensor | None = None) -> torch.Tensor:
         # seq_BTK: [B,T,K] -> [B,K]
+        if time_mask is not None:
+            lengths = time_mask.sum(dim=1)
+            if self.agg == "sum":
+                return seq_BTK.sum(dim=1)
+            if self.agg == "mean":
+                return seq_BTK.sum(dim=1) / lengths.unsqueeze(1)
+            if self.agg == "last":
+                rows = torch.arange(seq_BTK.shape[0], device=seq_BTK.device)
+                return seq_BTK[rows, lengths - 1]
         if self.agg == "sum":  return seq_BTK.sum(dim=1)
         if self.agg == "mean": return seq_BTK.mean(dim=1)
         if self.agg == "last": return seq_BTK[:, -1, :]
         raise ValueError(f"Unknown agg: {self.agg}")
 
-    def forward(self, X: torch.Tensor, return_activity: bool = False):
+    def forward(self, X: torch.Tensor, return_activity: bool = False, time_mask: torch.Tensor | None = None):
         # X: [B,T,D] -> logits: [B,K] OR (logits, activity)
         B, T, _ = X.shape
         X = X.to(self.device)
+        time_mask = self._prepare_time_mask(X, time_mask)
         state, head_mem = self.model.init_state(B, X.device, X.dtype)
 
         outs = []
@@ -54,7 +65,8 @@ class BackpropLearner(BaseLearner):
 
         for t in range(T):
             _, head_out, state, head_mem, layer_spikes, _ = self.model.forward_step(
-                X[:, t, :], state, head_mem
+                X[:, t, :], state, head_mem,
+                time_mask=None if time_mask is None else time_mask[:, t],
             )
             outs.append(head_out)
             if return_activity:
@@ -63,7 +75,7 @@ class BackpropLearner(BaseLearner):
 
         seq_TBK = torch.stack(outs, dim=0)  # [T,B,K]
         seq_BTK = seq_TBK.permute(1, 0, 2).contiguous()
-        logits = self._aggregate(seq_BTK)  # [B,K]
+        logits = self._aggregate(seq_BTK, time_mask)  # [B,K]
         assert logits.shape == (B, self.meta["n_classes"])
 
         if not return_activity:
@@ -73,17 +85,22 @@ class BackpropLearner(BaseLearner):
             layer_spike_counts=layer_spike_counts,
             num_samples=B,
             num_timesteps=T,
+            valid_steps=None if time_mask is None else int(time_mask.sum().item()),
         )
         return logits, activity
 
-    def train_step(self, X: torch.Tensor, y: torch.Tensor) -> dict:
+    def train_step(self, X: torch.Tensor, y: torch.Tensor, time_mask: torch.Tensor | None = None, sample_weight=None) -> dict:
         self.model.train()
         X, y = X.to(self.device), y.to(self.device)
-        logits = self.forward(X)                  # [B,K]
-        loss = self.loss(logits, y)
+        sample_weight = self._prepare_sample_weight(X, sample_weight)
+        logits = self.forward(X, time_mask=time_mask)  # [B,K]
+        loss = (
+            self.loss(logits, y) if sample_weight is None else
+            (F.cross_entropy(logits, y, reduction="none") * sample_weight).mean()
+        )
         self.opt.zero_grad(set_to_none=True)
         loss.backward()
-        self.opt.step()
+        self._optimizer_step(self.opt)
         acc = (logits.argmax(1) == y).float().mean().item() * 100.0
         return {"loss": float(loss.item()), "acc": acc}
 

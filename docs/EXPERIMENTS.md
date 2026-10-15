@@ -3,7 +3,7 @@
 The shared matrix in `experiment_config.py` covers ten dataset variants
 and four learners, ordered BPTT, Forward-Forward, E-prop, and RATE-PEPITA.
 MNIST Static and MNIST Rate use the same source images with different temporal
-encodings. Each has a 10,000-sample cap. Their PEPITA runs use Adam with a
+encodings, both with 30 time steps. Each has a 10,000-sample cap. Their PEPITA runs use Adam with a
 `1e-4` learning rate and the default `0.1` feedback modulation ratio.
 MNIST Rate draws reproducible spikes per sample using the run's `SEED`.
 
@@ -46,11 +46,37 @@ Run these entry points from the project root; they need no configuration flags:
 ```
 
 `run_no_window.py` runs every configured dataset and learner. It writes a fresh
-result for each run ID, replacing any result already at that path. The direct
-entry point of the independent Optuna script currently selects the two MNIST
-variants and uses `results/optuna/window_hop_independent_mnist_10k_v1.db`.
-Its `datasets` setting can be edited for another campaign. All result files,
+result for each run ID, replacing any result already at that path. The independent
+Optuna script also runs all ten variants and uses
+`results/optuna/window_hop_independent_recording_batch_v3.db`.
+Its `datasets` argument can select a smaller campaign. All result files,
 Optuna databases, comparison tables, and figures live under ignored `results/`.
+
+Use the independent script for the thesis protocol: select window length first,
+then select hop at the chosen length. The joint-grid script explores a different
+protocol. The independent broad window search covers every integer from the
+rounded 10% horizon (at least one step) to the inspected training maximum.
+Full length is a normal candidate; it is not enqueued as a special trial.
+Refinement covers the rounded 75%--125% neighborhood, bounded by one step and
+the inspected maximum. Hop search samples integer hops directly within its ratio
+bounds. Both refinement samplers use three startup trials so TPE can adapt within
+the ten-trial budget.
+
+Budgets are up to 20 newly trained networks at five epochs and ten at ten epochs
+per stage. Duplicate proposals do not consume that budget. Observations for the
+same effective schedule and epoch count are reused across stages. Effective
+schedule equivalence is checked only with a guaranteed fixed horizon or a
+complete training-length profile; otherwise deduplication conservatively uses
+the exact integer length and hop. A finite exhausted space stops early without
+moving unused budget to another stage. The selected ten-epoch non-overlap setting
+remains a validation-based fallback if hop tuning is worse. Full-sequence runs
+are separate baselines, and are not injected into the search.
+
+Before a fresh campaign, archive the existing runs, Optuna databases, final-test
+manifests, and comparison/report folders together. Resume checks reject studies
+or selected final tests from a different training protocol. Regenerate comparisons
+and charts after both scripts finish; update thesis numbers from those fresh exports.
+The current thesis figures and accuracy values describe the archived campaign.
 
 The standard comparison writes a separate folder for each dataset variant and
 an `all_current_runs` table. The independent Optuna comparison writes trial,
@@ -118,19 +144,55 @@ gap, its start is bounded below by T-S to keep the terminal window at most S
 steps. For example, T=128, S=32, q=45 uses lengths 32,32,32,6.
 
 Unequal windows use zero padding only for rectangular data-loader storage.
-`window_lengths` metadata produces valid time masks; the learner iterator groups
-windows by their actual lengths and removes storage padding before execution.
-Evaluation combines votes from all length groups once per original sample.
-A partial window has one vote, matching the existing majority-vote protocol.
+`window_lengths` metadata produces valid time masks. Full sequences keep their
+original minibatch, including recordings of different lengths. Independent
+windows are flattened in sample order into minibatches of at most the configured
+batch size; short final windows do not create separate length groups or extra
+optimizer updates. A single window covering each whole sequence therefore uses
+the same inputs, masks, and batching as its full-sequence baseline.
+
+All four learners freeze ended recordings and exclude padding from readouts,
+learning, and activity statistics. RATE-PEPITA divides rates by each recording's
+valid length and calibrates feedback using only valid inputs from the whole
+batch. Real silence within a recording remains valid. BPTT, E-prop, FF, and
+RATE-PEPITA each update once per original recording minibatch. The optional original
+timestep-wise PEPITA mode retains its separate update schedule.
+
+Evaluation combines all window votes once per original sample. Partial-time
+evaluation uses the requested fraction of each window's own valid length.
+Each window's vote is weighted by its valid length. Partial-time votes use the
+number of steps actually evaluated. A one-step tail therefore cannot tie a
+100-step window merely by predicting a different class.
+
+During learning, each window has weight equal to its valid length divided by
+the sum of valid window lengths for its original recording. These weights sum
+to one per recording, including overlapping schedules. They multiply each
+window's learning contribution before batch averaging, and are not normalized
+again within a minibatch. An unwindowed sequence or a single full-length window
+has weight one. Run metadata records both weighting rules.
+
+Window contributions are accumulated with model weights held fixed. Each
+chunk contributes its weighted gradient sum divided by the original recording
+batch size, including smaller final chunks. Adam takes one step after all windows
+from that recording batch have been processed. This matches the full-sequence
+update count without retaining temporal graphs across windows. The optional
+original timestep-wise PEPITA mode retains its legacy schedule; thesis runs use
+RATE-PEPITA accumulation mode. A single full-length window retains the original
+unwindowed path exactly. The core analytical cost formulas remain unchanged;
+Adam internals and gradient-accumulation bookkeeping are outside that model.
 
 Analytical work is the sum of C(T_i) and M(T_i) for all actual window lengths,
 not window_count times C(S) or M(S). Per-window update overhead still repeats.
 Peak memory is the maximum per-window working set.
+These estimates count valid algorithmic steps; masked rectangular execution can
+still perform arithmetic for padded positions on the training device.
 
 New runs record actual processed lengths and source_length_counts before
 windowing. Their computation, access, and peak-memory estimates are calculated
 from those lengths during the run. Comparison tables, final-test exports, and
 overview figures read the saved estimates without reconstructing old experiments.
+Baseline scaling charts use the saved peak-cost horizon, rather than the length
+of the first training sample, which can be shorter for variable-length audio.
 
 The earlier analytical recalculation of historical runs is a separate local
 migration. Its generated charts and data remain local artifacts. Running the

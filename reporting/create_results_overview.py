@@ -272,9 +272,12 @@ def load_baselines(datasets: list[str]) -> dict[str, dict]:
             raise FileNotFoundError(f"Saved run summary is missing: {summary_path}")
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         meta = summary["meta"]
-        lengths = summary["memory"]["theory"]["instance_length_counts"]
+        theory = summary["memory"]["theory"]
+        lengths = theory["instance_length_counts"]
         batch, width, depth = int(source.batch), int(source.hidden), int(source.hidden_depth)
-        full_steps = int(meta["time_steps"])
+        # Sample-zero metadata need not describe the longest sequence. The
+        # saved cost horizon corresponds to the reported peak working set.
+        full_steps = int(theory.get("time_steps", max(map(int, lengths))))
         input_dim, classes = int(meta["input_dim"]), int(meta["n_classes"])
         if full_steps < 16:
             raise ValueError(f"{dataset} has only {full_steps} time steps; S=16 does not fit")

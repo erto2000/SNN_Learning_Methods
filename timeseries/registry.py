@@ -61,5 +61,8 @@ def get_dataloaders(dataset, root='./data', batch_size=128, max_samples=None,
         pre_window_time_steps=sample_info.get('pre_window_time_steps', time_steps),
         window_length=sample_info.get('window_length'), window_hop=sample_info.get('window_hop'),
         window_lengths=sample_info.get('window_lengths'),
-        window_tail_rule=sample_info.get('window_tail_rule'))
+        window_tail_rule=sample_info.get('window_tail_rule'),
+        window_learning_weighting='valid_length_per_recording_v1',
+        window_vote_weighting='valid_length_v1')
+    metadata['window_optimizer_schedule'] = 'one_step_per_recording_batch_v1'
     return loaders, metadata

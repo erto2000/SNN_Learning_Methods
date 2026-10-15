@@ -12,16 +12,16 @@ HAR_PIPELINE = transforms.Compose([
     transforms.ZScore(),
 ])
 
-# MNIST static: 50 timesteps, 784 pixels
+# MNIST static: 30 timesteps, 784 pixels
 MNIST_STATIC_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
-    transforms.RepeatStatic(T=50),
+    transforms.RepeatStatic(T=30),
 ])
 
-# MNIST rate: 20 timesteps, 784 pixels
+# MNIST rate: 30 timesteps, 784 pixels
 MNIST_RATE_PIPELINE = transforms.Compose([
     transforms.ToFloat32(),
-    transforms.DeterministicSpikes(gain=0.7, T=20),
+    transforms.DeterministicSpikes(gain=0.7, T=30),
 ])
 
 # Speech Commands: 1 s audio -> 101 log-mel frames, 64 bands

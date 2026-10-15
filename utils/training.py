@@ -40,7 +40,7 @@ def build_cfg(D: int, K: int, g: Dict[str, Any]) -> NetConfig:
     )
 
 
-def _time_eval_specs(T: int, time_eval_fracs=None, time_eval_include_t1: bool = False):
+def _time_eval_specs(T, time_eval_fracs=None, time_eval_include_t1: bool = False):
     specs = []
     seen = set()
 
@@ -59,8 +59,10 @@ def _time_eval_specs(T: int, time_eval_fracs=None, time_eval_include_t1: bool = 
         if key in seen:
             continue
 
-        T_eval = int(round(frac * T))
-        T_eval = max(1, min(T, T_eval))
+        if torch.is_tensor(T):
+            T_eval = torch.minimum((frac * T).round().long().clamp_min(1), T)
+        else:
+            T_eval = max(1, min(T, int(round(frac * T))))
 
         specs.append((key, T_eval))
         seen.add(key)
@@ -116,11 +118,11 @@ def eval_epoch(
 
     try:
         for pieces in iter_piece_batches(test_loader, device, chunk_segments=True, dtype=runtime_dtype):
-            batch_preds, batch_ids = [], []
-            partial_preds = {}
+            batch_preds, batch_ids, batch_lengths = [], [], []
+            partial_preds, partial_lengths = {}, {}
             gt_per_sample = None
-            for Xw, yw, sample_ids, B in pieces:
-                logits, activity = learner.forward(Xw, return_activity=True)
+            for Xw, yw, sample_ids, B, time_mask in pieces:
+                logits, activity = learner.forward(Xw, return_activity=True, time_mask=time_mask)
                 preds_w = logits.argmax(dim=-1)
                 correct_windows += (preds_w == yw).sum().item()
                 total_windows += yw.numel()
@@ -130,11 +132,25 @@ def eval_epoch(
                     gt_per_sample = torch.full((B,), -1, dtype=torch.long, device=yw.device)
                 gt_per_sample.index_copy_(0, sample_ids, yw)
 
-                for key, T_eval in _time_eval_specs(Xw.shape[1], time_eval_fracs, time_eval_include_t1):
-                    logits_t = (logits if T_eval == Xw.shape[1] else
-                                learner.forward(Xw[:, :T_eval, :], return_activity=False))
+                lengths = (time_mask.sum(dim=1) if time_mask is not None else
+                           torch.full((len(yw),), Xw.shape[1], device=Xw.device, dtype=torch.long))
+                batch_lengths.append(lengths)
+                for key, T_eval in _time_eval_specs(lengths, time_eval_fracs, time_eval_include_t1):
+                    if torch.is_tensor(T_eval):
+                        horizon = int(T_eval.max())
+                        partial_mask = torch.arange(horizon, device=Xw.device)[None, :] < T_eval[:, None]
+                        unchanged = torch.equal(T_eval, lengths)
+                    else:
+                        horizon, partial_mask = T_eval, None
+                        unchanged = time_mask is None and horizon == Xw.shape[1]
+                    logits_t = (logits if unchanged else
+                                learner.forward(Xw[:, :horizon, :], return_activity=False,
+                                                time_mask=partial_mask))
                     preds_t = logits_t.argmax(dim=-1)
                     partial_preds.setdefault(key, []).append(preds_t)
+                    vote_lengths = (T_eval if torch.is_tensor(T_eval) else
+                                    torch.full_like(lengths, T_eval))
+                    partial_lengths.setdefault(key, []).append(vote_lengths)
                     time_eval_window_correct[key] = time_eval_window_correct.get(key, 0) + (preds_t == yw).sum().item()
                     time_eval_window_total[key] = time_eval_window_total.get(key, 0) + yw.numel()
 
@@ -150,11 +166,13 @@ def eval_epoch(
             if (gt_per_sample < 0).any():
                 raise ValueError("Evaluation batch contains a sample with no valid windows")
             ids = torch.cat(batch_ids)
-            preds_sample = majority_vote(torch.cat(batch_preds), ids, num_classes=n_classes, B=B)
+            preds_sample = majority_vote(torch.cat(batch_preds), ids, num_classes=n_classes, B=B,
+                                         weights=torch.cat(batch_lengths))
             sample_correct += (preds_sample == gt_per_sample).sum().item()
             sample_total += B
             for key, predictions in partial_preds.items():
-                preds_t = majority_vote(torch.cat(predictions), ids, num_classes=n_classes, B=B)
+                preds_t = majority_vote(torch.cat(predictions), ids, num_classes=n_classes, B=B,
+                                         weights=torch.cat(partial_lengths[key]))
                 time_eval_sample_correct[key] = time_eval_sample_correct.get(key, 0) + (preds_t == gt_per_sample).sum().item()
                 time_eval_sample_total[key] = time_eval_sample_total.get(key, 0) + B
 
@@ -227,27 +245,47 @@ def run_train_loop(
     for epoch in range(1, epochs + 1):
         learner.model.train()
 
-        n_tr, acc_tr_sum, loss_sum, aux_msg = 0, 0.0, 0.0, ""
-        for Xp, yp, _, _ in iter_pieces(
-                train_loader, device, chunk_segments=True, dtype=runtime_dtype,
-                source_length_profile=cost_source_profile if epoch == 1 else None):
-            if epoch == 1 and cost_profile is not None:
-                cost_profile[int(Xp.shape[1])] += int(Xp.shape[0])
-            stats = learner.train_step(Xp, yp)
-            n_tr += len(yp)
-            if "acc" in stats:
-                acc_tr_sum += stats["acc"] * len(yp)
-            if "loss" in stats:
-                loss_sum += stats["loss"] * len(yp)
-            if "layer" in stats:
-                aux_msg = f" | layer:{stats['layer']}"
+        n_tr, acc_tr_sum, loss_sum, loss_weight_sum, aux_msg = 0, 0.0, 0.0, 0.0, ""
+        for recording_batch in train_loader:
+            X_batch, _, extra = recording_batch
+            segment_mask = extra.get("seg_mask")
+            multiple = X_batch.dim() == 4 and (bool((segment_mask.sum(1) > 1).any()) if segment_mask is not None else X_batch.shape[1] > 1)
+            accumulate = multiple and getattr(learner, "mode", None) != "original"
+            if accumulate:
+                learner.begin_recording_batch()
+            for Xp, yp, _, original_B, time_mask, sample_weight in iter_pieces(
+                    [recording_batch], device, chunk_segments=True, dtype=runtime_dtype,
+                    source_length_profile=cost_source_profile if epoch == 1 else None,
+                    include_weights=True):
+                if epoch == 1 and cost_profile is not None:
+                    if time_mask is None:
+                        cost_profile[int(Xp.shape[1])] += int(Xp.shape[0])
+                    else:
+                        for length in time_mask.sum(dim=1).tolist():
+                            cost_profile[int(length)] += 1
+                learning_weight = sample_weight * (len(yp) / original_B) if accumulate else sample_weight
+                stats = learner.train_step(Xp, yp, time_mask=time_mask, sample_weight=learning_weight)
+                if accumulate and "loss" in stats:
+                    stats["loss"] *= original_B / len(yp)
+                n_tr += len(yp)
+                if "acc" in stats:
+                    acc_tr_sum += stats["acc"] * len(yp)
+                if "loss" in stats:
+                    loss_sum += stats["loss"] * len(yp)
+                    loss_weight_sum += float(sample_weight.sum())
+                if "layer" in stats:
+                    aux_msg = f" | layer:{stats['layer']}"
+            if accumulate:
+                learner.end_recording_batch()
 
         if hasattr(learner, "on_epoch_end"):
             ff_state = learner.on_epoch_end()
             if ff_state.get("layer_advanced", False):
                 aux_msg += " | layer_advanced"
 
-        loss_avg = loss_sum / max(1, n_tr)
+        # Learners retain a batch-mean gradient. Report the weighted loss per
+        # original recording so extra windows do not artificially lower it.
+        loss_avg = loss_sum / max(1.0, loss_weight_sum)
         acc_avg = acc_tr_sum / max(1, n_tr)
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

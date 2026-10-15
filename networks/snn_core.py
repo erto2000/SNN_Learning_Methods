@@ -139,16 +139,19 @@ class SNNCore(nn.Module):
         state: SNNState,
         head_mem: Optional[torch.Tensor] = None,
         need_pre: bool = False,
+        time_mask: Optional[torch.Tensor] = None,
     ):
         """
         x_t: [N, Din0]
         need_pre=True -> returns per-layer pre-activations (post-norm, pre-LIF)
+        time_mask: optional [N] boolean mask; padding freezes state and emits zero.
         returns:
           last_hidden_spikes [N,H_L], head_out (None|[N,K]), new_state, new_head_mem,
           layer_spikes list([N,H_l]), optionally layer_pres list([N,H_l])
         """
 
-        h = x_t
+        active = time_mask[:, None] if time_mask is not None else None
+        h = x_t if active is None else x_t.masked_fill(~active, 0)
         new_mems, new_spks, layer_spikes, pres = [], [], [], []
         for i, (fc, norm, lif) in enumerate(zip(self.fcs, self.norms, self.lifs)):
             pre = fc(h)
@@ -156,6 +159,8 @@ class SNNCore(nn.Module):
                 prev_spk = state.spikes[i]
                 if prev_spk is not None:
                     pre = pre + prev_spk @ self.Wrecs[i]
+            if active is not None and isinstance(norm, nn.BatchNorm1d):
+                raise ValueError("Masked variable-length batches require no normalization or per-sample normalization")
             pre = norm(pre)
             if need_pre:
                 pres.append(pre)
@@ -168,9 +173,16 @@ class SNNCore(nn.Module):
             if mem.dtype != pre.dtype:
                 mem = mem.to(pre.dtype)
 
+            if active is not None:
+                mem = torch.where(active, mem, state.mems[i])
+                spk = spk.masked_fill(~active, 0)
+
             new_mems.append(mem)
             # preserve last spikes if recurrence is being used for this layer
-            new_spks.append(spk if self.Wrec_flags[i] else None)
+            recurrent_spk = spk if self.Wrec_flags[i] else None
+            if active is not None and recurrent_spk is not None:
+                recurrent_spk = torch.where(active, recurrent_spk, state.spikes[i])
+            new_spks.append(recurrent_spk)
             layer_spikes.append(spk)
             h = spk
 
@@ -180,9 +192,12 @@ class SNNCore(nn.Module):
 
         if self.head_lif is None:
             out = self.head(h)  # logits
+            if active is not None:
+                out = out.masked_fill(~active, 0)
             return h, out, SNNState(new_mems, new_spks), None, layer_spikes, (pres if need_pre else None)
         else:
             pre_o = self.head(h)
+            old_head_mem = head_mem
             spk_o, head_mem = self.head_lif(pre_o, head_mem)
 
             # keep head LIF outputs in same dtype as pre_o
@@ -190,5 +205,9 @@ class SNNCore(nn.Module):
                 spk_o = spk_o.to(pre_o.dtype)
             if head_mem.dtype != pre_o.dtype:
                 head_mem = head_mem.to(pre_o.dtype)
+
+            if active is not None:
+                head_mem = torch.where(active, head_mem, old_head_mem)
+                spk_o = spk_o.masked_fill(~active, 0)
 
             return h, spk_o, SNNState(new_mems, new_spks), head_mem, layer_spikes, (pres if need_pre else None)

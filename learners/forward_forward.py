@@ -85,16 +85,20 @@ class FFLearner(BaseLearner):
         """
         return cur / (cur.norm(p=2, dim=1, keepdim=True) + eps) * self.gain
 
-    def _add_label_channels(self, x_btD: torch.Tensor, y_b: torch.Tensor) -> torch.Tensor:
+    def _add_label_channels(self, x_btD: torch.Tensor, y_b: torch.Tensor, time_mask: torch.Tensor | None = None) -> torch.Tensor:
         B, T, D = x_btD.shape
         C = self.meta["n_classes"]
         hot = F.one_hot(y_b, num_classes=C).to(x_btD.dtype)   # [B, C]
-        s = x_btD.amax(dim=(1, 2)).clamp_min(1e-6)           # [B]
+        scale_input = x_btD if time_mask is None else x_btD.masked_fill(~time_mask.unsqueeze(-1), -torch.inf)
+        s = scale_input.amax(dim=(1, 2)).clamp_min(1e-6)     # [B]
         hot = hot * s.unsqueeze(1)                           # scale
         lbl = hot.unsqueeze(1).expand(B, T, C)               # [B, T, C]
-        return torch.cat([x_btD, lbl], dim=-1)               # [B, T, D+C]
+        X_lbl = torch.cat([x_btD, lbl], dim=-1)              # [B, T, D+C]
+        if time_mask is not None:
+            X_lbl = X_lbl.masked_fill(~time_mask.unsqueeze(-1), 0)
+        return X_lbl
 
-    def _ff_step_collect(self, X_t: torch.Tensor, mems: list[torch.Tensor]):
+    def _ff_step_collect(self, X_t: torch.Tensor, mems: list[torch.Tensor], time_mask: torch.Tensor | None = None):
         """
         One time-step forward through *all* layers, returning spikes and new mems.
         """
@@ -104,12 +108,16 @@ class FFLearner(BaseLearner):
         for i, (fc, lif) in enumerate(zip(self.model.fcs, self.model.lifs)):
             pre = self._normalize_current(fc(h))
             spk, mem = lif(pre, mems[i])
+            if time_mask is not None:
+                active = time_mask.unsqueeze(1)
+                mem = torch.where(active, mem, mems[i])
+                spk = torch.where(active, spk, torch.zeros_like(spk))
             new_mems.append(mem)
             layer_spikes.append(spk)
             h = spk
         return layer_spikes, new_mems
 
-    def _goodness_scores(self, X_lbl: torch.Tensor, return_activity: bool = False):
+    def _goodness_scores(self, X_lbl: torch.Tensor, return_activity: bool = False, time_mask: torch.Tensor | None = None):
         """
         Compute class goodness for label-conditioned inputs.
         Returns:
@@ -133,7 +141,10 @@ class FFLearner(BaseLearner):
         layer_spike_counts = [0.0 for _ in range(L)]
 
         for t in range(T):
-            layer_spikes, mems = self._ff_step_collect(X_lbl[:, t, :], mems)
+            layer_spikes, mems = self._ff_step_collect(
+                X_lbl[:, t, :], mems,
+                time_mask=None if time_mask is None else time_mask[:, t],
+            )
             for i in range(L):
                 spk_sums[i] += layer_spikes[i]
                 if return_activity:
@@ -148,45 +159,48 @@ class FFLearner(BaseLearner):
             layer_spike_counts=layer_spike_counts,
             num_samples=B,
             num_timesteps=T,
+            valid_steps=None if time_mask is None else int(time_mask.sum().item()),
         )
         return goodness, activity
 
     # ------------ contract ------------
 
     @torch.no_grad()
-    def forward(self, X: torch.Tensor, return_activity: bool = False):
+    def forward(self, X: torch.Tensor, return_activity: bool = False, time_mask: torch.Tensor | None = None):
         """
         X: [B, T, D] -> class scores [B, K] OR (scores [B, K], activity).
         Uses all layers' goodness (sum), just like before.
         """
         N, T, D = X.shape
         X = X.to(self.device)
+        time_mask = self._prepare_time_mask(X, time_mask)
         C = self.meta["n_classes"]
         device = X.device
 
         # Evaluate every class-conditioned copy
         X_rep = X.unsqueeze(1).expand(N, C, T, D).reshape(N * C, T, D)
         labels = torch.arange(C, device=device).unsqueeze(0).expand(N, C).reshape(-1)
-        X_lbl = self._add_label_channels(X_rep, labels)  # [N*C, T, D+K]
+        mask_rep = None if time_mask is None else time_mask.unsqueeze(1).expand(N, C, T).reshape(N * C, T)
+        X_lbl = self._add_label_channels(X_rep, labels, time_mask=mask_rep)  # [N*C, T, D+K]
 
         if not return_activity:
-            scores_flat = self._goodness_scores(X_lbl, return_activity=False)
+            scores_flat = self._goodness_scores(X_lbl, return_activity=False, time_mask=mask_rep)
             return scores_flat.view(N, C)
 
-        scores_flat, activity = self._goodness_scores(X_lbl, return_activity=True)
+        scores_flat, activity = self._goodness_scores(X_lbl, return_activity=True, time_mask=mask_rep)
 
         activity = dict(activity)
         activity["num_samples"] = int(N)
 
         activity["ff_label_conditioned"] = True
         activity["ff_effective_batch_multiplier"] = int(C)
-        activity["ff_internal_num_samples"] = int(activity.get("num_samples", N * C))
+        activity["ff_internal_num_samples"] = int(N * C)
 
         return scores_flat.view(N, C), activity
 
     # ------------- training -------------
 
-    def _goodness_for_layer(self, X_lbl: torch.Tensor, layer_idx: int) -> torch.Tensor:
+    def _goodness_for_layer(self, X_lbl: torch.Tensor, layer_idx: int, time_mask: torch.Tensor | None = None) -> torch.Tensor:
         """
         FF goodness for a single layer, using proper temporal unrolling
         through all layers up to `layer_idx`.
@@ -211,7 +225,12 @@ class FFLearner(BaseLearner):
             spk_sum = torch.zeros_like(mem)
             for t in range(T):
                 pre = self._normalize_current(self.model.fcs[0](X_lbl[:, t, :]))
-                spk, mem = self.model.lifs[0](pre, mem)
+                spk, next_mem = self.model.lifs[0](pre, mem)
+                if time_mask is not None:
+                    active = time_mask[:, t].unsqueeze(1)
+                    next_mem = torch.where(active, next_mem, mem)
+                    spk = torch.where(active, spk, torch.zeros_like(spk))
+                mem = next_mem
                 spk_sum += spk
             return (spk_sum ** 2).mean(dim=1)
 
@@ -237,14 +256,19 @@ class FFLearner(BaseLearner):
             h = X_lbl[:, t, :]
             for i in range(layer_idx + 1):
                 pre = self._normalize_current(self.model.fcs[i](h))
-                spk, mems[i] = self.model.lifs[i](pre, mems[i])
+                spk, next_mem = self.model.lifs[i](pre, mems[i])
+                if time_mask is not None:
+                    active = time_mask[:, t].unsqueeze(1)
+                    next_mem = torch.where(active, next_mem, mems[i])
+                    spk = torch.where(active, spk, torch.zeros_like(spk))
+                mems[i] = next_mem
                 h = spk
             # h now is spikes of `layer_idx`
             spk_sum += h
 
         return (spk_sum ** 2).mean(dim=1)
 
-    def train_step(self, X: torch.Tensor, y: torch.Tensor) -> dict:
+    def train_step(self, X: torch.Tensor, y: torch.Tensor, time_mask: torch.Tensor | None = None, sample_weight=None) -> dict:
         """
         Greedy layer-wise FF training (your original logic),
         now with a better `_goodness_for_layer` for deeper layers.
@@ -253,27 +277,33 @@ class FFLearner(BaseLearner):
         opt = self.layer_opts[layer_idx]
 
         X, y = X.to(self.device), y.to(self.device)
+        time_mask = self._prepare_time_mask(X, time_mask)
+        sample_weight = self._prepare_sample_weight(X, sample_weight)
 
         # Positive / negative batches
-        X_pos = self._add_label_channels(X, y)
+        X_pos = self._add_label_channels(X, y, time_mask=time_mask)
         # A permutation can leave labels unchanged, especially in binary or
         # single-class batches. Draw uniformly from the other K-1 labels.
         offsets = torch.randint(1, self.meta["n_classes"], y.shape, device=y.device)
         y_neg = (y + offsets) % self.meta["n_classes"]
-        X_neg = self._add_label_channels(X, y_neg)
+        X_neg = self._add_label_channels(X, y_neg, time_mask=time_mask)
 
-        Gpos = self._goodness_for_layer(X_pos, layer_idx)
-        Gneg = self._goodness_for_layer(X_neg, layer_idx)
+        Gpos = self._goodness_for_layer(X_pos, layer_idx, time_mask=time_mask)
+        Gneg = self._goodness_for_layer(X_neg, layer_idx, time_mask=time_mask)
         delta = Gpos - Gneg
-        loss = F.softplus(-self.alpha * delta).mean()
+        per_sample_loss = F.softplus(-self.alpha * delta)
+        loss = (
+            per_sample_loss.mean() if sample_weight is None else
+            (per_sample_loss * sample_weight).mean()
+        )
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        opt.step()
+        self._optimizer_step(opt)
 
         # Accuracy via forward()
         with torch.no_grad():
-            preds = self.predict_batch(X)
+            preds = self.predict_batch(X, time_mask=time_mask)
             acc = (preds == y).float().mean().item() * 100.0
 
         return {

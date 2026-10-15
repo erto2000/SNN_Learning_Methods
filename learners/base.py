@@ -8,29 +8,101 @@ class BaseLearner(ABC):
     """
     Minimal, window-agnostic learner base.
     Contract:
-      - forward(X, return_activity=False) -> logits OR (logits, activity)
-      - train_step(X,y) -> dict with loss/acc
-      - predict_batch(X) -> [B] class indices
+      - forward(X, return_activity=False, time_mask=None) -> logits OR (logits, activity)
+      - train_step(X,y,time_mask=None,sample_weight=None) -> dict with loss/acc
+      - predict_batch(X,time_mask=None) -> [B] class indices
     """
     def __init__(self, net_cfg: NetConfig, meta: dict, device: torch.device):
         self.cfg = net_cfg
         self.meta = meta
         self.device = device
         self.model = self._build_model().to(device)
+        self._batch_gradients = None
+
+    def begin_recording_batch(self):
+        """Defer optimizer updates while sequential windows form gradients."""
+        self._batch_gradients = {}
+
+    @torch.no_grad()
+    def _optimizer_step(self, optimizer):
+        if self._batch_gradients is None:
+            optimizer.step()
+            return
+        gradients = self._batch_gradients.setdefault(optimizer, {})
+        for group in optimizer.param_groups:
+            for param in group['params']:
+                if param.grad is not None:
+                    if param in gradients:
+                        gradients[param].add_(param.grad)
+                    else:
+                        gradients[param] = param.grad.detach().clone()
+
+    @torch.no_grad()
+    def end_recording_batch(self):
+        gradients_by_optimizer = self._batch_gradients
+        self._batch_gradients = None
+        if gradients_by_optimizer is None:
+            return
+        for optimizer, gradients in gradients_by_optimizer.items():
+            optimizer.zero_grad(set_to_none=True)
+            snapshots = {p: p.detach().clone() for p in gradients} if getattr(self, 'max_rel_step', None) is not None else {}
+            for param, gradient in gradients.items():
+                param.grad = gradient
+            optimizer.step()
+            for param, old in snapshots.items():
+                delta = param - old
+                limit = self.max_rel_step * old.norm()
+                if old.norm() > 0 and delta.norm() > limit:
+                    param.copy_(old + delta * limit / (delta.norm() + 1e-8))
+        if hasattr(self, '_clamp_rec'):
+            self._clamp_rec()
 
     @abstractmethod
     def _build_model(self) -> torch.nn.Module:
         ...
 
     @abstractmethod
-    def forward(self, X: torch.Tensor, return_activity: bool = False):
+    def forward(self, X: torch.Tensor, return_activity: bool = False, time_mask=None):
         """X:[B,T,D] -> logits:[B,K] OR (logits:[B,K], activity:dict)."""
         ...
 
     @abstractmethod
-    def train_step(self, X: torch.Tensor, y: torch.Tensor) -> dict:
+    def train_step(self, X: torch.Tensor, y: torch.Tensor, time_mask=None, sample_weight=None) -> dict:
         """Single-batch update. Returns logs like {'loss': float, 'acc': float[%]}."""
         ...
+
+    @staticmethod
+    def _prepare_sample_weight(X: torch.Tensor, sample_weight):
+        """Keep each window's recording-level share when averaging a batch.
+
+        The caller supplies valid length divided by the recording's total
+        window lengths. Do not renormalize these shares within a minibatch:
+        that would give a batch containing only short tails full influence.
+        """
+        if sample_weight is None:
+            return None
+        sample_weight = torch.as_tensor(sample_weight, device=X.device, dtype=X.dtype)
+        if sample_weight.shape != (X.shape[0],):
+            raise ValueError("sample_weight must have shape [B]")
+        if not bool(torch.isfinite(sample_weight).all()) or bool((sample_weight < 0).any()):
+            raise ValueError("sample_weight must contain finite nonnegative values")
+        return None if bool((sample_weight == 1).all()) else sample_weight
+
+    @staticmethod
+    def _prepare_time_mask(X: torch.Tensor, time_mask):
+        """Validate recorded lengths; real zero-valued inputs remain valid."""
+        if X.ndim != 3 or X.shape[1] < 1:
+            raise ValueError("Expected a nonempty sequence batch [B,T,D]")
+        if time_mask is None:
+            return None
+        if time_mask.dtype != torch.bool or time_mask.shape != X.shape[:2]:
+            raise ValueError("time_mask must be boolean with shape [B,T]")
+        time_mask = time_mask.to(device=X.device)
+        if not bool(time_mask[:, 0].all()):
+            raise ValueError("Every sequence must contain at least one valid time step")
+        if bool((time_mask[:, 1:] & ~time_mask[:, :-1]).any()):
+            raise ValueError("time_mask must contain a valid prefix followed by padding")
+        return None if bool(time_mask.all()) else time_mask
 
     def _cost_dimensions(self) -> dict:
         fcs = getattr(self.model, "fcs", None)
@@ -222,6 +294,7 @@ class BaseLearner(ABC):
         layer_spike_counts: list[float],
         num_samples: int,
         num_timesteps: int,
+        valid_steps: int | None = None,
         extra: dict | None = None,
     ) -> dict:
         fcs = getattr(self.model, "fcs", [])
@@ -232,14 +305,15 @@ class BaseLearner(ABC):
         synops = float(sum(sc * fo for sc, fo in zip(layer_spike_counts, fanouts)))
 
         num_neurons = int(sum(layer_sizes))
-        num_neuron_slots = float(max(1, num_samples * num_timesteps * max(1, num_neurons)))
+        sample_steps = int(valid_steps) if valid_steps is not None else num_samples * num_timesteps
+        num_neuron_slots = float(max(1, sample_steps * max(1, num_neurons)))
         firing_rate = total_spike_count / num_neuron_slots
 
         input_dim = int(fcs[0].in_features) if len(fcs) > 0 else 0
         first_hidden = int(layer_sizes[0]) if layer_sizes else 0
 
-        input_mac_ops = float(num_samples * num_timesteps * input_dim * first_hidden)
-        neuron_updates = float(num_samples * num_timesteps * num_neurons)
+        input_mac_ops = float(sample_steps * input_dim * first_hidden)
+        neuron_updates = float(sample_steps * num_neurons)
 
         out = {
             "total_spike_count": total_spike_count,
@@ -248,6 +322,7 @@ class BaseLearner(ABC):
             "num_neurons": num_neurons,
             "num_samples": int(num_samples),
             "num_timesteps": int(num_timesteps),
+            "valid_timesteps": sample_steps,
             "num_neuron_slots": num_neuron_slots,
             "layer_spike_counts": [float(x) for x in layer_spike_counts],
             "layer_fanouts": [int(x) for x in fanouts],
@@ -261,9 +336,9 @@ class BaseLearner(ABC):
         return out
 
     @torch.no_grad()
-    def predict_batch(self, X: torch.Tensor) -> torch.Tensor:
+    def predict_batch(self, X: torch.Tensor, time_mask=None) -> torch.Tensor:
         self.model.eval()
         X = X.to(self.device)
-        out = self.forward(X, return_activity=False)
+        out = self.forward(X, return_activity=False, time_mask=time_mask)
         logits = out[0] if isinstance(out, tuple) else out
         return logits.argmax(dim=1)

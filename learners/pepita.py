@@ -17,8 +17,9 @@ class PepitaLearner(BaseLearner):
           and apply one update using the current timestep's presynaptic activity.
 
       - accum:
-          Accumulate spike counts across time, divide by T to obtain spike rates,
-          then update once using spike-rate differences between the two phases.
+          Accumulate spike counts across time, divide by each valid sequence
+          length to obtain spike rates, then update once using spike-rate
+          differences between the two phases.
 
     Additions vs a basic PEPITA implementation:
       - Data-driven calibration of F on the first batch so that
@@ -47,7 +48,7 @@ class PepitaLearner(BaseLearner):
                 "original": apply one update per timestep using the timestep-wise
                             difference between phase-1 and phase-2 spikes.
                 "accum":    apply one update using spike-rate differences, where
-                            spike rate = accumulated spike count / T.
+                            spike rate = spike count / valid sequence length.
             lr: base learning rate.
             max_rel_step: optional relative step bound; None uses plain
                           optimizer steps (no post-update rescaling).
@@ -131,7 +132,7 @@ class PepitaLearner(BaseLearner):
         self.opt.zero_grad(set_to_none=True)
         for param, direction in directions:
             param.grad = (-direction).detach()
-        self.opt.step()
+        self._optimizer_step(self.opt)
 
         if snapshots is None:
             return
@@ -152,10 +153,16 @@ class PepitaLearner(BaseLearner):
     # Inference
     # -------------------------------------------------------------------------
     @torch.no_grad()
-    def forward(self, X: torch.Tensor, return_activity: bool = False):
+    def forward(
+        self,
+        X: torch.Tensor,
+        return_activity: bool = False,
+        time_mask: torch.Tensor | None = None,
+    ):
         """X:[B,T,D] -> logits:[B,K] OR (logits, activity)."""
         B, T, _ = X.shape
         X = X.to(self.device)
+        time_mask = self._prepare_time_mask(X, time_mask)
 
         if self.F.dtype != X.dtype or self.F.device != X.device:
             self.F = self.F.to(device=X.device, dtype=X.dtype)
@@ -167,7 +174,8 @@ class PepitaLearner(BaseLearner):
 
         for t in range(T):
             _, head_out, state, head_mem, layer_spikes, _ = self.model.forward_step(
-                X[:, t, :], state, head_mem
+                X[:, t, :], state, head_mem,
+                time_mask=None if time_mask is None else time_mask[:, t],
             )
             logits += head_out
 
@@ -182,6 +190,7 @@ class PepitaLearner(BaseLearner):
             layer_spike_counts=layer_spike_counts,
             num_samples=B,
             num_timesteps=T,
+            valid_steps=None if time_mask is None else int(time_mask.sum().item()),
         )
         return logits, activity
 
@@ -195,6 +204,7 @@ class PepitaLearner(BaseLearner):
         *,
         return_seq: bool = False,
         return_rate: bool = False,
+        time_mask: torch.Tensor | None = None,
     ):
         """
         Run one SNN phase over all timesteps.
@@ -206,7 +216,8 @@ class PepitaLearner(BaseLearner):
                 [T,B,H_l], one per layer.
             return_rate:
                 If True, return spike rates as a list of tensors [B,H_l],
-                one per layer, where rate = spike_count / T.
+                one per layer, divided by each sample's valid sequence length.
+            time_mask: Optional [B,T] mask of real sequence steps.
 
         Returns:
             dict with:
@@ -215,6 +226,7 @@ class PepitaLearner(BaseLearner):
                 h_rate: optional list of [B,H_l].
         """
         B, T, _ = X.shape
+        time_mask = self._prepare_time_mask(X, time_mask)
         state, head_mem = self.model.init_state(B, X.device, X.dtype)
         L = len(self.model.fcs)
 
@@ -232,7 +244,8 @@ class PepitaLearner(BaseLearner):
 
         for t in range(T):
             _, head_out, state, head_mem, layer_spikes, _ = self.model.forward_step(
-                X[:, t, :], state, head_mem
+                X[:, t, :], state, head_mem,
+                time_mask=None if time_mask is None else time_mask[:, t],
             )
             logits += head_out
 
@@ -250,15 +263,18 @@ class PepitaLearner(BaseLearner):
             out["h_seq"] = [torch.stack(seq, 0) for seq in h_rec]
 
         if return_rate:
-            denom = max(1, T)
+            denom = (
+                max(1, T) if time_mask is None
+                else time_mask.sum(dim=1, keepdim=True).to(X.dtype)
+            )
             out["h_rate"] = [h / denom for h in h_sum]
 
         return out
 
     # Backward-compatible alias for old internal calls.
     @torch.no_grad()
-    def _first_pass(self, X: torch.Tensor):
-        return self._run_pass(X, return_seq=True, return_rate=False)
+    def _first_pass(self, X: torch.Tensor, time_mask: torch.Tensor | None = None):
+        return self._run_pass(X, return_seq=True, return_rate=False, time_mask=time_mask)
 
     # -------------------------------------------------------------------------
     # Original mode update: timestep-wise differences, one update per timestep
@@ -270,6 +286,8 @@ class PepitaLearner(BaseLearner):
         h_seq,
         h_mod_seq,
         e: torch.Tensor,
+        time_mask: torch.Tensor | None = None,
+        sample_weight=None,
     ) -> None:
         """
         Original PEPITA-style temporal update.
@@ -287,12 +305,17 @@ class PepitaLearner(BaseLearner):
             raise RuntimeError("PepitaLearner expects at least one hidden FC layer.")
 
         denom = max(1, B)
+        weighted_error = e if sample_weight is None else e * sample_weight.unsqueeze(1)
 
         for t in range(T):
+            if time_mask is not None and not bool(time_mask[:, t].any()):
+                continue
             directions = []
 
             # ----- Layer 0 update -----
             diff0_t = h_seq[0][t] - h_mod_seq[0][t]  # [B,H0]
+            if sample_weight is not None:
+                diff0_t = diff0_t * sample_weight.unsqueeze(1)
             x_mod_t = X_mod[:, t, :]                 # [B,D0]
             dW0_t = -(diff0_t.t() @ x_mod_t) / denom # [H0,D0]
             directions.append((self.model.fcs[0].weight, dW0_t))
@@ -301,6 +324,8 @@ class PepitaLearner(BaseLearner):
             for l in range(1, L):
                 pre_t = h_mod_seq[l - 1][t]             # [B,H_{l-1}]
                 diff_t = h_seq[l][t] - h_mod_seq[l][t]  # [B,H_l]
+                if sample_weight is not None:
+                    diff_t = diff_t * sample_weight.unsqueeze(1)
                 dWl_t = -(diff_t.t() @ pre_t) / denom   # [H_l,H_{l-1}]
                 directions.append((self.model.fcs[l].weight, dWl_t))
 
@@ -308,7 +333,7 @@ class PepitaLearner(BaseLearner):
             # There is no hidden-layer phase difference at the head. Use the
             # same output error e with the current second-phase final-layer spikes.
             h_last_mod_t = h_mod_seq[-1][t]          # [B,H_{L-1}]
-            dWo_t = -(e.t() @ h_last_mod_t) / denom  # [K,H_{L-1}]
+            dWo_t = -(weighted_error.t() @ h_last_mod_t) / denom  # [K,H_{L-1}]
             directions.append((self.model.head.weight, dWo_t))
 
             self._apply_directions(directions)
@@ -323,13 +348,15 @@ class PepitaLearner(BaseLearner):
         h_rate,
         h_mod_rate,
         e: torch.Tensor,
+        time_mask: torch.Tensor | None = None,
+        sample_weight=None,
     ) -> None:
         """
         Accumulation-mode update.
 
         For every hidden layer l:
-          r_l      = spike_count_l_phase1 / T
-          r'_l     = spike_count_l_phase2 / T
+          r_l      = spike_count_l_phase1 / valid_length
+          r'_l     = spike_count_l_phase2 / valid_length
           Δr_l     = r_l - r'_l
 
         Updates are computed from these spike-rate differences, not from
@@ -345,12 +372,18 @@ class PepitaLearner(BaseLearner):
 
         # For layer 0, the presynaptic signal is the time-averaged modulated input.
         # Hidden layers use second-phase presynaptic spike rates.
-        x_mod_rate = X_mod.mean(dim=1)               # [B,D0]
+        if time_mask is None:
+            x_mod_rate = X_mod.mean(dim=1)          # [B,D0]
+        else:
+            valid_lengths = time_mask.sum(dim=1, keepdim=True).to(X_mod.dtype)
+            x_mod_rate = X_mod.masked_fill(~time_mask.unsqueeze(-1), 0).sum(dim=1) / valid_lengths
 
         directions = []
 
         # ----- Layer 0 update -----
         diff0_rate = h_rate[0] - h_mod_rate[0]       # [B,H0]
+        if sample_weight is not None:
+            diff0_rate = diff0_rate * sample_weight.unsqueeze(1)
         dW0 = -(diff0_rate.t() @ x_mod_rate) / denom # [H0,D0]
         directions.append((self.model.fcs[0].weight, dW0))
 
@@ -358,13 +391,16 @@ class PepitaLearner(BaseLearner):
         for l in range(1, L):
             pre_rate = h_mod_rate[l - 1]             # [B,H_{l-1}]
             diff_rate = h_rate[l] - h_mod_rate[l]    # [B,H_l]
+            if sample_weight is not None:
+                diff_rate = diff_rate * sample_weight.unsqueeze(1)
             dWl = -(diff_rate.t() @ pre_rate) / denom
             directions.append((self.model.fcs[l].weight, dWl))
 
         # ----- Readout layer update -----
         # Use the second-phase final-layer spike rate.
         h_last_mod_rate = h_mod_rate[-1]             # [B,H_{L-1}]
-        dWo = -(e.t() @ h_last_mod_rate) / denom     # [K,H_{L-1}]
+        weighted_error = e if sample_weight is None else e * sample_weight.unsqueeze(1)
+        dWo = -(weighted_error.t() @ h_last_mod_rate) / denom  # [K,H_{L-1}]
         directions.append((self.model.head.weight, dWo))
 
         self._apply_directions(directions)
@@ -373,10 +409,18 @@ class PepitaLearner(BaseLearner):
     # Training step with PEPITA update + F calibration + relative step control
     # -------------------------------------------------------------------------
     @torch.no_grad()
-    def train_step(self, X: torch.Tensor, y: torch.Tensor):
+    def train_step(
+        self,
+        X: torch.Tensor,
+        y: torch.Tensor,
+        time_mask: torch.Tensor | None = None,
+        sample_weight=None,
+    ):
         K = self.meta["n_classes"]
         X, y = X.to(self.device), y.to(self.device)
         B, T, _ = X.shape
+        time_mask = self._prepare_time_mask(X, time_mask)
+        sample_weight = self._prepare_sample_weight(X, sample_weight)
 
         if self.F.dtype != X.dtype or self.F.device != X.device:
             self.F = self.F.to(device=X.device, dtype=X.dtype)
@@ -384,10 +428,10 @@ class PepitaLearner(BaseLearner):
         # ----- First pass: standard input -----
         if self.mode == "original":
             # Need timestep-wise spikes for per-timestep differences.
-            fp = self._run_pass(X, return_seq=True, return_rate=False)
+            fp = self._run_pass(X, return_seq=True, return_rate=False, time_mask=time_mask)
         elif self.mode == "accum":
             # Need spike rates only; no full time history is required.
-            fp = self._run_pass(X, return_seq=False, return_rate=True)
+            fp = self._run_pass(X, return_seq=False, return_rate=True, time_mask=time_mask)
         else:
             # Should be impossible because __init__ validates mode.
             raise RuntimeError(f"Invalid mode: {self.mode!r}")
@@ -397,13 +441,16 @@ class PepitaLearner(BaseLearner):
         # Cross-entropy and error signal at output.
         p = torch.softmax(logits, dim=1)  # [B,K]
         e = p - F.one_hot(y, num_classes=K).to(p.dtype)
-        loss = F.cross_entropy(logits, y)
+        loss = (
+            F.cross_entropy(logits, y) if sample_weight is None else
+            (F.cross_entropy(logits, y, reduction="none") * sample_weight).mean()
+        )
 
         # ----- One-time calibration of F using real data -----
         # Aim: std(e @ F) ≈ target_modulation_ratio * std(X)
         if not self._F_calibrated:
             delta = e @ self.F  # [B,D0]
-            s_x = X.std()
+            s_x = X.std() if time_mask is None else X[time_mask].std()
             s_delta = delta.std()
 
             if s_delta > 0 and s_x > 0:
@@ -415,23 +462,29 @@ class PepitaLearner(BaseLearner):
         # ----- Modulate input with calibrated F -----
         input_modulation = e @ self.F               # [B,D0]
         X_mod = X + input_modulation.unsqueeze(1)   # [B,T,D0]
+        if time_mask is not None:
+            X_mod = X_mod.masked_fill(~time_mask.unsqueeze(-1), 0)
 
         # ----- Second pass and mode-specific update -----
         if self.mode == "original":
-            sp = self._run_pass(X_mod, return_seq=True, return_rate=False)
+            sp = self._run_pass(X_mod, return_seq=True, return_rate=False, time_mask=time_mask)
             self._update_original(
                 X_mod=X_mod,
                 h_seq=fp["h_seq"],
                 h_mod_seq=sp["h_seq"],
                 e=e,
+                time_mask=time_mask,
+                sample_weight=sample_weight,
             )
         else:  # self.mode == "accum"
-            sp = self._run_pass(X_mod, return_seq=False, return_rate=True)
+            sp = self._run_pass(X_mod, return_seq=False, return_rate=True, time_mask=time_mask)
             self._update_accum(
                 X_mod=X_mod,
                 h_rate=fp["h_rate"],
                 h_mod_rate=sp["h_rate"],
                 e=e,
+                time_mask=time_mask,
+                sample_weight=sample_weight,
             )
 
         # ----- Accuracy for logging -----

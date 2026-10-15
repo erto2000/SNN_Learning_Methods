@@ -103,21 +103,17 @@ def get_base_run_config_by_dataset(dataset: str) -> Dict[str, Any]:
 # =========================================================
 # Window-length bounds
 # =========================================================
-def _step_for_T(T: int) -> int:
-    raw = max(4, T // 16)
-    p = 2 ** int(round(math.log2(raw)))
-    return int(max(4, min(p, max(8, T // 8))))
-
-
 def bounds_phase1_window(max_time_steps: int) -> Tuple[int, int, int]:
     """
     Broad search for the independent window-length experiment.
     """
     T = int(max_time_steps)
-    L_min = max(10, int(round(T * 0.10)))
-    L_max = max(L_min, int(round(T * 1.0)))
-    step = _step_for_T(T)
-    return L_min, L_max, step
+    if T < 1:
+        raise ValueError("max_time_steps must be positive")
+    L_min = max(1, int(round(T * 0.10)))
+    L_max = T
+    # Include every integer length, including the full-sequence endpoint.
+    return L_min, L_max, 1
 
 
 def bounds_phase2_window(best_L: int, *, max_time_steps: int) -> Tuple[int, int, int]:
@@ -127,16 +123,13 @@ def bounds_phase2_window(best_L: int, *, max_time_steps: int) -> Tuple[int, int,
     phase-1 window.
     """
     T = int(max_time_steps)
-    base_step = _step_for_T(T)
-    step = max(2, base_step // 2)
-
-    L_min = max(4, int(round(best_L * 0.75)))
+    if T < 1:
+        raise ValueError("max_time_steps must be positive")
+    if not 1 <= best_L <= T:
+        raise ValueError("best_L must be within the positive sequence horizon")
+    L_min = max(1, int(round(best_L * 0.75)))
     L_max = min(T, max(L_min, int(round(best_L * 1.25))))
-
-    # Snap to step so Optuna gets a valid integer grid.
-    L_min = max(step, int(math.floor(L_min / step) * step))
-    L_max = min(T, max(L_min, int(math.ceil(L_max / step) * step)))
-    return L_min, L_max, step
+    return L_min, L_max, 1
 
 
 def bounds_phase1_hop_ratio() -> Tuple[float, float]:
@@ -195,19 +188,129 @@ def suggest_hop_only(
     hr_max: float,
 ) -> Tuple[int, int, float]:
     """
-    Independent hop-ratio experiment:
-      - keep window length fixed
-      - search only hop_ratio
+    Search integer hops directly, avoiding rounded float aliases.
     """
     L = int(fixed_L)
-    hop_ratio = trial.suggest_float("hop_ratio", float(hr_min), float(hr_max))
-    hop = max(1, int(round(L * hop_ratio)))
+    hop_min, hop_max = hop_bounds(L, hr_min, hr_max)
+    hop = trial.suggest_int("hop", hop_min, hop_max)
+    hop_ratio = hop / L
 
     trial.set_user_attr("search_mode", "hop_only")
     trial.set_user_attr("fixed_L", L)
     trial.set_user_attr("hop", hop)
+    trial.set_user_attr("hop_ratio", hop_ratio)
 
     return L, hop, hop_ratio
+
+
+def hop_bounds(length: int, ratio_min: float, ratio_max: float) -> Tuple[int, int]:
+    """Include only integer hops whose effective ratio lies inside the bounds."""
+    lo = max(1, math.ceil(length * ratio_min - 1e-12))
+    hi = max(lo, math.floor(length * ratio_max + 1e-12))
+    return lo, hi
+
+
+def schedule_key(length: int, hop: int, source_lengths=None) -> tuple:
+    """Collapse equivalent inputs only when source lengths are guaranteed.
+
+    A subset maximum cannot prove equivalence for a variable-length dataset.
+    Without a complete length profile or fixed-length contract, use the exact
+    integer configuration instead.
+    """
+    if source_lengths is None:
+        return int(length), int(hop)
+    return tuple((int(total), tuple(transforms.window_spans(total, length, hop)))
+                 for total in sorted(set(source_lengths)))
+
+
+def optimize_unique(study, objective, *, choices, parameter, distribution,
+                    target, source_lengths=None, peers=(), context=None, anchors=()):
+    """Train up to target new, distinct schedules; duplicates spend no budget.
+
+    Reuse observations from the same dataset, learner and epoch budget. TPE
+    still proposes candidates normally. After repeated duplicate proposals,
+    enqueue one remaining integer choice so finite spaces terminate reliably.
+    """
+    context = dict(context or {})
+    candidates = {}
+    for value, (length, hop) in choices.items():
+        candidates.setdefault(schedule_key(length, hop, source_lengths),
+                              (value, int(length), int(hop)))
+
+    def trial_key(trial):
+        attrs = trial.user_attrs
+        length = attrs.get("L", trial.params.get("win_L", attrs.get("fixed_L")))
+        hop = attrs.get("hop", trial.params.get("hop"))
+        return schedule_key(length, hop, source_lengths) if length and hop else None
+
+    known = {}
+    for peer in (*peers, study):
+        for trial in peer.trials:
+            if trial.state == optuna.trial.TrialState.COMPLETE:
+                known.setdefault(trial_key(trial), (peer.study_name, trial))
+    present = {trial_key(trial) for trial in study.trials
+               if trial.state == optuna.trial.TrialState.COMPLETE}
+    for key, (value, length, hop) in candidates.items():
+        if key in known and key not in present:
+            source_name, source = known[key]
+            attrs = {**source.user_attrs, **context, "L": length, "hop": hop,
+                     "hop_ratio": hop / length, "training_reused": True,
+                     "source_study": source_name, "source_trial": source.number}
+            study.add_trial(optuna.trial.create_trial(value=source.value,
+                params={parameter: value}, distributions={parameter: distribution},
+                user_attrs=attrs))
+            present.add(key)
+
+    attempted = {trial_key(trial) for trial in study.trials
+                 if trial.user_attrs.get("training_attempted")}
+    remaining = set(candidates) - present - attempted
+    trained = lambda: sum(t.state == optuna.trial.TrialState.COMPLETE
+                          and not t.user_attrs.get("training_reused", False)
+                          for t in study.trials)
+    study.set_user_attr("training_budget", int(target))
+    study.set_user_attr("unique_candidates", len(candidates))
+    if not study.trials:
+        for value in dict.fromkeys(anchors):
+            if value in choices and schedule_key(*choices[value], source_lengths) in remaining:
+                study.enqueue_trial({parameter: value})
+    duplicate_streak = 0
+    while trained() < target and remaining:
+        if duplicate_streak >= 3:
+            key = min(remaining, key=lambda item: candidates[item][0])
+            study.enqueue_trial({parameter: candidates[key][0]})
+            duplicate_streak = 0
+        trial = study.ask()
+        value = trial.suggest_int(parameter, distribution.low, distribution.high,
+                                  step=distribution.step)
+        length, hop = choices[value]
+        key = schedule_key(length, hop, source_lengths)
+        trial.set_user_attr("L", int(length))
+        trial.set_user_attr("hop", int(hop))
+        if key not in remaining:
+            trial.set_user_attr("status", "duplicate_skipped")
+            # TPE ignores FAIL records. An unscored PRUNED record would count
+            # toward startup and incorrectly influence its observations.
+            study.tell(trial, state=optuna.trial.TrialState.FAIL)
+            duplicate_streak += 1
+            continue
+        duplicate_streak = 0
+        remaining.remove(key)
+        trial.set_user_attr("training_attempted", True)
+        try:
+            score = objective(trial)
+        except optuna.TrialPruned as exc:
+            trial.set_user_attr("error", str(exc))
+            study.tell(trial, state=optuna.trial.TrialState.PRUNED)
+        except Exception as exc:
+            trial.set_user_attr("error", str(exc))
+            study.tell(trial, state=optuna.trial.TrialState.FAIL)
+            print(f"[Search failure] {type(exc).__name__}: {exc}")
+        else:
+            study.tell(trial, score)
+    study.set_user_attr("trained_complete", trained())
+    study.set_user_attr("space_exhausted", not bool(remaining))
+    if trained() < target and not remaining:
+        print(f"[Search] Unique choices exhausted: {trained()}/{target} new trained networks.")
 
 
 # =========================================================
@@ -234,6 +337,9 @@ def export_study_csv(study: optuna.Study, out_csv: str) -> None:
         "run_id",
         "status",
         "error",
+        "training_reused",
+        "source_study",
+        "source_trial",
     ]
 
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
@@ -247,7 +353,7 @@ def export_study_csv(study: optuna.Study, out_csv: str) -> None:
                 "state": str(t.state),
                 "value": t.value,
                 "win_L": (t.params or {}).get("win_L", (t.user_attrs or {}).get("fixed_L")),
-                "hop_ratio": (t.params or {}).get("hop_ratio", (t.user_attrs or {}).get("fixed_hop_ratio")),
+                "hop_ratio": t.user_attrs.get("hop_ratio", t.user_attrs.get("fixed_hop_ratio")),
                 "hop": (t.user_attrs or {}).get("hop"),
                 "experiment": (t.user_attrs or {}).get("experiment"),
                 "phase": (t.user_attrs or {}).get("phase"),
@@ -255,6 +361,9 @@ def export_study_csv(study: optuna.Study, out_csv: str) -> None:
                 "run_id": (t.user_attrs or {}).get("run_id"),
                 "status": (t.user_attrs or {}).get("status"),
                 "error": (t.user_attrs or {}).get("error"),
+                "training_reused": t.user_attrs.get("training_reused", False),
+                "source_study": t.user_attrs.get("source_study"),
+                "source_trial": t.user_attrs.get("source_trial"),
             })
 
 
@@ -285,6 +394,13 @@ def export_best_json(study: optuna.Study, out_json: str) -> None:
         }
 
     with open(out_json, "w", encoding="utf-8") as f:
+        payload["n_trained_complete"] = sum(
+            t.state == optuna.trial.TrialState.COMPLETE
+            and not t.user_attrs.get("training_reused", False) for t in study.trials)
+        payload["n_reused_complete"] = sum(
+            t.state == optuna.trial.TrialState.COMPLETE
+            and t.user_attrs.get("training_reused", False) for t in study.trials)
+        payload["space_exhausted"] = study.user_attrs.get("space_exhausted")
         json.dump(payload, f, indent=2)
 
 
@@ -384,7 +500,7 @@ def make_objective(
 
         # Build the identity from the current experiment variant and learner.
         # The baseline config may have been copied from the first learner entry.
-        base_id = f"{dataset}-{learner}-v3"
+        base_id = f"{dataset}-{learner}-v5"
         run_id = (
             f"{base_id}-exp{experiment}-p{phase}-{search_mode}-"
             f"optuna-t{trial.number:04d}-L{L}-H{hop}"
@@ -422,10 +538,24 @@ def make_objective(
 # =========================================================
 # Main runner
 # =========================================================
+def select_hop_with_fallback(window_phase, window_study, hop_phase, hop_study):
+    """Compare validation at the same epoch budget, retaining non-overlap."""
+    candidates = [(window_phase, window_study), (hop_phase, hop_study)]
+    candidates = [(phase, study) for phase, study in candidates if study is not None]
+    if not candidates:
+        return None, None
+    # Phase 2 normally uses 10 epochs; Phase 1 uses only 5. Compare validation
+    # scores only within the highest available training budget.
+    highest_epochs = max(study.user_attrs.get("epochs", phase) for phase, study in candidates)
+    comparable = [(phase, study) for phase, study in candidates
+                  if study.user_attrs.get("epochs", phase) == highest_epochs]
+    return max(comparable, key=lambda item: item[1].best_value)
+
+
 def run_all_independent(
     *,
     results_dir: str = "results",
-    db_path: str = "results/optuna/window_hop_independent_v3.db",
+    db_path: str = "results/optuna/window_hop_independent_recording_batch_v3.db",
     metric: str = "sample_acc",
     phase1_trials: int = 20,
     phase1_epochs: int = 5,
@@ -435,35 +565,19 @@ def run_all_independent(
     window_fixed_hop_ratio: float = 1.0,
     datasets: Optional[list[str]] = None,
 ):
-    """
-    Runs two experiments per dataset x learner:
+    """Search lengths, then integer hops, using distinct trained networks.
 
-    A) Window-length experiment:
-       - Phase 1: broad search on L, fixed hop_ratio
-       - Phase 2: refine L around best phase-1 L using 0.75x..1.25x
-
-    B) Hop-ratio experiment:
-       - Phase 1: broad search on hop_ratio, fixed best L from the completed
-         window-length experiment
-       - Phase 2: refine hop_ratio around best phase-1 value using 0.75x..1.25x
-
-    This yields phase1_trials + phase2_trials for each experiment.
-    With the defaults that is 30 + 30 = 60 search runs per dataset x learner,
-    plus two automatically retrained final test runs at the normal epoch budget.
+    Each phase trains up to its own budget. Already evaluated schedules at the
+    same epoch budget are reused; exhausted finite spaces stop without moving
+    the unused budget elsewhere. Full length remains a normal length candidate.
+    Final settings are selected by validation before held-out test evaluation.
     """
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     ensure_dir(os.path.dirname(db_path))
     storage = f"sqlite:///{db_path}"
-
     datasets = list(datasets) if datasets is not None else [
-        "pamap2",
-        "har",
-        "dvs_gesture",
-        "large_scale_audio",
-        "speech_commands",
-        "esc50",
-        "urban8k",
-        "mitbih",
+        "pamap2", "har", "dvs_gesture", "large_scale_audio", "speech_commands",
+        "esc50", "urban8k", "mitbih", "mnist_static", "mnist_rate",
     ]
     learners = ["bp", "ff", "eprop", "pepita"]
 
@@ -474,301 +588,126 @@ def run_all_independent(
         bounds_cfg = deepcopy(base_run_cfg)
         if max_samples_override is not None:
             bounds_cfg["MAX_SAMPLES"] = int(max_samples_override)
-        length_info = inspect_training_lengths(
-            bounds_cfg,
-            remove_window_ops(base_pipeline),
-            max_samples=bounds_cfg.get("WINDOW_BOUND_SAMPLES", 256),
-        )
+        length_info = inspect_training_lengths(bounds_cfg, remove_window_ops(base_pipeline),
+            max_samples=bounds_cfg.get("WINDOW_BOUND_SAMPLES", 256))
         max_time_steps = int(length_info["maximum"])
-        print(
-            f"[Window Bounds] training-only preload "
-            f"{length_info['inspected_samples']}/{length_info['training_samples']} samples | "
-            f"observed T {length_info['minimum']}..{max_time_steps}"
-        )
+        if length_info.get("fixed_length") is not None:
+            source_lengths = [int(length_info["fixed_length"])]
+        elif length_info.get("all_lengths_inspected"):
+            source_lengths = length_info["lengths"]
+        else:
+            source_lengths = None
+        print(f"[Window Bounds] training-only preload "
+              f"{length_info['inspected_samples']}/{length_info['training_samples']} samples | "
+              f"observed T {length_info['minimum']}..{max_time_steps}")
 
         for learner in learners:
             panel(f"SEARCH | {ds.upper()} | {learner.upper()}")
+            studies_by_epochs = {}
 
-            # -----------------------------------------
-            # Experiment A: independent window-length
-            # -----------------------------------------
-            w1_name = f"ws_{ds}_{learner}_window_p1"
-            L1_min, L1_max, step1 = bounds_phase1_window(max_time_steps)
-
-            cfg_w1 = deepcopy(base_run_cfg)
-            cfg_w1["RUN_ID"] = f"{ds}-{learner}"
-            cfg_w1["LEARNER"] = learner
-            cfg_w1["EPOCHS"] = int(phase1_epochs)
-            cfg_w1["TEST_EVERY_EPOCH"] = False
-            if max_samples_override is not None:
-                cfg_w1["MAX_SAMPLES"] = int(max_samples_override)
-
-            study_w1 = create_study(
-                config=cfg_w1,
-                study_name=w1_name,
-                direction="maximize",
-                storage=storage,
-                load_if_exists=True,
-                sampler=optuna.samplers.TPESampler(seed=int(cfg_w1.get("SEED", 123))),
-                pruner=optuna.pruners.NopPruner(),
-            )
-
-            done_w1 = completed_trials(study_w1)
-            rem_w1 = max(0, phase1_trials - done_w1)
-
-            if rem_w1 > 0:
-                print(
-                    f"[Window P1] {w1_name} | L in [{L1_min},{L1_max}] step={step1} | "
-                    f"fixed_hop_ratio={window_fixed_hop_ratio:.4f} | epochs={phase1_epochs}"
-                )
-                print(f"[Window P1] completed={done_w1} remaining={rem_w1} target={phase1_trials}")
-
-                obj_w1 = make_objective(
-                    cfg_w1,
-                    base_pipeline,
-                    dataset=ds,
-                    learner=learner,
-                    experiment="window",
-                    phase=1,
-                    metric=metric,
-                    results_dir=results_dir,
-                    search_mode="window_only",
-                    L_min=L1_min,
-                    L_max=L1_max,
-                    step=step1,
-                    fixed_hop_ratio=window_fixed_hop_ratio,
-                )
-                study_w1.optimize(obj_w1, n_trials=rem_w1, catch=(Exception,))
-                export_study_csv(study_w1, os.path.join(results_dir, "optuna", f"{w1_name}_trials.csv"))
-                export_best_json(study_w1, os.path.join(results_dir, "optuna", f"{w1_name}_best.json"))
-            else:
-                print(f"[Window P1] Skip (already has >= {phase1_trials} COMPLETE trials).")
-
-            if completed_trials(study_w1) > 0:
-                best_L = int(study_w1.best_params["win_L"])
-                print(f"[Window P1 Best] value={study_w1.best_value:.4f} best_L={best_L}")
-            else:
-                print("[Window P2] Skipped because Window P1 has no COMPLETE trials.")
-                best_L = None
-
-            study_w2 = None
-
-            if best_L is not None:
-                w2_name = f"ws_{ds}_{learner}_window_p2"
-                L2_min, L2_max, step2 = bounds_phase2_window(
-                    best_L, max_time_steps=max_time_steps
-                )
-
-                cfg_w2 = deepcopy(base_run_cfg)
-                cfg_w2["RUN_ID"] = f"{ds}-{learner}"
-                cfg_w2["LEARNER"] = learner
-                cfg_w2["EPOCHS"] = int(phase2_epochs)
-                cfg_w2["TEST_EVERY_EPOCH"] = False
+            def run_phase(experiment, phase, *, length_bounds=None, fixed_length=None,
+                          ratio_bounds=None, anchors=()):
+                epochs = int(phase1_epochs if phase == 1 else phase2_epochs)
+                target = int(phase1_trials if phase == 1 else phase2_trials)
+                cfg = deepcopy(base_run_cfg)
+                cfg.update(RUN_ID=f"{ds}-{learner}", LEARNER=learner,
+                           EPOCHS=epochs, TEST_EVERY_EPOCH=False)
                 if max_samples_override is not None:
-                    cfg_w2["MAX_SAMPLES"] = int(max_samples_override)
-
-                study_w2 = create_study(
-                    config=cfg_w2,
-                    study_name=w2_name,
-                    direction="maximize",
-                    storage=storage,
-                    load_if_exists=True,
-                    sampler=optuna.samplers.TPESampler(seed=int(cfg_w2.get("SEED", 123))),
-                    pruner=optuna.pruners.NopPruner(),
-                )
-
-                if len(study_w2.trials) == 0:
-                    study_w2.enqueue_trial({"win_L": int(best_L)})
-
-                done_w2 = completed_trials(study_w2)
-                rem_w2 = max(0, phase2_trials - done_w2)
-
-                if rem_w2 > 0:
-                    print(
-                        f"[Window P2] {w2_name} | L in [{L2_min},{L2_max}] step={step2} | "
-                        f"fixed_hop_ratio={window_fixed_hop_ratio:.4f} | epochs={phase2_epochs}"
-                    )
-                    print(f"[Window P2] completed={done_w2} remaining={rem_w2} target={phase2_trials}")
-
-                    obj_w2 = make_objective(
-                        cfg_w2,
-                        base_pipeline,
-                        dataset=ds,
-                        learner=learner,
-                        experiment="window",
-                        phase=2,
-                        metric=metric,
-                        results_dir=results_dir,
-                        search_mode="window_only",
-                        L_min=L2_min,
-                        L_max=L2_max,
-                        step=step2,
-                        fixed_hop_ratio=window_fixed_hop_ratio,
-                    )
-                    study_w2.optimize(obj_w2, n_trials=rem_w2, catch=(Exception,))
-                    export_study_csv(study_w2, os.path.join(results_dir, "optuna", f"{w2_name}_trials.csv"))
-                    export_best_json(study_w2, os.path.join(results_dir, "optuna", f"{w2_name}_best.json"))
+                    cfg["MAX_SAMPLES"] = int(max_samples_override)
+                name = f"ws5_{ds}_{learner}_{experiment}"
+                if experiment == "hop":
+                    name += f"_bestL{fixed_length}"
+                name += f"_p{phase}"
+                sampler_kw = dict(seed=int(cfg.get("SEED", 123)))
+                if phase == 2:
+                    sampler_kw["n_startup_trials"] = 3
+                study = create_study(config=cfg, study_name=name, direction="maximize",
+                    storage=storage, load_if_exists=True,
+                    sampler=optuna.samplers.TPESampler(**sampler_kw),
+                    pruner=optuna.pruners.NopPruner())
+                study.set_user_attr("epochs", epochs)
+                objective_kw = {}
+                if experiment == "window":
+                    lo, hi, step = length_bounds
+                    parameter = "win_L"
+                    choices = {length: (length, max(1, round(length * window_fixed_hop_ratio)))
+                               for length in range(lo, hi + 1, step)}
+                    objective_kw.update(search_mode="window_only", L_min=lo, L_max=hi,
+                                        step=step, fixed_hop_ratio=window_fixed_hop_ratio)
+                    context = dict(search_mode="window_only", fixed_hop_ratio=window_fixed_hop_ratio)
                 else:
-                    print(f"[Window P2] Skip (already has >= {phase2_trials} COMPLETE trials).")
+                    lo, hi = hop_bounds(fixed_length, *ratio_bounds)
+                    step = 1
+                    parameter = "hop"
+                    choices = {hop: (fixed_length, hop) for hop in range(lo, hi + 1)}
+                    objective_kw.update(search_mode="hop_only", fixed_L=fixed_length,
+                                        hr_min=ratio_bounds[0], hr_max=ratio_bounds[1])
+                    context = dict(search_mode="hop_only", fixed_L=fixed_length)
+                print(f"[{experiment.title()} P{phase}] {name} | {parameter} in [{lo},{hi}] | "
+                      f"epochs={epochs} | new-network budget={target}")
+                objective = make_objective(cfg, base_pipeline, dataset=ds, learner=learner,
+                    experiment=experiment, phase=phase, metric=metric,
+                    results_dir=results_dir, **objective_kw)
+                optimize_unique(study, objective, choices=choices, parameter=parameter,
+                    distribution=optuna.distributions.IntDistribution(lo, hi, step=step),
+                    target=target, source_lengths=source_lengths,
+                    peers=studies_by_epochs.get(epochs, []),
+                    context=dict(experiment=experiment, phase=phase, **context), anchors=anchors)
+                studies_by_epochs.setdefault(epochs, []).append(study)
+                export_study_csv(study, os.path.join(results_dir, "optuna", f"{name}_trials.csv"))
+                export_best_json(study, os.path.join(results_dir, "optuna", f"{name}_best.json"))
+                return study
 
-            window_anchor = best_window_anchor_from_studies(study_w1, study_w2)
-            if window_anchor is None:
-                print("[Hop Search] Skipped because no COMPLETE window-length trials exist.")
+            # No forced full-length trial: TPE samples the whole integer domain.
+            study_w1 = run_phase("window", 1,
+                length_bounds=bounds_phase1_window(max_time_steps))
+            if not completed_trials(study_w1):
+                print("[Search] No successful window trials; skipping this learner.")
                 continue
-
-            hop_anchor_L = int(window_anchor["L"])
-            print(
-                f"[Window Best Overall] value={window_anchor['value']:.4f} "
-                f"hop_anchor_L={hop_anchor_L} "
-                f"source_phase={window_anchor['phase']} "
-                f"source_study={window_anchor['study_name']}"
-            )
-
-            # -----------------------------------------
-            # Experiment B: hop-ratio using best window
-            # -----------------------------------------
-            # Include bestL in the study names so old hop runs that used baseline_L
-            # are not mixed with the new intended hop experiments.
-            h1_name = f"ws_{ds}_{learner}_hop_bestL{hop_anchor_L}_p1"
-            hr1_min, hr1_max = bounds_phase1_hop_ratio()
-
-            cfg_h1 = deepcopy(base_run_cfg)
-            cfg_h1["RUN_ID"] = f"{ds}-{learner}"
-            cfg_h1["LEARNER"] = learner
-            cfg_h1["EPOCHS"] = int(phase1_epochs)
-            cfg_h1["TEST_EVERY_EPOCH"] = False
-            if max_samples_override is not None:
-                cfg_h1["MAX_SAMPLES"] = int(max_samples_override)
-
-            study_h1 = create_study(
-                config=cfg_h1,
-                study_name=h1_name,
-                direction="maximize",
-                storage=storage,
-                load_if_exists=True,
-                sampler=optuna.samplers.TPESampler(seed=int(cfg_h1.get("SEED", 123))),
-                pruner=optuna.pruners.NopPruner(),
-            )
-
-            if len(study_h1.trials) == 0:
-                study_h1.enqueue_trial({"hop_ratio": 1.0})
-                study_h1.enqueue_trial({"hop_ratio": 0.75})
-                study_h1.enqueue_trial({"hop_ratio": 1.25})
-
-            done_h1 = completed_trials(study_h1)
-            rem_h1 = max(0, phase1_trials - done_h1)
-
-            if rem_h1 > 0:
-                print(
-                    f"[Hop P1] {h1_name} | hop_ratio in [{hr1_min:.4f},{hr1_max:.4f}] | "
-                    f"fixed_L={hop_anchor_L} | epochs={phase1_epochs}"
-                )
-                print(f"[Hop P1] completed={done_h1} remaining={rem_h1} target={phase1_trials}")
-
-                obj_h1 = make_objective(
-                    cfg_h1,
-                    base_pipeline,
-                    dataset=ds,
-                    learner=learner,
-                    experiment="hop",
-                    phase=1,
-                    metric=metric,
-                    results_dir=results_dir,
-                    search_mode="hop_only",
-                    fixed_L=hop_anchor_L,
-                    hr_min=hr1_min,
-                    hr_max=hr1_max,
-                )
-                study_h1.optimize(obj_h1, n_trials=rem_h1, catch=(Exception,))
-                export_study_csv(study_h1, os.path.join(results_dir, "optuna", f"{h1_name}_trials.csv"))
-                export_best_json(study_h1, os.path.join(results_dir, "optuna", f"{h1_name}_best.json"))
-            else:
-                print(f"[Hop P1] Skip (already has >= {phase1_trials} COMPLETE trials).")
-
-            if completed_trials(study_h1) > 0:
-                best_hr = float(study_h1.best_params["hop_ratio"])
-                print(f"[Hop P1 Best] value={study_h1.best_value:.4f} best_hop_ratio={best_hr:.4f}")
-            else:
-                print("[Hop P2] Skipped because Hop P1 has no COMPLETE trials.")
-                best_hr = None
-
-            study_h2 = None
-            if best_hr is not None:
-                h2_name = f"ws_{ds}_{learner}_hop_bestL{hop_anchor_L}_p2"
-                hr2_min, hr2_max = bounds_phase2_hop_ratio(best_hr)
-
-                cfg_h2 = deepcopy(base_run_cfg)
-                cfg_h2["RUN_ID"] = f"{ds}-{learner}"
-                cfg_h2["LEARNER"] = learner
-                cfg_h2["EPOCHS"] = int(phase2_epochs)
-                cfg_h2["TEST_EVERY_EPOCH"] = False
-                if max_samples_override is not None:
-                    cfg_h2["MAX_SAMPLES"] = int(max_samples_override)
-
-                study_h2 = create_study(
-                    config=cfg_h2,
-                    study_name=h2_name,
-                    direction="maximize",
-                    storage=storage,
-                    load_if_exists=True,
-                    sampler=optuna.samplers.TPESampler(seed=int(cfg_h2.get("SEED", 123))),
-                    pruner=optuna.pruners.NopPruner(),
-                )
-
-                if len(study_h2.trials) == 0:
-                    study_h2.enqueue_trial({"hop_ratio": float(best_hr)})
-                    study_h2.enqueue_trial({"hop_ratio": float(max(0.05, best_hr * 0.75))})
-                    study_h2.enqueue_trial({"hop_ratio": float(min(2.0, best_hr * 1.25))})
-
-                done_h2 = completed_trials(study_h2)
-                rem_h2 = max(0, phase2_trials - done_h2)
-
-                if rem_h2 > 0:
-                    print(
-                        f"[Hop P2] {h2_name} | hop_ratio in [{hr2_min:.4f},{hr2_max:.4f}] | "
-                        f"fixed_L={hop_anchor_L} | epochs={phase2_epochs}"
-                    )
-                    print(f"[Hop P2] completed={done_h2} remaining={rem_h2} target={phase2_trials}")
-
-                    obj_h2 = make_objective(
-                        cfg_h2,
-                        base_pipeline,
-                        dataset=ds,
-                        learner=learner,
-                        experiment="hop",
-                        phase=2,
-                        metric=metric,
-                        results_dir=results_dir,
-                        search_mode="hop_only",
-                        fixed_L=hop_anchor_L,
-                        hr_min=hr2_min,
-                        hr_max=hr2_max,
-                    )
-                    study_h2.optimize(obj_h2, n_trials=rem_h2, catch=(Exception,))
-                    export_study_csv(study_h2, os.path.join(results_dir, "optuna", f"{h2_name}_trials.csv"))
-                    export_best_json(study_h2, os.path.join(results_dir, "optuna", f"{h2_name}_best.json"))
-                else:
-                    print(f"[Hop P2] Skip (already has >= {phase2_trials} COMPLETE trials).")
-
-            final_cfg = deepcopy(base_run_cfg)
-            if max_samples_override is not None:
-                final_cfg['MAX_SAMPLES'] = int(max_samples_override)
+            best_L = int(study_w1.best_params["win_L"])
+            study_w2 = run_phase("window", 2,
+                length_bounds=bounds_phase2_window(best_L, max_time_steps=max_time_steps),
+                anchors=[best_L])
             window_phase, window_study = preferred_study(study_w1, study_w2)
+            hop_anchor_L = int(window_study.best_params["win_L"])
+
+            # Non-overlap is included when its integer hop lies inside the domain.
+            study_h1 = run_phase("hop", 1, fixed_length=hop_anchor_L,
+                ratio_bounds=bounds_phase1_hop_ratio(), anchors=[hop_anchor_L])
+            study_h2 = None
+            if completed_trials(study_h1):
+                best_hop = int(study_h1.best_params["hop"])
+                study_h2 = run_phase("hop", 2, fixed_length=hop_anchor_L,
+                    ratio_bounds=bounds_phase2_hop_ratio(best_hop / hop_anchor_L),
+                    anchors=[best_hop])
             hop_phase, hop_study = preferred_study(study_h1, study_h2)
-            # Selection is complete before either held-out test evaluation.
-            for experiment, phase, study, ratio in (
-                ('window', window_phase, window_study, window_fixed_hop_ratio),
-                ('hop', hop_phase, hop_study,
-                 float(hop_study.best_params['hop_ratio']) if hop_study is not None else 1.0),
-            ):
+            hop_phase, hop_study = select_hop_with_fallback(
+                window_phase, window_study, hop_phase, hop_study)
+
+            # Both choices are fixed before either test result is observed.
+            selected = [("window", window_phase, window_study), ("hop", hop_phase, hop_study)]
+            final_cfg = deepcopy(base_run_cfg)
+            final_cfg["OPTUNA_METRIC"] = metric
+            if max_samples_override is not None:
+                final_cfg["MAX_SAMPLES"] = int(max_samples_override)
+            previous_final = None
+            previous_schedule = None
+            for experiment, phase, study in selected:
                 if study is None:
                     continue
-                pipeline = append_sliding_window(remove_window_ops(base_pipeline),
-                    L=hop_anchor_L, hop=max(1, round(hop_anchor_L * ratio)))
-                run_final_test(final_cfg, pipeline, study=study, phase=phase,
-                    family='independent', experiment=experiment, dataset=ds, learner=learner,
-                    length=hop_anchor_L, hop_ratio=ratio, results_dir=results_dir)
-            export_final_tests(results_dir, os.path.join(results_dir, 'optuna', 'final_tests', 'independent'), 'independent')
+                attrs = study.best_trial.user_attrs
+                length = int(attrs.get("L", study.best_params.get("win_L", hop_anchor_L)))
+                hop = int(attrs["hop"])
+                ratio = hop / length
+                current_schedule = schedule_key(length, hop, source_lengths)
+                pipeline = append_sliding_window(remove_window_ops(base_pipeline), L=length, hop=hop)
+                reuse = previous_final if current_schedule == previous_schedule else None
+                result = run_final_test(final_cfg, pipeline, study=study, phase=phase,
+                    family="independent", experiment=experiment, dataset=ds, learner=learner,
+                    length=length, hop_ratio=ratio, results_dir=results_dir, reuse_result=reuse)
+                previous_final, previous_schedule = result, current_schedule
+            export_final_tests(results_dir,
+                os.path.join(results_dir, "optuna", "final_tests", "independent"), "independent")
 
     close("ALL INDEPENDENT SEARCHES COMPLETE")
     print(f"Optuna DB: {db_path}")
@@ -776,15 +715,4 @@ def run_all_independent(
 
 
 if __name__ == "__main__":
-    run_all_independent(
-        results_dir="results",
-        db_path="results/optuna/window_hop_independent_mnist_10k_v1.db",
-        metric="sample_acc",
-        phase1_trials=20,
-        phase1_epochs=5,
-        phase2_trials=10,
-        phase2_epochs=10,
-        max_samples_override=None,
-        window_fixed_hop_ratio=1.0,
-        datasets=["mnist_static", "mnist_rate"],
-    )
+    run_all_independent()

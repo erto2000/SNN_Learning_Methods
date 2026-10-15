@@ -7,6 +7,47 @@ from timeseries.registry import get_dataloaders
 from utils.common import set_seed
 
 
+def _has_fixed_horizon(config, pipeline):
+    """Recognize fixed-output pipelines and the current fixed-length loaders.
+
+    A uniform inspection sample alone is insufficient for variable-length
+    recordings. Unknown transforms therefore keep conservative deduplication.
+    """
+    from timeseries import transforms as tr
+
+    ops = pipeline.ops if type(pipeline) is tr.Compose else [pipeline]
+    preserving = (tr.ToFloat32, tr.Ensure2D, tr.ZScore, tr.Flatten,
+                  tr.SpecAugmentLike)
+    if ops and type(ops[-1]) in preserving:
+        return _has_fixed_horizon(config, tr.Compose(ops[:-1]))
+    if ops and type(ops[-1]) in (tr.DeterministicSpikes, tr.EventToVoxel,
+                                tr.RandomTimeCrop):
+        return True
+    if ops and type(ops[-1]) is tr.RepeatStatic:
+        return (config["DATASET"].lower() == "mnist" and
+                all(type(op) in preserving for op in ops[:-1]))
+    # Fixed raw time series, or audio clips made equal in duration by a loader.
+    known = (tr.ToFloat32, tr.Ensure2D, tr.ZScore, tr.Flatten, tr.Resample,
+             tr.ToLogMel, tr.SpecAugmentLike)
+    if not all(type(op) in known for op in ops):
+        return False
+    name = config["DATASET"].lower()
+    kw = config.get("DATASET_KW", {})
+    if name in ("har", "speech_commands", "mitbih"):
+        return True
+    if name == "pamap2":
+        return kw.get("time_steps") is not None
+    if name == "esc50":
+        return kw.get("duration") is not None
+    if name == "large_scale_audio":
+        # Integer-second segments resample to equal lengths at a fixed rate.
+        duration = kw.get("duration", 3.0)
+        resamplers = [op for op in ops if type(op) is tr.Resample]
+        return (duration is not None and float(duration).is_integer() and
+                bool(resamplers) and all(op.orig_sr is None for op in resamplers))
+    return False
+
+
 def inspect_training_lengths(config, pipeline, *, max_samples: int = 256) -> dict:
     """Inspect a deterministic subset after preprocessing but before windowing.
 
@@ -51,4 +92,8 @@ def inspect_training_lengths(config, pipeline, *, max_samples: int = 256) -> dic
         "maximum": max(lengths),
         "inspected_samples": len(lengths),
         "training_samples": len(dataset),
+        "lengths": sorted(set(lengths)),
+        "all_lengths_inspected": len(lengths) == len(dataset),
+        "fixed_length": (lengths[0] if len(set(lengths)) == 1 and
+                         _has_fixed_horizon(g, pipeline) else None),
     }

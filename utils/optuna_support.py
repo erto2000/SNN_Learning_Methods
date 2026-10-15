@@ -8,7 +8,7 @@ from copy import deepcopy
 from utils.console import line, section
 
 
-_SIGNATURE_VERSION = 3
+_SIGNATURE_VERSION = 5
 _OUTPUT_CALLS = {'print', 'panel', 'line', 'section', 'close', 'timestamp'}
 
 
@@ -98,17 +98,20 @@ def _comparable_final_config(config):
     comparable = deepcopy(config)
     comparable.pop('TRANSFORM', None)
     comparable.pop('RUN_ID', None)
-    selection = comparable.get('FINAL_TEST')
-    if isinstance(selection, dict):
-        selection.pop('experiment_signature', None)
+    # Keep the experiment signature: the same selected settings can produce
+    # different results after the training code or protocol changes.
     # JSON stores tuples as lists (for example TIME_EVAL_FRACS). Compare both
     # live and saved configurations in the same serialized representation.
     return json.loads(json.dumps(comparable, sort_keys=True))
 
 
 def run_final_test(base_config, pipeline, *, study, phase, family, experiment,
-                   dataset, learner, length, hop_ratio, results_dir):
-    """Retrain a validation-selected configuration at the normal epoch budget."""
+                   dataset, learner, length, hop_ratio, results_dir, reuse_result=None):
+    """Retrain a validation-selected configuration at the normal epoch budget.
+
+    A caller that has proved two schedules equivalent may share their final
+    trained network. The two selection manifests remain available to reports.
+    """
     from utils.runner import run_one
     from visualization.training_results import save_results
     if study is None:
@@ -132,9 +135,24 @@ def run_final_test(base_config, pipeline, *, study, phase, family, experiment,
     summary_path = root / 'runs' / cfg['RUN_ID'] / 'summary.json'
     manifest_path = root / 'optuna' / 'final_tests' / family / f'{dataset}-{learner}-{experiment}.json'
     result = None
-    # Prefer the manifest-selected run when its effective configuration is
-    # unchanged. This survives fingerprint-format and console-only changes.
-    if manifest_path.exists():
+    if reuse_result is not None and reuse_result.get('status') == 'ok':
+        prior_config = reuse_result.get('config', {})
+        current = _comparable_final_config(cfg)
+        prior = _comparable_final_config(prior_config)
+        for item in (current, prior):
+            item.pop('FINAL_TEST', None)
+            item.pop('WINDOW', None)
+        if (current == prior
+                and prior_config.get('FINAL_TEST', {}).get('experiment_signature')
+                == selection['experiment_signature']
+                and reuse_result.get('final', {}).get('evaluation_split') == 'test'):
+            result = reuse_result
+            cfg['RUN_ID'] = prior_config['RUN_ID']
+            line(f"{experiment.title()} | Reusing equivalent selected test run")
+    # Prefer the manifest-selected run only when its effective configuration
+    # and experiment signature are unchanged. Console-only changes are already
+    # excluded from the protocol signature.
+    if result is None and manifest_path.exists():
         try:
             manifest_saved = json.loads(manifest_path.read_text(encoding='utf-8'))
             prior_path = root / 'runs' / manifest_saved['run_id'] / 'summary.json'
@@ -163,7 +181,9 @@ def run_final_test(base_config, pipeline, *, study, phase, family, experiment,
     manifest_dir = root / 'optuna' / 'final_tests' / family
     manifest_dir.mkdir(parents=True, exist_ok=True)
     manifest = dict(run_id=cfg['RUN_ID'], status=result.get('status'),
-                    dataset=dataset, learner=learner, **selection)
+                    dataset=dataset, learner=learner,
+                    window=dict(L=int(length), hop=int(hop), hop_ratio=float(hop_ratio)),
+                    **selection)
     (manifest_dir / f'{dataset}-{learner}-{experiment}.json').write_text(
         json.dumps(manifest, indent=2), encoding='utf-8')
     if result.get('status') != 'ok':
@@ -183,6 +203,7 @@ def export_final_tests(results_dir, out_dir, family):
         manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
         summary = json.loads((root / 'runs' / manifest['run_id'] / 'summary.json').read_text(encoding='utf-8'))
         cfg, final = summary['config'], summary.get('final', {})
+        window = manifest.get('window', cfg.get('WINDOW', {}))
         if not cfg.get('DATA_SPLIT'):
             continue
         theory = summary.get('memory', {}).get('theory', {})
@@ -190,7 +211,7 @@ def export_final_tests(results_dir, out_dir, family):
             **split_report_fields(summary.get('meta', {})),
             dataset=manifest['dataset'], learner=manifest['learner'], experiment=manifest['experiment'],
             status=summary['status'], evaluation_split='test', epochs=cfg['EPOCHS'],
-            win_L=cfg['WINDOW']['L'], hop=cfg['WINDOW']['hop'], hop_ratio=cfg['WINDOW']['hop_ratio'],
+            win_L=window['L'], hop=window['hop'], hop_ratio=window['hop_ratio'],
             selection_phase=manifest['phase'], validation_score=manifest['validation_score'],
             selection_metric=manifest['metric'], test_sample_acc=final.get('sample_acc'),
             test_window_acc=final.get('window_acc'),

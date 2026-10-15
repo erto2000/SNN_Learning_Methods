@@ -97,13 +97,19 @@ class EpropLearner(BaseLearner):
 
     # ------------ contract ------------
     @torch.no_grad()
-    def forward(self, X: torch.Tensor, return_activity: bool = False):
+    def forward(
+        self,
+        X: torch.Tensor,
+        return_activity: bool = False,
+        time_mask: Optional[torch.Tensor] = None,
+    ):
         """
         X: [B,T,D] -> logits: [B,K] OR (logits, activity)
         Cumulative rate-code readout (matches train_step logic).
         """
         B, T, _ = X.shape
         X = X.to(self.device)
+        time_mask = self._prepare_time_mask(X, time_mask)
         state, head_mem = self.model.init_state(B, X.device, X.dtype)
         H_last = self.model.fcs[-1].out_features
         W_out = self.model.head.weight
@@ -116,7 +122,8 @@ class EpropLearner(BaseLearner):
 
         for t in range(T):
             _, _, state, head_mem, layer_spikes, _ = self.model.forward_step(
-                X[:, t, :], state, head_mem, need_pre=False
+                X[:, t, :], state, head_mem, need_pre=False,
+                time_mask=time_mask[:, t] if time_mask is not None else None,
             )
             r_sum = r_sum + layer_spikes[-1]
             logits = r_sum @ W_out.T + (b_out if b_out is not None else 0.0)
@@ -132,11 +139,18 @@ class EpropLearner(BaseLearner):
             layer_spike_counts=layer_spike_counts,
             num_samples=B,
             num_timesteps=T,
+            valid_steps=int(time_mask.sum().item()) if time_mask is not None else None,
         )
         return logits, activity
 
     @torch.no_grad()
-    def train_step(self, X: torch.Tensor, y: torch.Tensor) -> Dict[str, float]:
+    def train_step(
+        self,
+        X: torch.Tensor,
+        y: torch.Tensor,
+        time_mask: Optional[torch.Tensor] = None,
+        sample_weight=None,
+    ) -> Dict[str, float]:
         """
         Accumulate local spike eligibilities online, then apply the final loss.
 
@@ -151,6 +165,8 @@ class EpropLearner(BaseLearner):
         X = X.to(self.device)  # [B, T, D]
         y = y.to(self.device)  # [B]
         B, T, _ = X.shape
+        time_mask = self._prepare_time_mask(X, time_mask)
+        sample_weight = self._prepare_sample_weight(X, sample_weight)
 
         state, head_mem = self.model.init_state(B, X.device, X.dtype)
         L = len(self.model.fcs)
@@ -172,11 +188,12 @@ class EpropLearner(BaseLearner):
 
         # -------- 1) unroll in time: update eligibilities + r_sum only --------
         for t in range(T):
+            active = time_mask[:, t] if time_mask is not None else None
             # Recurrence in SNNCore consumes the preceding timestep's spikes.
             previous_spikes = state.spikes
 
             _, _, state, head_mem, layer_spikes, _ = self.model.forward_step(
-                X[:, t, :], state, head_mem
+                X[:, t, :], state, head_mem, time_mask=active
             )
 
             z_last = layer_spikes[-1]
@@ -187,10 +204,20 @@ class EpropLearner(BaseLearner):
                 psi = self._surrogate_fast_sigmoid(state.mems[l] - lif.threshold, slope)
                 beta = lif.beta.clamp(0, 1)
                 presynaptic = X[:, t, :] if l == 0 else layer_spikes[l - 1]
-                pre_ff[l] = beta * pre_ff[l] + presynaptic
+                next_pre_ff = beta * pre_ff[l] + presynaptic
+                if active is None:
+                    pre_ff[l] = next_pre_ff
+                else:
+                    # Padding must neither evolve a trace nor add eligibility.
+                    pre_ff[l] = torch.where(active[:, None], next_pre_ff, pre_ff[l])
+                    psi = torch.where(active[:, None], psi, 0.0)
                 e_ff[l].add_(pre_ff[l].unsqueeze(2) * psi.unsqueeze(1))
                 if self.rec_flags[l]:
-                    pre_rec[l] = beta * pre_rec[l] + previous_spikes[l]
+                    next_pre_rec = beta * pre_rec[l] + previous_spikes[l]
+                    pre_rec[l] = (
+                        next_pre_rec if active is None else
+                        torch.where(active[:, None], next_pre_rec, pre_rec[l])
+                    )
                     e_rec[l].add_(pre_rec[l].unsqueeze(2) * psi.unsqueeze(1))
 
         # -------- 2) single loss / learning signal at final time --------
@@ -200,6 +227,8 @@ class EpropLearner(BaseLearner):
 
         probs = torch.softmax(logits, dim=1)
         grad_logits = probs - F.one_hot(y, num_classes=K).to(probs.dtype)  # [B,K]
+        if sample_weight is not None:
+            grad_logits = grad_logits * sample_weight.unsqueeze(1)
 
         # Approximate layer-wise feedback; this omits downstream spike/time
         # derivatives for earlier hidden layers, as in the original learner.
@@ -224,12 +253,15 @@ class EpropLearner(BaseLearner):
         self.model.head.weight.grad = grad_logits.T @ r_sum / norm
         if b_out is not None:
             b_out.grad = grad_logits.mean(dim=0)
-        self.opt.step()
+        self._optimizer_step(self.opt)
 
         # keep recurrent weights sane
         self._clamp_rec()
 
-        final_loss = F.cross_entropy(logits, y, reduction="mean").item()
+        final_loss = (
+            F.cross_entropy(logits, y) if sample_weight is None else
+            (F.cross_entropy(logits, y, reduction="none") * sample_weight).mean()
+        ).item()
         acc = (logits.argmax(1) == y).float().mean().item() * 100.0
 
         return {"loss": final_loss, "acc": acc}
