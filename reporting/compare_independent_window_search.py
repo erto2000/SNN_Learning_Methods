@@ -341,6 +341,9 @@ def load_optuna_trials(results_dir: str = RESULTS_DIR) -> pd.DataFrame:
             "phase_from_study",
             "search_mode_from_study",
             "run_id",
+            "training_reused",
+            "source_study",
+            "source_trial",
         ]
         if c in df.columns
     ]
@@ -351,7 +354,26 @@ def maybe_join_optuna(df_runs: pd.DataFrame, df_optuna: pd.DataFrame) -> pd.Data
     if df_runs.empty or df_optuna.empty or "run_id" not in df_optuna.columns:
         return df_runs
 
-    df = df_runs.merge(df_optuna, on="run_id", how="left", suffixes=("", "_optuna"))
+    # A cached observation refers to an existing trained run but belongs to a
+    # different study/stage. Drive this join from completed study observations,
+    # rather than multiplying source runs and retaining their original stage.
+    state = df_optuna["state"].astype(str)
+    completed = (pd.to_numeric(state, errors="coerce").eq(1) |
+                 state.str.upper().str.endswith("COMPLETE"))
+    observations = df_optuna[completed & df_optuna["run_id"].notna()].copy()
+    if observations.duplicated(["study", "trial"]).any():
+        raise ValueError("Duplicate Optuna study/trial identities in exports")
+    df = observations.merge(df_runs, on="run_id", how="left",
+                            suffixes=("_optuna", ""), validate="many_to_one")
+    if df["sample_acc"].isna().any():
+        raise ValueError("Completed Optuna observations lack saved run summaries")
+    if ((df["sample_acc"] - df["value"]).abs() > 1e-8).any():
+        raise ValueError("Optuna validation scores disagree with saved runs")
+    for column in ("experiment", "phase", "search_mode", "trial", "win_L", "hop", "hop_ratio"):
+        source = column + "_optuna"
+        if source in df:
+            df[column] = df[source].combine_first(df[column])
+    df["training_reused"] = df.get("training_reused", False)
 
     if "experiment" in df.columns and "experiment_optuna" in df.columns:
         df["experiment"] = df["experiment"].fillna(df["experiment_optuna"])
@@ -405,6 +427,7 @@ def save_all_trials_csv(df: pd.DataFrame, out_dir: str) -> str:
         "theory_access_scalars",
         "theory_time_proxy",
     ]
+    cols += ["study", "training_reused", "source_study", "source_trial"]
     cols = [c for c in cols if c in df.columns]
 
     sort_cols = [c for c in ["dataset", "learner", "experiment", "phase", "trial", "win_L", "hop"] if c in df.columns]
@@ -520,6 +543,7 @@ def export_trials_csv(df_sub: pd.DataFrame, out_path: str) -> None:
         "theory_access_scalars",
         "theory_time_proxy",
     ]
+    cols += ["study", "training_reused", "source_study", "source_trial"]
     cols = [c for c in cols if c in df_sub.columns]
     sort_cols = [c for c in ["experiment", "phase", "trial", "win_L", "hop"] if c in df_sub.columns]
     df_sub[cols].sort_values(sort_cols).to_csv(out_path, index=False)
@@ -550,6 +574,7 @@ def export_cross_method_csv(df_ds: pd.DataFrame, out_path: str) -> None:
         "theory_access_scalars",
         "theory_time_proxy",
     ]
+    cols += ["study", "training_reused", "source_study", "source_trial"]
     cols = [c for c in cols if c in df_ds.columns]
     sort_cols = [c for c in ["learner", "experiment", "phase", "trial", "win_L", "hop"] if c in df_ds.columns]
     df_ds[cols].sort_values(sort_cols).to_csv(out_path, index=False)
