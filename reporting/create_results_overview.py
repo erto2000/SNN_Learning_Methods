@@ -1,4 +1,4 @@
-"""Unified thesis figures: memory, computation, and memory accesses.
+"""Unified thesis figures: memory, workload, and memory-capacity time estimates.
 
 Run ``python -m reporting.create_results_overview`` for every dataset.
 Uses the existing learner cost models and saved runs; never trains a network
@@ -7,6 +7,7 @@ or edits the thesis. Each figure is exported as PDF, SVG, and PNG.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from html import escape
 import json
 from pathlib import Path
@@ -45,11 +46,99 @@ NAME = dict(zip(DATASETS, ['HAR', 'MNIST Static', 'MNIST Rate', 'PAMAP2',
     'Speech Commands', 'ESC-50', 'Large-Scale Audio', 'UrbanSound8K',
     'DVS Gesture', 'MIT-BIH']))
 METRICS = ('compute_scalars', 'access_scalars')
-PLOT_METRICS = (*METRICS, 'time_proxy')
-TITLES = ('Computation', 'Memory accesses', 'Time (cost proxy)')
-Y_LABELS = ('Arithmetic work (million model units)', 'Scalar accesses (millions)', 'Time cost (million units)')
+TITLES = ('Computation', 'Memory accesses')
+Y_LABELS = ('Arithmetic work (million model units)', 'Scalar accesses (millions)')
 STYLES = dict(zip(METHODS, ['-', '--', '-.', ':']))
 DEFAULT_OUTPUT = PROJECT_ROOT / 'results/results_overview'
+
+
+@dataclass(frozen=True)
+class HierarchyProfile:
+    """One collapsed two-tier service profile; all learners use the same costs.
+
+    Local L1 is not modeled separately. The arithmetic counts retain the
+    thesis's MAC-equivalent approximation; ns values are service proxies.
+    """
+    clock_hz: float = 250e6
+    fp32_macs_per_cycle: float = 4
+    fp_bytes: int = 4
+    fast_bandwidth_bytes_s: float = 1.9e9
+    slow_bandwidth_bytes_s: float = 200e6
+    reference_capacity_bytes: int = int(1.5*MIB)
+
+    def __post_init__(self):
+        values = (self.clock_hz, self.fp32_macs_per_cycle, self.fp_bytes,
+                  self.fast_bandwidth_bytes_s, self.slow_bandwidth_bytes_s,
+                  self.reference_capacity_bytes)
+        if any(not np.isfinite(v) or v <= 0 for v in values):
+            raise ValueError('Hierarchy profile values must be finite and positive')
+        if self.slow_bandwidth_bytes_s > self.fast_bandwidth_bytes_s:
+            raise ValueError('Slow-memory bandwidth must not exceed fast-memory bandwidth')
+
+    @property
+    def alpha_ns(self):
+        return 1e9/(self.clock_hz*self.fp32_macs_per_cycle)
+
+    @property
+    def beta_fast_ns(self):
+        return self.fp_bytes*1e9/self.fast_bandwidth_bytes_s
+
+    @property
+    def beta_slow_ns(self):
+        return self.fp_bytes*1e9/self.slow_bandwidth_bytes_s
+
+    def metadata(self):
+        return dict(profile_id='vega_250mhz_collapsed_two_tier_v1',
+            model='proportional_access_v1', **self.__dict__,
+            alpha_ns_per_mac_equivalent=self.alpha_ns,
+            beta_fast_ns_per_word=self.beta_fast_ns,
+            beta_slow_ns_per_word=self.beta_slow_ns,
+            normalized_compute_weight=self.alpha_ns/self.beta_fast_ns,
+            slow_fast_access_ratio=self.beta_slow_ns/self.beta_fast_ns,
+            arithmetic_basis='Four shared FPUs, one FP32 MAC per unit per cycle',
+            fast_service_basis='Published L2/L1 bulk-transfer bandwidth',
+            slow_service_basis='External HyperRAM bandwidth in author slide 19',
+            sources={
+                'architecture': 'https://arxiv.org/abs/2110.09101',
+                'fpu_operations': 'https://arxiv.org/html/2305.19167v1',
+                'bandwidths': 'https://pulp-platform.org/docs/gfvitality2024/BeniniGF12-24final.pdf'},
+            assumptions=[
+                'Fast fraction = min(1, fast capacity / saved peak working set)',
+                'Logical accesses are uniform over a fixed working set',
+                'One collapsed fast tier; 128 KiB L1 is not modeled separately',
+                'Fixed service coefficients while capacity varies parametrically',
+                'MAC-equivalent arithmetic and serialized additive service; no overhead term',
+                'No additional staging-transfer costs are added to this two-tier proxy',
+                'Original optimizer-state exclusions and saved workload estimates are retained',
+                'Full-sequence saved mean work and saved peak footprint; no per-length reweighting',
+                'Normalized to the same dataset BPTT all-slow cost for every curve',
+                'The estimates are not measured runtime, cache hits or hardware traffic'],
+            source_note='The original Vega Table VI swaps external-memory row labels; '
+                        'the later author slide identifies HyperRAM as 200 MB/s.')
+
+
+REFERENCE_PROFILE = HierarchyProfile()
+
+
+def hierarchy_cost(compute, accesses, memory_bytes, capacity_bytes,
+                   profile=REFERENCE_PROFILE):
+    """Proportional service costs; capacity can be an array, including zero."""
+    for name, value in [('compute', compute), ('accesses', accesses)]:
+        if not np.isfinite(value) or value < 0:
+            raise ValueError(f'{name} must be finite and nonnegative')
+    if not np.isfinite(memory_bytes) or memory_bytes <= 0:
+        raise ValueError('Working-set memory must be finite and positive')
+    capacity = np.asarray(capacity_bytes, dtype=float)
+    if np.any(~np.isfinite(capacity)) or np.any(capacity < 0):
+        raise ValueError('Capacity must be finite and nonnegative')
+    fraction = np.minimum(1.0, capacity/memory_bytes)
+    effective_beta = (fraction*profile.beta_fast_ns
+                      + (1-fraction)*profile.beta_slow_ns)
+    return dict(fast_fraction=fraction, slow_fraction=1-fraction,
+        effective_beta_ns=effective_beta,
+        compute_service_ns=compute*profile.alpha_ns,
+        access_service_ns=accesses*effective_beta,
+        estimated_service_ns=compute*profile.alpha_ns+accesses*effective_beta)
 
 # Published capacity references, not measured free memory for training. Embedded
 # memory capacities use binary multiples; banks and external RAM remain distinct
@@ -387,42 +476,205 @@ def selected_data(baselines):
     return data
 
 
-def add_time_proxy(theory, selected):
-    theory, selected = theory.copy(), selected.copy()
-    theory['time_proxy'] = theory.compute_scalars + theory.access_scalars
-    for setting in ['baseline', 'selected']:
-        selected[setting+'_time_proxy'] = (selected[setting+'_compute_scalars']
-                                           + selected[setting+'_access_scalars'])
-    selected['time_proxy_ratio'] = selected.selected_time_proxy / selected.baseline_time_proxy
-    return theory, selected
+def capacity_sweep_data(selected, points, profile=REFERENCE_PROFILE):
+    """Use saved full-sequence mean work and peak memory, without retraining.
 
-
-def coefficient_sweep_data(selected):
-    """Fixed coefficient sum of two; the midpoint matches weights (1, 1)."""
+    One common BPTT all-slow denominator per dataset preserves differences
+    between methods. Each footprint and the reference capacity are exact grid
+    points, so transitions and the physical reference can be reproduced.
+    """
+    keys = ['dataset', 'learner']
+    full = points[points.setting.eq('full_sequence')].copy()
+    if (full.duplicated(keys).any() or selected.duplicated(keys).any()
+            or set(map(tuple, full[keys].to_numpy()))
+            != set(map(tuple, selected[keys].to_numpy()))):
+        raise ValueError('Capacity sweep requires matching unique full-sequence runs')
+    if full.empty or not full.fp_bytes.eq(profile.fp_bytes).all():
+        raise ValueError('Capacity sweep requires the reference FP32 precision')
+    data = selected.merge(full[keys+['run_id', 'memory_bytes', 'batch_size']],
+                          on=keys, validate='one_to_one')
+    if not data.run_id.eq(data.baseline_run_id).all():
+        raise ValueError('Capacity-sweep memory and work must come from the same run')
     rows = []
-    for r in selected.itertuples():
-        for alpha in np.linspace(0, 2, 101):
-            beta = 2-alpha
-            rows.append(dict(dataset=r.dataset, learner=r.learner,
-                compute_weight=alpha, access_weight=beta,
-                baseline_time_proxy=alpha*r.baseline_compute_scalars + beta*r.baseline_access_scalars))
+    for dataset, group in data.groupby('dataset', sort=False):
+        if set(group.learner) != set(METHODS) or len(group) != len(METHODS):
+            raise ValueError(f'Capacity sweep needs all four methods for {dataset}')
+        memories = group.memory_bytes.to_numpy(dtype=float)
+        if np.any(~np.isfinite(memories)) or np.any(memories <= 0):
+            raise ValueError(f'Invalid capacity-sweep memory in {dataset}')
+        low = min(memories.min()/100, profile.reference_capacity_bytes/4)
+        high = max(memories.max()*4, profile.reference_capacity_bytes*2)
+        capacities = np.unique(np.r_[np.geomspace(low, high, 321), memories,
+                                     profile.reference_capacity_bytes])
+        bp = group[group.learner.eq('bp')].iloc[0]
+        reference = float(hierarchy_cost(bp.baseline_compute_scalars,
+            bp.baseline_access_scalars, bp.memory_bytes, 0, profile)['estimated_service_ns'])
+        if reference <= 0:
+            raise ValueError(f'BPTT normalization must be positive in {dataset}')
+        for run in group.itertuples():
+            values = hierarchy_cost(run.baseline_compute_scalars,
+                run.baseline_access_scalars, run.memory_bytes, capacities, profile)
+            for i, capacity in enumerate(capacities):
+                rows.append(dict(dataset=dataset, learner=run.learner,
+                    setting='full_sequence', run_id=run.run_id,
+                    batch_size=run.batch_size, memory_bytes=run.memory_bytes,
+                    memory_mib=run.memory_bytes/MIB, capacity_bytes=capacity,
+                    capacity_mib=capacity/MIB,
+                    compute_scalars=run.baseline_compute_scalars,
+                    access_scalars=run.baseline_access_scalars,
+                    fast_fraction=values['fast_fraction'][i],
+                    slow_fraction=values['slow_fraction'][i],
+                    effective_beta_ns=values['effective_beta_ns'][i],
+                    compute_service_ms=values['compute_service_ns']/1e6,
+                    access_service_ms=values['access_service_ns'][i]/1e6,
+                    estimated_service_ms=values['estimated_service_ns'][i]/1e6,
+                    normalized_cost=values['estimated_service_ns'][i]/reference,
+                    normalization_reference_run_id=bp.run_id,
+                    normalization_reference_service_ms=reference/1e6))
     return pd.DataFrame(rows)
 
 
-def plot_coefficient_sweep(dataset, data, out):
-    fig, ax = plt.subplots(figsize=(8, 4.8))
+def plot_capacity_sweep(dataset, data, out, profile=REFERENCE_PROFILE):
+    fig, ax = plt.subplots(figsize=(9, 5.4))
     for method in METHODS:
-        d = data[data.learner.eq(method)]
-        ax.plot(d.compute_weight, d.baseline_time_proxy/1e6,
+        d = data[data.learner.eq(method)].sort_values('capacity_bytes')
+        ax.plot(d.capacity_mib, d.normalized_cost,
                 color=COLOR[method], linestyle=STYLES[method], lw=2)
-    ax.axvline(1, color='#777777', linestyle='--', lw=1)
-    ax.set_xlabel('Computation weight (memory-access weight = 2 - x)')
-    ax.set_ylabel('Full-sequence time cost (million units)')
-    ax.set_xticks([0,.5,1,1.5,2]); ax.set_xlim(0,2)
-    ax.spines[['top','right']].set_visible(False); ax.grid(alpha=.2)
-    ax.set_ylim(bottom=0)
-    finish(fig, NAME[dataset] + ' - Full-sequence time coefficient sweep',
-           out/dataset/'05_time_coefficient_sweep')
+        fits = d[d.capacity_bytes.eq(d.memory_bytes)]
+        ax.scatter(fits.capacity_mib, fits.normalized_cost, s=46,
+                   facecolors='white', edgecolors=COLOR[method], linewidths=1.6,
+                   zorder=4)
+    reference_mib = profile.reference_capacity_bytes/MIB
+    ax.axvline(reference_mib, color='#888888', ls=':', lw=1)
+    ax.text(reference_mib, .98, f' {reference_mib:g} MiB reference',
+            transform=ax.get_xaxis_transform(), va='top', fontsize=8, color='#666666')
+    ax.axhline(1, color='#aaaaaa', ls='--', lw=.8, zorder=0)
+    ax.set_xscale('log', base=2)
+    ax.set_xlim(data.capacity_mib.min(), data.capacity_mib.max())
+    ax.xaxis.set_major_locator(LogLocator(base=2, numticks=9))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _: f'{value:.3g}'))
+    ax.xaxis.set_minor_formatter(plt.NullFormatter())
+    ax.set_ylim(0, data.normalized_cost.max()*1.08)
+    ax.set_xlabel('Fast-memory capacity (MiB, logarithmic scale)')
+    ax.set_ylabel('Estimated training cost\n(relative to BPTT all-slow cost)')
+    ax.spines[['top', 'right']].set_visible(False)
+    ax.grid(alpha=.2)
+    ax.set_axisbelow(True)
+    fig.suptitle(NAME[dataset] + ' - Full-sequence estimated time vs fast-memory capacity',
+                 fontsize=12, y=.98)
+    handles = [Line2D([0], [0], color=COLOR[m], linestyle=STYLES[m], lw=2,
+                       label=LABEL[m]) for m in METHODS]
+    handles.append(Line2D([0], [0], marker='o', color='#666666',
+        markerfacecolor='white', ls='', markersize=6, label='Working set fits'))
+    fig.legend(handles=handles, ncol=5, loc='lower center',
+               bbox_to_anchor=(.5, .047), frameon=False, fontsize=9)
+    fig.text(.5, .015, 'Proportional-access model; fixed reference costs; '
+             'common normalization; not measured runtime.',
+             ha='center', fontsize=8, color='#666666')
+    fig.tight_layout(rect=(0, .115, 1, .97))
+    path = out/dataset/'05_fast_memory_capacity_sweep'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for ext in ('pdf', 'svg', 'png'):
+        fig.savefig(path.with_suffix('.'+ext), dpi=180, bbox_inches='tight')
+    plt.close(fig)
+
+
+def write_hierarchy_notes(output, profile=REFERENCE_PROFILE):
+    metadata = profile.metadata()
+    (output/'memory_hierarchy_profile.json').write_text(
+        json.dumps(metadata, indent=2), encoding='utf-8')
+    sources = metadata['sources']
+    pd.DataFrame([
+        dict(coefficient='alpha', value_ns=profile.alpha_ns, unit='ns/MAC-equivalent',
+             normalized_value=profile.alpha_ns/profile.beta_fast_ns,
+             derivation='1e9 / (clock_hz * fp32_macs_per_cycle)',
+             source_url=sources['architecture']),
+        dict(coefficient='beta_fast', value_ns=profile.beta_fast_ns, unit='ns/FP32 word',
+             normalized_value=1.0,
+             derivation=f'{profile.fp_bytes} * 1e9 / {profile.fast_bandwidth_bytes_s:g} bytes/s',
+             source_url=sources['bandwidths']),
+        dict(coefficient='beta_slow', value_ns=profile.beta_slow_ns, unit='ns/FP32 word',
+             normalized_value=profile.beta_slow_ns/profile.beta_fast_ns,
+             derivation=f'{profile.fp_bytes} * 1e9 / {profile.slow_bandwidth_bytes_s:g} bytes/s',
+             source_url=sources['bandwidths']),
+    ]).to_csv(output/'memory_hierarchy_coefficients.csv', index=False)
+    (output/'memory_hierarchy_README.md').write_text(f"""# Fast-memory capacity and estimated training time
+
+Each dataset has `05_fast_memory_capacity_sweep.pdf`, `.svg` and `.png`.
+All four learning methods use one fixed reference profile. Only fast-memory
+capacity changes. These are analytical proxy values, not measured execution time.
+
+## Proportional-access model
+
+For saved peak working set W bytes and fast capacity K bytes:
+
+    f = min(1, K/W)
+    beta_effective = f*beta_fast + (1-f)*beta_slow
+    estimated_service = alpha*compute + beta_effective*accesses
+
+The fraction of stored values in each tier is assumed to equal the fraction of
+logical accesses served there. This assumes uniform access frequency and fixed
+placement. Arrays, cache replacement and reuse distance are not modeled separately.
+The 128 KiB local L1 tier is not modeled separately; the reference is a collapsed
+on-chip/external two-tier profile. No overhead or additional staging costs are added.
+
+## One hardware-grounded reference profile
+
+Vega at {profile.clock_hz/1e6:g} MHz, with {profile.fp32_macs_per_cycle:g} FP32 MACs
+per cycle across shared FPUs:
+
+- alpha = {profile.alpha_ns:.9g} ns per MAC-equivalent compute unit.
+- beta_fast = {profile.beta_fast_ns:.9g} ns per FP32 word, using
+  {profile.fast_bandwidth_bytes_s/1e9:g} GB/s published L2/L1 transfer bandwidth.
+- beta_slow = {profile.beta_slow_ns:.9g} ns per FP32 word, using
+  {profile.slow_bandwidth_bytes_s/1e6:g} MB/s external HyperRAM bandwidth.
+- Normalized fast-access cost = 1; compute weight a =
+  {profile.alpha_ns/profile.beta_fast_ns:.9g}; slow/fast ratio r =
+  {profile.beta_slow_ns/profile.beta_fast_ns:.9g}.
+- The vertical reference line is {profile.reference_capacity_bytes/MIB:g} MiB.
+
+The numeric source inputs and normalized weights are exported in
+`memory_hierarchy_coefficients.csv`; derivations, source URLs and all assumptions
+are in `memory_hierarchy_profile.json`. Capacity is varied parametrically while
+service costs remain fixed; every point is not a different actual device.
+
+Architecture and arithmetic: [Vega]({sources['architecture']}) and
+[shared-FPU training architecture]({sources['fpu_operations']}). Bandwidth:
+[author presentation, slide 19]({sources['bandwidths']}). The original Vega
+Table VI has inconsistent external-memory row labels; the later author slide
+identifies HyperRAM as 200 MB/s. No MRAM mutable-training-storage assumption is used.
+
+## Saved observations and common normalization
+
+Curves use each full-sequence run's recorded computation and access totals and
+recorded peak memory, preserving batch size and architecture. For variable-length
+inputs this deliberately combines saved mean work with saved peak working set,
+under the whole-working-set approximation. It does not average a separate beta
+over the length distribution. Selected windows are not substituted into this chart.
+
+All curves in one dataset share the same constant denominator:
+
+    BPTT_all_slow = alpha*C_BPTT + beta_slow*M_BPTT
+    normalized_cost_method(K) = estimated_service_method(K) / BPTT_all_slow
+
+Each method is NOT normalized to its own baseline. The marker on each curve is
+the exact point K=W where its working set first fits. The range covers capacities
+well below the smallest footprint and above every method's footprint. The grid
+includes each exact footprint and the reference capacity. A horizontal line at 1
+marks the common BPTT all-slow reference.
+
+`fast_memory_capacity_sweep.csv` exports every plotted value, source run IDs,
+footprints, capacities, fast/slow fractions, effective access coefficient,
+arithmetic/access service components and common normalization denominator.
+`fast_memory_reference_costs.csv` is the subset at the reference capacity.
+Service milliseconds in these exports are MAC-equivalent additive proxy values,
+not runtime predictions validated on hardware. Workload/optimizer exclusions
+remain those of the original analytical model. Accuracy values are not modified.
+
+The previous common-coefficient sweep is no longer generated. Workload scaling
+and window-cost charts now show computation and accesses separately, without
+equal-weight time panels. All figures use saved data; no training is run.
+""", encoding='utf-8')
 
 
 def style(ax):
@@ -448,11 +700,11 @@ def finish(fig, title, path, *, legend=True, bar_legend=False):
 
 
 def plot_theory(dataset, meta, data, out):
-    fig, axes = plt.subplots(2, 3, figsize=(15, 7.4))
+    fig, axes = plt.subplots(2, 2, figsize=(11, 7.4))
     panels = [(sweep, metric, xlabel, prefix + ' - ' + title)
               for sweep, xlabel, prefix in [('sequence_length', 'Time steps', 'Sequence length'),
                                             ('hidden_depth', 'Hidden layers', 'Network depth')]
-              for metric, title in zip(PLOT_METRICS, TITLES)]
+              for metric, title in zip(METRICS, TITLES)]
     for ax, (sweep, metric, xlabel, title) in zip(axes.flat, panels):
         for method in METHODS:
             d = data[data.sweep.eq(sweep) & data.learner.eq(method)]
@@ -460,18 +712,18 @@ def plot_theory(dataset, meta, data, out):
                     linestyle=STYLES[method], lw=2)
         ax.set_title(title, fontsize=10)
         ax.set_xlabel(xlabel)
-        ax.set_ylabel(Y_LABELS[PLOT_METRICS.index(metric)], fontsize=9)
+        ax.set_ylabel(Y_LABELS[METRICS.index(metric)], fontsize=9)
         if sweep == 'hidden_depth':
             ax.set_xticks(sorted(data[data.sweep.eq('hidden_depth')].value.unique()))
         style(ax)
-    finish(fig, NAME[dataset] + ' - Computation, memory accesses and time', out/dataset/'01_computation_and_access_scaling')
+    finish(fig, NAME[dataset] + ' - Computation and memory accesses', out/dataset/'01_computation_and_access_scaling')
 
 
 def plot_selected(dataset, data, limit, out):
     d=data.set_index('learner').loc[list(METHODS)]
-    fig,axes=plt.subplots(1,3,figsize=(15,4.5),sharex=True,sharey=True)
+    fig,axes=plt.subplots(1,2,figsize=(11,4.5),sharex=True,sharey=True)
     y=np.arange(4)
-    for ax,metric,title in zip(axes,PLOT_METRICS,TITLES):
+    for ax,metric,title in zip(axes,METRICS,TITLES):
         vals=d[metric+'_ratio'].to_numpy()
         ax.barh(y,vals,color=[COLOR[m] for m in METHODS],height=.6)
         ax.axvline(1,color='#333333',ls='--',lw=1)
@@ -544,17 +796,20 @@ def gallery(datasets, output):
       '<style>body{font:16px system-ui;max-width:1200px;margin:30px auto;padding:0 20px;color:#222} '
       'img{max-width:100%;height:auto}article{border-top:1px solid #ccc;margin-top:35px} '
       'nav{position:sticky;top:0;background:white;padding:12px}a{margin-right:12px}</style>',
-      '<h1>Memory, computation, and memory-access figures</h1>',
+      '<h1>Memory, workload, and estimated training-time figures</h1>',
       '<p>Run comparisons use the costs and window-length profiles saved with each experiment. '
       'New runs include truncated final windows; historical runs retain their recorded preprocessing.</p>',
       '<p><a href="accuracy_memory_README.md">Accuracy/memory chart notes and hardware sources</a>'
       '<a href="accuracy_memory.csv">Accuracy/memory values</a>'
-      '<a href="memory_budget_comparison.csv">Memory-budget comparisons</a></p>',
+      '<a href="memory_budget_comparison.csv">Memory-budget comparisons</a>'
+      + ('<a href="memory_hierarchy_README.md">Capacity model and coefficients</a>'
+         '<a href="fast_memory_capacity_sweep.csv">Capacity-sweep values</a>'
+         if (output/'memory_hierarchy_README.md').exists() else '') + '</p>',
       '<nav>'+''.join(f'<a href="#{d}">{escape(NAME[d])}</a>' for d in datasets)+'</nav>']
     for dataset in datasets:
         html.append(f'<article id="{dataset}"><h2>{escape(NAME[dataset])}</h2>')
         names = ['01_computation_and_access_scaling', '02_windowing_cost_comparison',
-                 '03_training_memory_scaling', '04_memory_case_study', '05_time_coefficient_sweep',
+                 '03_training_memory_scaling', '04_memory_case_study', '05_fast_memory_capacity_sweep',
                  '06_accuracy_memory_budget']
         for name in names:
             if not (output/dataset/(name+'.png')).exists():
@@ -615,7 +870,7 @@ def main(argv=None):
         'memory_budget_comparison.csv checks every point against every reference, '
         'including references outside the displayed range. `fits_modelled_memory` means '
         'memory_bytes <= budget_bytes. Negative remaining_budget_bytes denotes an overrun.\n\n'
-        'Run `python -m reporting.create_results_overview` for all six figures, or add '
+        'Run `python -m reporting.create_results_overview` for all six figure types, or add '
         '`--accuracy-memory-only` to preserve the other existing chart exports.\n\n'
         '## Published specifications\n\n'+''.join(
             f'- [{r.device}]({r.source_url}): {r.published_capacity}.\n'
@@ -629,9 +884,11 @@ def main(argv=None):
         return
     theory=theoretical_data(meta)
     selected=selected_data(meta)
-    theory, selected = add_time_proxy(theory, selected)
-    sweep = coefficient_sweep_data(selected)
-    sweep.to_csv(output/'time_coefficient_sweep.csv', index=False)
+    sweep = capacity_sweep_data(selected, points)
+    sweep.to_csv(output/'fast_memory_capacity_sweep.csv', index=False)
+    sweep[sweep.capacity_bytes.eq(REFERENCE_PROFILE.reference_capacity_bytes)].to_csv(
+        output/'fast_memory_reference_costs.csv', index=False)
+    write_hierarchy_notes(output)
     memory_cases = memory_case_study_data(meta)
     memory_cases.to_csv(output/'memory_case_study.csv', index=False)
     theory.to_csv(output/'theoretical_scaling.csv',index=False)
@@ -640,12 +897,16 @@ def main(argv=None):
     for dataset in args.datasets:
         plot_theory(dataset,meta[dataset],theory[theory.dataset.eq(dataset)],output)
         dataset_selected = selected[selected.dataset.eq(dataset)]
-        limit = max(1.25, float(dataset_selected[[m+'_ratio' for m in PLOT_METRICS]].max().max())*1.2)
+        limit = max(1.25, float(dataset_selected[[m+'_ratio' for m in METRICS]].max().max())*1.2)
         plot_selected(dataset,dataset_selected,limit,output)
         plot_memory(dataset, theory[theory.dataset.eq(dataset)], output)
         plot_memory_case_study(dataset, memory_cases[memory_cases.dataset.eq(dataset)], output)
-        plot_coefficient_sweep(dataset, sweep[sweep.dataset.eq(dataset)], output)
+        plot_capacity_sweep(dataset, sweep[sweep.dataset.eq(dataset)], output)
+        # These obsolete report artifacts are replaced by the capacity sweep.
+        for ext in ('pdf', 'svg', 'png'):
+            (output/dataset/f'05_time_coefficient_sweep.{ext}').unlink(missing_ok=True)
         print(f'Saved 6 figures for {dataset}',flush=True)
+    (output/'time_coefficient_sweep.csv').unlink(missing_ok=True)
     gallery(args.datasets,output)
     (output/'README.md').write_text("""# Results overview
 
@@ -653,7 +914,8 @@ Open index.html to browse all datasets. Figures are exported as PDF, SVG and PNG
 Run `python -m reporting.create_results_overview`; optional arguments are
 `--datasets har pamap2` and `--output-dir PATH`.
 
-1. **Computation, memory-access and time scaling**: sequence length and network depth.
+1. **Computation and memory-access scaling**: sequence length and network depth.
+   Work counts are shown separately; there is no equal-weight time panel.
 2. **Windowed vs full-sequence training cost**: selected-window/hop cost ratios,
    using each run's recorded window-length profile. The baseline is 1.
 3. **Training-memory scaling**: peak memory versus sequence length and depth.
@@ -662,10 +924,14 @@ Run `python -m reporting.create_results_overview`; optional arguments are
    working set, not the sum over all windows. Values and dimensions are in
    memory_case_study.csv.
 
-5. **Time coefficient sweep**: full-sequence cost only, as computation weight
-   increases from 0 to 2 and memory-access weight decreases from 2 to 0.
-   The total budget is 2. The midpoint (1, 1) exactly matches the equal-weight
-   time costs in the other figures. Values are in time_coefficient_sweep.csv.
+5. **Fast-memory capacity sweep**: one curve for each learning method, using its
+   saved full-sequence work and peak memory. A single Vega-based cost profile is
+   held fixed while fast-memory capacity varies. All methods share one BPTT
+   all-slow normalization reference. Markers indicate each working set's capacity.
+   The proportional-access assumption and coefficient derivations are documented
+   in memory_hierarchy_README.md and memory_hierarchy_profile.json. Values are in
+   fast_memory_capacity_sweep.csv, with reference-capacity values in
+   fast_memory_reference_costs.csv and coefficients in memory_hierarchy_coefficients.csv.
 
 6. **Accuracy within a memory budget**: observed full-sequence and selected-window
    accuracy versus estimated peak training memory. Arrows connect each method's
@@ -676,9 +942,11 @@ Run `python -m reporting.create_results_overview`; optional arguments are
    these figures without replacing the other existing cost charts, or
    --memory-budget-fraction 0.75 to reserve 25% of each capacity for other uses.
 
-Time panels use time_proxy = computation + memory accesses (both weights 1).
-Windowed/full time ratios divide these sums, not the individual cost ratios.
-Time is an analytical cost proxy, not seconds or measured execution time.
+The previous common-coefficient sweep and equal-weight time panels are removed.
+The capacity model assumes the fast-access fraction equals min(1, capacity /
+peak working set). Its coefficients are common to all methods; uniform access
+frequency and fixed placement are assumptions. It is an analytical service proxy,
+not measured execution time. No coefficient-combination grid or overhead term is used.
 
 Fixed dimensions are recorded in configurations.json. Pure theory uses the saved
 maximum horizon for variable-length data; run comparisons use observed lengths.

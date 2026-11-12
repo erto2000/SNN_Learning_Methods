@@ -85,7 +85,7 @@ best-validation, and final-test tables. It keeps MNIST Static and Rate distinct.
 It writes figures to `results/results_overview/`; open `index.html` to browse
 them. Each dataset has computation and memory-access scaling, windowed versus
 full-sequence training costs, training-memory scaling, and the four-configuration
-memory case study, a full-sequence time-coefficient sweep, and an accuracy versus
+memory case study, a full-sequence fast-memory capacity sweep, and an accuracy versus
 memory-budget chart using the actual full-sequence and selected-window runs. PDF, SVG, PNG,
 and underlying CSV values are exported.
 
@@ -117,14 +117,38 @@ GPU allocation, energy, or runtime. Forward-Forward costs cover a complete
 layerwise sweep. Optimizer-state memory is excluded. RATE-PEPITA retains two
 spike-rate buffers, one for each forward phase.
 
-The weighted time proxy is `COST_COMPUTE_WEIGHT * compute + COST_ACCESS_WEIGHT * accesses`.
-The two weights are set in `experiment_config.py`; plots can explore other weights.
-The overview adds time-cost panels with computation and access weights both
-set to 1. A coefficient-sweep chart holds their sum at 2, moving from access-only
-to computation-only cost. Its midpoint is (1, 1), matching the other time panels. It shows only
-full-sequence cost; these are model cost units, not seconds. Run comparisons use
-the costs and window-length profiles recorded by each experiment. Historical runs
-retain their original preprocessing and recorded estimates.
+Saved experiments retain their original weighted time proxy,
+`COST_COMPUTE_WEIGHT * compute + COST_ACCESS_WEIGHT * accesses`. The overview
+now shows computation and memory-access counts separately, without equal-weight
+time panels, and replaces the former coefficient sweep with
+`05_fast_memory_capacity_sweep` for every dataset and all four learners.
+
+The capacity model uses each full-sequence run's saved mean computation/access
+counts and saved peak working set W. With fast capacity K, it assigns fraction
+`f = min(1, K/W)` of logical accesses to fast memory, assuming uniform access
+frequency and fixed placement. The proxy is
+`alpha*C + (f*beta_fast + (1-f)*beta_slow)*M`. A single collapsed Vega-based
+reference profile is fixed: FP32 at 250 MHz, alpha = 1 ns/MAC-equivalent,
+beta_fast = 4/1.9 ns/word (1.9 GB/s), beta_slow = 20 ns/word (200 MB/s).
+The normalized weights are a = 0.475 and r = 9.5. Local L1 is not modeled as a
+separate tier. No overhead or separate staging-transfer cost is added.
+
+Only capacity varies, on a logarithmic axis spanning below and above all four
+footprints. Every curve shares the dataset's BPTT all-slow normalization
+reference; each method is not independently normalized. Circles mark the exact
+working-set capacities; a vertical line marks the 1.5 MiB reference. These are
+parametric, hardware-informed analytical service costs, not measured runtime or
+cache traffic. For variable-length data, peak memory is deliberately applied to
+the saved mean work under the whole-working-set approximation.
+
+The generator exports `fast_memory_capacity_sweep.csv`,
+`fast_memory_reference_costs.csv`, `memory_hierarchy_coefficients.csv`,
+`memory_hierarchy_profile.json`, and `memory_hierarchy_README.md`, including
+source URLs, coefficient derivations, assumptions, and source run IDs. The old
+`05_time_coefficient_sweep` files for regenerated datasets and the old sweep CSV
+are removed. No experiments or accuracy values are rerun or modified. Run
+comparisons retain the costs and length profiles recorded by each experiment.
+Historical runs retain their original preprocessing and recorded estimates.
 All current results use one seed, so small accuracy differences should not be
 treated as statistically established method rankings.
 
