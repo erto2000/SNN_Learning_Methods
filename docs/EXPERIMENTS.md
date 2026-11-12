@@ -86,7 +86,8 @@ It writes figures to `results/results_overview/`; open `index.html` to browse
 them. Each dataset has computation and memory-access scaling, windowed versus
 full-sequence training costs, training-memory scaling, and the four-configuration
 memory case study, a full-sequence fast-memory capacity sweep, and an accuracy versus
-memory-budget chart using the actual full-sequence and selected-window runs. PDF, SVG, PNG,
+memory-budget chart using the actual full-sequence and selected-window runs, plus
+a windowed/full estimated-time capacity sweep. PDF, SVG, PNG,
 and underlying CSV values are exported.
 
 Use `--datasets har pamap2` or `--output-dir PATH` to select datasets or output.
@@ -136,7 +137,8 @@ separate tier. No overhead or separate staging-transfer cost is added.
 Only capacity varies, on a logarithmic axis spanning below and above all four
 footprints. Every curve shares the dataset's BPTT all-slow normalization
 reference; each method is not independently normalized. Circles mark the exact
-working-set capacities; a vertical line marks the 1.5 MiB reference. These are
+working-set capacities. Device-specific vertical reference lines are omitted;
+the 1.5 MiB reference values remain available in the CSV exports. These are
 parametric, hardware-informed analytical service costs, not measured runtime or
 cache traffic. For variable-length data, peak memory is deliberately applied to
 the saved mean work under the whole-working-set approximation.
@@ -149,6 +151,22 @@ source URLs, coefficient derivations, assumptions, and source run IDs. The old
 are removed. No experiments or accuracy values are rerun or modified. Run
 comparisons retain the costs and length profiles recorded by each experiment.
 Historical runs retain their original preprocessing and recorded estimates.
+
+`07_windowed_time_capacity_sweep` adds four curves comparing each method's
+selected-window cost with its own full-sequence cost at the same capacity.
+The horizontal reference is 1: lower values mean windowing reduces estimated
+time. This uses a different normalization from chart 05; ratios do not rank
+absolute training costs across methods. Capacity spans both settings' footprints.
+Total saved work already covers all windows, overlap and partial tails, so it is
+not multiplied by window count again. Each setting's saved peak footprint,
+rather than the sum of its windows' memory, determines its fast-access fraction.
+This uses the same whole-working-set approximation as the full-sequence sweep,
+without per-window beta reweighting. There is no additional coefficient sweep.
+
+`windowed_time_capacity_sweep.csv` exports the ratios, both settings' costs,
+memory fractions, window/hop values, observed accuracies and source run IDs.
+`windowed_time_reference_costs.csv` gives all 40 comparisons at 1.5 MiB. These
+compare validation-selected settings; accuracy equivalence is not assumed.
 All current results use one seed, so small accuracy differences should not be
 treated as statistically established method rankings.
 

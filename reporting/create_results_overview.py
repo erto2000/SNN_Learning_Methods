@@ -110,8 +110,9 @@ class HierarchyProfile:
                 'MAC-equivalent arithmetic and serialized additive service; no overhead term',
                 'No additional staging-transfer costs are added to this two-tier proxy',
                 'Original optimizer-state exclusions and saved workload estimates are retained',
-                'Full-sequence saved mean work and saved peak footprint; no per-length reweighting',
-                'Normalized to the same dataset BPTT all-slow cost for every curve',
+                'Each setting uses saved mean total work and peak footprint; no per-length reweighting',
+                'Full-sequence curves share a dataset BPTT all-slow normalization',
+                'Windowed/full ratios compare each method to itself at the same capacity',
                 'The estimates are not measured runtime, cache hits or hardware traffic'],
             source_note='The original Vega Table VI swaps external-memory row labels; '
                         'the later author slide identifies HyperRAM as 200 MB/s.')
@@ -476,6 +477,37 @@ def selected_data(baselines):
     return data
 
 
+def _capacity_runs(selected, points, setting, profile):
+    """Match saved memory to the exact run whose validated work is used."""
+    keys = ['dataset', 'learner']
+    runs = points[points.setting.eq(setting)].copy()
+    if (runs.duplicated(keys).any() or selected.duplicated(keys).any()
+            or set(map(tuple, runs[keys].to_numpy()))
+            != set(map(tuple, selected[keys].to_numpy()))):
+        raise ValueError(f'Capacity sweep requires matching unique {setting} runs')
+    if runs.empty or not runs.fp_bytes.eq(profile.fp_bytes).all():
+        raise ValueError('Capacity sweep requires the reference FP32 precision')
+    data = selected.merge(runs[keys+['run_id', 'memory_bytes', 'batch_size']],
+                          on=keys, validate='one_to_one')
+    source = 'baseline_run_id' if setting == 'full_sequence' else 'selected_run_id'
+    if not data.run_id.eq(data[source]).all():
+        raise ValueError('Capacity-sweep memory and work must come from the same run')
+    for dataset, group in data.groupby('dataset', sort=False):
+        if set(group.learner) != set(METHODS) or len(group) != len(METHODS):
+            raise ValueError(f'Capacity sweep needs all four methods for {dataset}')
+    return data
+
+
+def _capacity_grid(memories, profile):
+    memories = np.asarray(memories, dtype=float)
+    if np.any(~np.isfinite(memories)) or np.any(memories <= 0):
+        raise ValueError('Capacity-sweep memory must be finite and positive')
+    low = min(memories.min()/100, profile.reference_capacity_bytes/4)
+    high = max(memories.max()*4, profile.reference_capacity_bytes*2)
+    return np.unique(np.r_[np.geomspace(low, high, 321), memories,
+                           profile.reference_capacity_bytes])
+
+
 def capacity_sweep_data(selected, points, profile=REFERENCE_PROFILE):
     """Use saved full-sequence mean work and peak memory, without retraining.
 
@@ -483,29 +515,10 @@ def capacity_sweep_data(selected, points, profile=REFERENCE_PROFILE):
     between methods. Each footprint and the reference capacity are exact grid
     points, so transitions and the physical reference can be reproduced.
     """
-    keys = ['dataset', 'learner']
-    full = points[points.setting.eq('full_sequence')].copy()
-    if (full.duplicated(keys).any() or selected.duplicated(keys).any()
-            or set(map(tuple, full[keys].to_numpy()))
-            != set(map(tuple, selected[keys].to_numpy()))):
-        raise ValueError('Capacity sweep requires matching unique full-sequence runs')
-    if full.empty or not full.fp_bytes.eq(profile.fp_bytes).all():
-        raise ValueError('Capacity sweep requires the reference FP32 precision')
-    data = selected.merge(full[keys+['run_id', 'memory_bytes', 'batch_size']],
-                          on=keys, validate='one_to_one')
-    if not data.run_id.eq(data.baseline_run_id).all():
-        raise ValueError('Capacity-sweep memory and work must come from the same run')
+    data = _capacity_runs(selected, points, 'full_sequence', profile)
     rows = []
     for dataset, group in data.groupby('dataset', sort=False):
-        if set(group.learner) != set(METHODS) or len(group) != len(METHODS):
-            raise ValueError(f'Capacity sweep needs all four methods for {dataset}')
-        memories = group.memory_bytes.to_numpy(dtype=float)
-        if np.any(~np.isfinite(memories)) or np.any(memories <= 0):
-            raise ValueError(f'Invalid capacity-sweep memory in {dataset}')
-        low = min(memories.min()/100, profile.reference_capacity_bytes/4)
-        high = max(memories.max()*4, profile.reference_capacity_bytes*2)
-        capacities = np.unique(np.r_[np.geomspace(low, high, 321), memories,
-                                     profile.reference_capacity_bytes])
+        capacities = _capacity_grid(group.memory_bytes, profile)
         bp = group[group.learner.eq('bp')].iloc[0]
         reference = float(hierarchy_cost(bp.baseline_compute_scalars,
             bp.baseline_access_scalars, bp.memory_bytes, 0, profile)['estimated_service_ns'])
@@ -534,6 +547,54 @@ def capacity_sweep_data(selected, points, profile=REFERENCE_PROFILE):
     return pd.DataFrame(rows)
 
 
+def windowed_capacity_sweep_data(selected, points, profile=REFERENCE_PROFILE):
+    """Compare total selected-window work with the same method's full run.
+
+    Each setting uses its saved peak working set for the proportional split.
+    Saved work already includes all windows, overlap and partial tails; never
+    multiply it by window count again or sum per-window memory footprints.
+    """
+    keys = ['dataset', 'learner']
+    full = _capacity_runs(selected, points, 'full_sequence', profile)
+    windowed = _capacity_runs(selected, points, 'windowed', profile)
+    data = full.merge(windowed[keys+['memory_bytes', 'batch_size']], on=keys,
+                      suffixes=('', '_selected'), validate='one_to_one')
+    if not data.batch_size.eq(data.batch_size_selected).all():
+        raise ValueError('Windowed/full costs must use the same original-sequence batch size')
+    frames = []
+    for dataset, group in data.groupby('dataset', sort=False):
+        capacities = _capacity_grid(np.r_[group.memory_bytes,
+                                          group.memory_bytes_selected], profile)
+        for run in group.itertuples():
+            baseline = hierarchy_cost(run.baseline_compute_scalars,
+                run.baseline_access_scalars, run.memory_bytes, capacities, profile)
+            window = hierarchy_cost(run.selected_compute_scalars,
+                run.selected_access_scalars, run.memory_bytes_selected, capacities, profile)
+            if np.any(baseline['estimated_service_ns'] <= 0):
+                raise ValueError(f'Full-sequence denominator must be positive in {run.baseline_run_id}')
+            columns = dict(dataset=dataset, learner=run.learner,
+                baseline_run_id=run.baseline_run_id, selected_run_id=run.selected_run_id,
+                batch_size=run.batch_size, window_length=run.window_length, hop=run.hop,
+                effective_hop_ratio=run.effective_hop_ratio,
+                baseline_test_accuracy=run.baseline_test_accuracy,
+                selected_test_accuracy=run.selected_test_accuracy,
+                baseline_memory_bytes=run.memory_bytes,
+                selected_memory_bytes=run.memory_bytes_selected,
+                baseline_compute_scalars=run.baseline_compute_scalars,
+                baseline_access_scalars=run.baseline_access_scalars,
+                selected_compute_scalars=run.selected_compute_scalars,
+                selected_access_scalars=run.selected_access_scalars,
+                capacity_bytes=capacities, capacity_mib=capacities/MIB,
+                windowed_full_time_ratio=window['estimated_service_ns']/baseline['estimated_service_ns'])
+            for prefix, costs in [('baseline', baseline), ('selected', window)]:
+                for key in ('fast_fraction', 'slow_fraction', 'effective_beta_ns'):
+                    columns[f'{prefix}_{key}'] = costs[key]
+                for key in ('compute_service_ns', 'access_service_ns', 'estimated_service_ns'):
+                    columns[f'{prefix}_{key.replace("_ns", "_ms")}'] = costs[key]/1e6
+            frames.append(pd.DataFrame(columns))
+    return pd.concat(frames, ignore_index=True)
+
+
 def plot_capacity_sweep(dataset, data, out, profile=REFERENCE_PROFILE):
     fig, ax = plt.subplots(figsize=(9, 5.4))
     for method in METHODS:
@@ -544,10 +605,6 @@ def plot_capacity_sweep(dataset, data, out, profile=REFERENCE_PROFILE):
         ax.scatter(fits.capacity_mib, fits.normalized_cost, s=46,
                    facecolors='white', edgecolors=COLOR[method], linewidths=1.6,
                    zorder=4)
-    reference_mib = profile.reference_capacity_bytes/MIB
-    ax.axvline(reference_mib, color='#888888', ls=':', lw=1)
-    ax.text(reference_mib, .98, f' {reference_mib:g} MiB reference',
-            transform=ax.get_xaxis_transform(), va='top', fontsize=8, color='#666666')
     ax.axhline(1, color='#aaaaaa', ls='--', lw=.8, zorder=0)
     ax.set_xscale('log', base=2)
     ax.set_xlim(data.capacity_mib.min(), data.capacity_mib.max())
@@ -579,6 +636,40 @@ def plot_capacity_sweep(dataset, data, out, profile=REFERENCE_PROFILE):
     plt.close(fig)
 
 
+def plot_windowed_capacity_sweep(dataset, data, out, profile=REFERENCE_PROFILE):
+    fig, ax = plt.subplots(figsize=(9, 5.4))
+    for method in METHODS:
+        d = data[data.learner.eq(method)].sort_values('capacity_bytes')
+        ax.plot(d.capacity_mib, d.windowed_full_time_ratio,
+                color=COLOR[method], linestyle=STYLES[method], lw=2)
+    ax.axhline(1, color='#444444', ls='--', lw=1)
+    ax.set_xscale('log', base=2)
+    ax.set_xlim(data.capacity_mib.min(), data.capacity_mib.max())
+    ax.xaxis.set_major_locator(LogLocator(base=2, numticks=9))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _: f'{value:.3g}'))
+    ax.xaxis.set_minor_formatter(plt.NullFormatter())
+    ax.set_ylim(0, max(1.1, data.windowed_full_time_ratio.max()*1.08))
+    ax.set_xlabel('Fast-memory capacity (MiB, logarithmic scale)')
+    ax.set_ylabel('Estimated training time ratio\n(selected windows / own full sequence)')
+    ax.spines[['top', 'right']].set_visible(False)
+    ax.grid(alpha=.2)
+    ax.set_axisbelow(True)
+    fig.suptitle(NAME[dataset] + ' - Windowed/full estimated time vs fast-memory capacity',
+                 fontsize=12, y=.98)
+    fig.legend(handles=[Line2D([0], [0], color=COLOR[m], linestyle=STYLES[m],
+                   lw=2, label=LABEL[m]) for m in METHODS],
+               ncol=4, loc='lower center', bbox_to_anchor=(.5, .047), frameon=False)
+    fig.text(.5, .015, 'Below 1: lower estimated time with windows. '
+             'Fixed reference costs; not measured runtime.',
+             ha='center', fontsize=8, color='#666666')
+    fig.tight_layout(rect=(0, .115, 1, .97))
+    path = out/dataset/'07_windowed_time_capacity_sweep'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for ext in ('pdf', 'svg', 'png'):
+        fig.savefig(path.with_suffix('.'+ext), dpi=180, bbox_inches='tight')
+    plt.close(fig)
+
+
 def write_hierarchy_notes(output, profile=REFERENCE_PROFILE):
     metadata = profile.metadata()
     (output/'memory_hierarchy_profile.json').write_text(
@@ -601,6 +692,7 @@ def write_hierarchy_notes(output, profile=REFERENCE_PROFILE):
     (output/'memory_hierarchy_README.md').write_text(f"""# Fast-memory capacity and estimated training time
 
 Each dataset has `05_fast_memory_capacity_sweep.pdf`, `.svg` and `.png`.
+It also has `07_windowed_time_capacity_sweep` in the same three formats.
 All four learning methods use one fixed reference profile. Only fast-memory
 capacity changes. These are analytical proxy values, not measured execution time.
 
@@ -631,7 +723,8 @@ per cycle across shared FPUs:
 - Normalized fast-access cost = 1; compute weight a =
   {profile.alpha_ns/profile.beta_fast_ns:.9g}; slow/fast ratio r =
   {profile.beta_slow_ns/profile.beta_fast_ns:.9g}.
-- The vertical reference line is {profile.reference_capacity_bytes/MIB:g} MiB.
+- Reference-capacity values at {profile.reference_capacity_bytes/MIB:g} MiB are
+  exported for discussion; no device-specific vertical line is drawn.
 
 The numeric source inputs and normalized weights are exported in
 `memory_hierarchy_coefficients.csv`; derivations, source URLs and all assumptions
@@ -670,6 +763,37 @@ arithmetic/access service components and common normalization denominator.
 Service milliseconds in these exports are MAC-equivalent additive proxy values,
 not runtime predictions validated on hardware. Workload/optimizer exclusions
 remain those of the original analytical model. Accuracy values are not modified.
+
+## Windowed/full estimated-time comparison
+
+Chart 07 compares each method's validation-selected window/hop run with that
+same method's full-sequence baseline at the SAME fast-memory capacity:
+
+    ratio(K) = selected_window_service(K) / full_sequence_service(K)
+
+Below 1 means lower estimated time with windows; above 1 means higher estimated
+time. This denominator varies with capacity and is different for each method.
+It is not the common BPTT all-slow normalization used by chart 05. A lower ratio
+shows a greater within-method reduction, not a lower absolute cost across methods.
+
+Both settings use saved total mean computation/access counts per configured
+batch of original sequences, including all windows, repeated overlap work,
+gaps and actual partial final windows. Work is not multiplied by window count
+again. Each setting's own saved peak footprint determines its proportional
+fast-access fraction; window memories are not added. This retains the same
+whole-working-set approximation as chart 05, not per-window beta reweighting.
+
+The capacity grid includes all eight full/windowed footprints and the reference
+capacity, and spans well below and above every footprint. Identical settings
+produce ratio 1 throughout. If both settings fit, their ratio reflects their
+arithmetic and access counts; the ratio need not return to 1. Ratios need not be
+monotonic because footprint savings and additional work act together.
+
+`windowed_time_capacity_sweep.csv` records both run IDs, window/hop settings,
+saved accuracies, work, memory, fast/slow fractions, service components and the
+ratio at every capacity. `windowed_time_reference_costs.csv` contains the 1.5 MiB
+reference-capacity rows. Saved accuracies are context, not inputs to this cost
+model: these are selected configurations, not accuracy-matched time comparisons.
 
 The previous common-coefficient sweep is no longer generated. Workload scaling
 and window-cost charts now show computation and accesses separately, without
@@ -804,13 +928,15 @@ def gallery(datasets, output):
       '<a href="memory_budget_comparison.csv">Memory-budget comparisons</a>'
       + ('<a href="memory_hierarchy_README.md">Capacity model and coefficients</a>'
          '<a href="fast_memory_capacity_sweep.csv">Capacity-sweep values</a>'
-         if (output/'memory_hierarchy_README.md').exists() else '') + '</p>',
+         if (output/'memory_hierarchy_README.md').exists() else '')
+      + ('<a href="windowed_time_capacity_sweep.csv">Windowed/full time values</a>'
+         if (output/'windowed_time_capacity_sweep.csv').exists() else '') + '</p>',
       '<nav>'+''.join(f'<a href="#{d}">{escape(NAME[d])}</a>' for d in datasets)+'</nav>']
     for dataset in datasets:
         html.append(f'<article id="{dataset}"><h2>{escape(NAME[dataset])}</h2>')
         names = ['01_computation_and_access_scaling', '02_windowing_cost_comparison',
                  '03_training_memory_scaling', '04_memory_case_study', '05_fast_memory_capacity_sweep',
-                 '06_accuracy_memory_budget']
+                 '06_accuracy_memory_budget', '07_windowed_time_capacity_sweep']
         for name in names:
             if not (output/dataset/(name+'.png')).exists():
                 continue
@@ -870,7 +996,7 @@ def main(argv=None):
         'memory_budget_comparison.csv checks every point against every reference, '
         'including references outside the displayed range. `fits_modelled_memory` means '
         'memory_bytes <= budget_bytes. Negative remaining_budget_bytes denotes an overrun.\n\n'
-        'Run `python -m reporting.create_results_overview` for all six figure types, or add '
+        'Run `python -m reporting.create_results_overview` for all seven figure types, or add '
         '`--accuracy-memory-only` to preserve the other existing chart exports.\n\n'
         '## Published specifications\n\n'+''.join(
             f'- [{r.device}]({r.source_url}): {r.published_capacity}.\n'
@@ -888,6 +1014,10 @@ def main(argv=None):
     sweep.to_csv(output/'fast_memory_capacity_sweep.csv', index=False)
     sweep[sweep.capacity_bytes.eq(REFERENCE_PROFILE.reference_capacity_bytes)].to_csv(
         output/'fast_memory_reference_costs.csv', index=False)
+    window_sweep = windowed_capacity_sweep_data(selected, points)
+    window_sweep.to_csv(output/'windowed_time_capacity_sweep.csv', index=False)
+    window_sweep[window_sweep.capacity_bytes.eq(REFERENCE_PROFILE.reference_capacity_bytes)].to_csv(
+        output/'windowed_time_reference_costs.csv', index=False)
     write_hierarchy_notes(output)
     memory_cases = memory_case_study_data(meta)
     memory_cases.to_csv(output/'memory_case_study.csv', index=False)
@@ -902,10 +1032,12 @@ def main(argv=None):
         plot_memory(dataset, theory[theory.dataset.eq(dataset)], output)
         plot_memory_case_study(dataset, memory_cases[memory_cases.dataset.eq(dataset)], output)
         plot_capacity_sweep(dataset, sweep[sweep.dataset.eq(dataset)], output)
+        plot_windowed_capacity_sweep(dataset,
+            window_sweep[window_sweep.dataset.eq(dataset)], output)
         # These obsolete report artifacts are replaced by the capacity sweep.
         for ext in ('pdf', 'svg', 'png'):
             (output/dataset/f'05_time_coefficient_sweep.{ext}').unlink(missing_ok=True)
-        print(f'Saved 6 figures for {dataset}',flush=True)
+        print(f'Saved 7 figures for {dataset}',flush=True)
     (output/'time_coefficient_sweep.csv').unlink(missing_ok=True)
     gallery(args.datasets,output)
     (output/'README.md').write_text("""# Results overview
@@ -941,6 +1073,14 @@ Run `python -m reporting.create_results_overview`; optional arguments are
    accuracy_memory_README.md for assumptions. Use --accuracy-memory-only to add
    these figures without replacing the other existing cost charts, or
    --memory-budget-fraction 0.75 to reserve 25% of each capacity for other uses.
+
+7. **Windowed/full estimated time versus capacity**: selected-window total cost
+   divided by the same method's full-sequence cost at each capacity. Below 1 means
+   windowing reduces estimated time. The denominator is each method's own baseline,
+   not chart 05's common BPTT all-slow reference. Each setting uses its own saved
+   peak working set and total work over all windows, including overlap and tails.
+   Values and both source run IDs are in windowed_time_capacity_sweep.csv;
+   reference-capacity comparisons are in windowed_time_reference_costs.csv.
 
 The previous common-coefficient sweep and equal-weight time panels are removed.
 The capacity model assumes the fast-access fraction equals min(1, capacity /
