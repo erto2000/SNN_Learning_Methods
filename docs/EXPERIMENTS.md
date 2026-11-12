@@ -83,8 +83,8 @@ an `all_current_runs` table. The independent Optuna comparison writes trial,
 best-validation, and final-test tables. It keeps MNIST Static and Rate distinct.
 `create_results_overview.py` is the single chart generator for all ten variants.
 It writes figures to `results/results_overview/`; open `index.html` to browse
-them. Each dataset has computation and memory-access scaling, windowed versus
-full-sequence training costs, training-memory scaling, and the four-configuration
+them. Each dataset has computation and memory-access scaling, a controlled
+window-length sweep, training-memory scaling, and the four-configuration
 memory case study, a full-sequence fast-memory capacity sweep, and an accuracy versus
 memory-budget chart using the actual full-sequence and selected-window runs, plus
 a windowed/full estimated-time capacity sweep. PDF, SVG, PNG,
@@ -92,6 +92,25 @@ and underlying CSV values are exported.
 
 Use `--datasets har pamap2` or `--output-dir PATH` to select datasets or output.
 The generator uses saved metadata and learner cost equations without training.
+
+`02_controlled_windowing_sweep` replaces the selected-configuration cost
+bars/scatter. Three panels show peak memory, total computation and total memory
+accesses versus relative window length L/T. T is the maximum saved full-sequence
+length. Every method uses every integer L from 1 to T with hop=L, so the policy
+is non-overlapping throughout. Within each dataset the saved input-length
+distribution, batch size and model dimensions are common to all methods.
+Variable-length datasets retain their full recorded length distribution, with
+the same L applied to every sequence. Short final windows are retained at their
+actual length: no time steps are repeated, omitted or padded into the cost.
+Total work sums all windows and is averaged over original sequences, while peak
+memory uses only the largest window's working set. Ratios use each method's own
+validated full-sequence costs; all three ratios are 1 at L=T. Terms already in
+the analytical formulas repeat per window; no overhead coefficient is added.
+The axes are linear, with a common y range for both work panels.
+`controlled_windowing_sweep.csv` exports the curves, baseline run IDs, profile
+source, dimensions, window counts and time-step coverage. These theoretical
+settings have no accuracy estimates. Actual validation-selected settings remain
+in `selected_vs_full.csv` and the separate accuracy/memory and capacity figures.
 
 The accuracy/memory figure uses open circles for full sequences and filled
 diamonds for selected windows, connected by an arrow for each method. Published

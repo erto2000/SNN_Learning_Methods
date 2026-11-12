@@ -7,6 +7,7 @@ or edits the thesis. Each figure is exported as PDF, SVG, and PNG.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from dataclasses import dataclass
 from html import escape
 import json
@@ -416,6 +417,84 @@ def theoretical_data(baselines):
     return pd.DataFrame(rows)
 
 
+def nonoverlapping_window_profile(length_counts, window_length):
+    """Partition every saved sequence once, keeping its shorter final window."""
+    if window_length < 1 or int(window_length) != window_length:
+        raise ValueError('Window length must be a positive integer')
+    profile = Counter()
+    for steps, count in length_counts.items():
+        steps = int(steps)
+        if steps < 1 or count < 1 or int(count) != count:
+            raise ValueError('Sequence lengths and counts must be positive integers')
+        whole, tail = divmod(steps, int(window_length))
+        if whole:
+            profile[int(window_length)] += whole*int(count)
+        if tail:
+            profile[tail] += int(count)
+    if not profile:
+        raise ValueError('Window sweep requires a nonempty source-length profile')
+    return dict(profile)
+
+
+def controlled_windowing_data(baselines):
+    """Sweep all integer L at hop=L, with fixed saved dimensions and input.
+
+    Work sums every non-overlapping window before averaging over original
+    sequences, as in the saved cost reports. Memory is the largest single
+    window's working set. Hypothetical settings have no accuracy estimates.
+    """
+    base, _, _, summaries = load()
+    rows = []
+    for dataset, meta in baselines.items():
+        group = base[base.dataset.eq(dataset)].set_index('learner').loc[list(METHODS)]
+        common = summaries[meta['source_run_id']]['memory']['theory']
+        lengths = common['instance_length_counts']
+        samples = common['original_samples']
+        horizon = meta['full_sequence_steps']
+        if sum(lengths.values()) != samples or max(map(int, lengths)) != horizon:
+            raise ValueError(f'Inconsistent full-sequence length profile for {dataset}')
+        source_steps = sum(int(t)*n for t, n in lengths.items())
+        window_profiles = {length: nonoverlapping_window_profile(lengths, length)
+                           for length in range(1, horizon+1)}
+        for method, baseline in group.iterrows():
+            summary = summaries[baseline.run_id]
+            theory = summary['memory']['theory']
+            if (theory['instance_length_counts'] != lengths
+                    or theory['original_samples'] != samples):
+                raise ValueError(f'Controlled sweep needs a common length profile for {dataset}')
+            run = SimpleNamespace(learner=method, run_id=baseline.run_id)
+            full_work = checked_run_cost(run, summary, meta)
+            full_memory = theory['memory']['total_bytes']
+            # Reuse pure model evaluations, never initialize or train learners.
+            costs = {t: estimate(method, meta, steps=t) for t in range(1, horizon+1)}
+            if not np.isclose(costs[horizon]['memory_bytes'], full_memory, rtol=0, atol=1):
+                raise ValueError(f'Controlled sweep disagrees with saved {dataset}/{method} memory')
+            for length, profile in window_profiles.items():
+                work = {metric: sum(costs[t][metric]*n for t, n in profile.items())/samples
+                        for metric in METRICS}
+                peak_steps = max(profile)
+                memory = costs[peak_steps]['memory_bytes']
+                rows.append(dict(dataset=dataset, learner=method,
+                    baseline_run_id=baseline.run_id, source_profile_run_id=meta['source_run_id'],
+                    batch_size=meta['batch_size'], input_features=meta['input_features'],
+                    classes=meta['classes'], hidden_width=meta['baseline_hidden_width'],
+                    hidden_layers=meta['baseline_hidden_layers'], fp_bytes=4,
+                    full_sequence_steps=horizon, window_length=length, hop=length,
+                    relative_window_length=length/horizon, effective_hop_ratio=1.0,
+                    window_tail_rule='partial_last_window_v1',
+                    source_profile='saved_full_sequence_instance_length_counts',
+                    original_samples=samples, distinct_source_lengths=len(lengths),
+                    windows_per_sample=sum(profile.values())/samples,
+                    source_steps_per_sample=source_steps/samples,
+                    processed_steps_per_sample=sum(t*n for t, n in profile.items())/samples,
+                    peak_window_steps=peak_steps, baseline_memory_bytes=full_memory,
+                    windowed_memory_bytes=memory, memory_ratio=memory/full_memory,
+                    **{f'baseline_{m}': full_work[m] for m in METRICS},
+                    **{f'windowed_{m}': work[m] for m in METRICS},
+                    **{f'{m}_ratio': work[m]/full_work[m] for m in METRICS}))
+    return pd.DataFrame(rows)
+
+
 def checked_run_cost(row, summary, meta):
     """Reproduce saved work using the observed length distribution, not max T.
 
@@ -506,6 +585,24 @@ def _capacity_grid(memories, profile):
     high = max(memories.max()*4, profile.reference_capacity_bytes*2)
     return np.unique(np.r_[np.geomspace(low, high, 321), memories,
                            profile.reference_capacity_bytes])
+
+
+def windowing_tradeoff_data(selected, points):
+    """Pair total-work ratios with the same saved runs' peak-memory ratio."""
+    keys = ['dataset', 'learner']
+    data = selected.copy()
+    for setting, prefix in [('full_sequence', 'baseline'), ('windowed', 'selected')]:
+        runs = _capacity_runs(selected, points, setting, REFERENCE_PROFILE)
+        columns = runs[keys+['memory_bytes', 'batch_size']].rename(columns={
+            'memory_bytes': prefix+'_memory_bytes', 'batch_size': prefix+'_batch_size'})
+        data = data.merge(columns, on=keys, validate='one_to_one')
+    if not data.baseline_batch_size.eq(data.selected_batch_size).all():
+        raise ValueError('Windowing tradeoffs require the same original-sequence batch size')
+    memories = data[['baseline_memory_bytes', 'selected_memory_bytes']].to_numpy()
+    if np.any(~np.isfinite(memories)) or np.any(memories <= 0):
+        raise ValueError('Windowing tradeoffs require finite positive peak memory')
+    data['memory_ratio'] = data.selected_memory_bytes/data.baseline_memory_bytes
+    return data
 
 
 def capacity_sweep_data(selected, points, profile=REFERENCE_PROFILE):
@@ -843,26 +940,44 @@ def plot_theory(dataset, meta, data, out):
     finish(fig, NAME[dataset] + ' - Computation and memory accesses', out/dataset/'01_computation_and_access_scaling')
 
 
-def plot_selected(dataset, data, limit, out):
-    d=data.set_index('learner').loc[list(METHODS)]
-    fig,axes=plt.subplots(1,2,figsize=(11,4.5),sharex=True,sharey=True)
-    y=np.arange(4)
-    for ax,metric,title in zip(axes,METRICS,TITLES):
-        vals=d[metric+'_ratio'].to_numpy()
-        ax.barh(y,vals,color=[COLOR[m] for m in METHODS],height=.6)
-        ax.axvline(1,color='#333333',ls='--',lw=1)
-        for yy,v in zip(y,vals):
-            ax.text(v+limit*.015,yy,f'{v:.3f}x',va='center',fontsize=9, zorder=4,
-                    bbox=dict(facecolor='white', edgecolor='none', pad=.4))
-        ax.set_xlim(0,limit)
-        ax.set_xlabel('Selected windowed / full-sequence cost')
-        ax.set_title(title,fontsize=10)
-        ax.spines[['top','right']].set_visible(False)
-        ax.grid(axis='x',alpha=.2)
+def plot_windowing_sweep(dataset, data, out):
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.9), sharex=True)
+    work_span = max(.02, float(data[[m+'_ratio' for m in METRICS]].max().max())-1)
+    for ax, column, title in zip(axes,
+            ['memory_ratio', 'compute_scalars_ratio', 'access_scalars_ratio'],
+            ['Peak memory', 'Total computation', 'Total memory accesses']):
+        for method in METHODS:
+            d = data[data.learner.eq(method)].sort_values('window_length')
+            ax.plot(d.relative_window_length, d[column], color=COLOR[method],
+                    linestyle=STYLES[method], lw=2, zorder=3)
+        ax.axhline(1, color='#555555', ls='--', lw=1, zorder=1)
+        ax.set_xlim(0, 1)
+        ax.set_xticks(np.linspace(0, 1, 6))
+        if column == 'memory_ratio':
+            ax.set_ylim(0, 1.05)
+        else:
+            # Keep small per-window cost changes visible; do not force zero.
+            ax.set_ylim(1-work_span*.12, 1+work_span*1.15)
+        ax.set_xlabel('Relative window length L / T')
+        ax.set_ylabel('Windowed / full-sequence ratio')
+        ax.set_title(title, fontsize=10)
+        ax.spines[['top', 'right']].set_visible(False)
+        ax.grid(alpha=.2)
         ax.set_axisbelow(True)
-    axes[0].set_yticks(y,[LABEL[m] for m in METHODS])
-    axes[0].invert_yaxis()
-    finish(fig, NAME[dataset] + ' - Windowed vs full-sequence training cost', out/dataset/'02_windowing_cost_comparison', bar_legend=True)
+    handles = [Line2D([0], [0], color=COLOR[m], linestyle=STYLES[m],
+                      lw=2, label=LABEL[m]) for m in METHODS]
+    fig.legend(handles=handles, ncol=4, loc='lower center',
+               bbox_to_anchor=(.5, .055), frameon=False)
+    fig.text(.5, .018, 'Hop = L; all time steps retained, including partial tails. '
+             'T = maximum saved full-sequence length. Theoretical costs; accuracy not estimated.',
+             ha='center', fontsize=8.5)
+    fig.suptitle(NAME[dataset] + ' - Controlled window-length sweep', fontsize=13, y=.99)
+    fig.tight_layout(rect=(0, .13, 1, .96))
+    path = out/dataset/'02_controlled_windowing_sweep'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for ext in ('pdf', 'svg', 'png'):
+        fig.savefig(path.with_suffix('.'+ext), dpi=180, bbox_inches='tight')
+    plt.close(fig)
 
 
 def plot_memory(dataset, theory, out):
@@ -923,18 +1038,23 @@ def gallery(datasets, output):
       '<h1>Memory, workload, and estimated training-time figures</h1>',
       '<p>Run comparisons use the costs and window-length profiles saved with each experiment. '
       'New runs include truncated final windows; historical runs retain their recorded preprocessing.</p>',
+      '<p>The controlled window-length sweep applies hop = L to the same saved '
+      'full-sequence input profiles for all methods. Its hypothetical settings '
+      'have theoretical costs only; accuracy is not estimated.</p>',
       '<p><a href="accuracy_memory_README.md">Accuracy/memory chart notes and hardware sources</a>'
       '<a href="accuracy_memory.csv">Accuracy/memory values</a>'
       '<a href="memory_budget_comparison.csv">Memory-budget comparisons</a>'
       + ('<a href="memory_hierarchy_README.md">Capacity model and coefficients</a>'
          '<a href="fast_memory_capacity_sweep.csv">Capacity-sweep values</a>'
          if (output/'memory_hierarchy_README.md').exists() else '')
+      + ('<a href="controlled_windowing_sweep.csv">Controlled window-length values</a>'
+         if (output/'controlled_windowing_sweep.csv').exists() else '')
       + ('<a href="windowed_time_capacity_sweep.csv">Windowed/full time values</a>'
          if (output/'windowed_time_capacity_sweep.csv').exists() else '') + '</p>',
       '<nav>'+''.join(f'<a href="#{d}">{escape(NAME[d])}</a>' for d in datasets)+'</nav>']
     for dataset in datasets:
         html.append(f'<article id="{dataset}"><h2>{escape(NAME[dataset])}</h2>')
-        names = ['01_computation_and_access_scaling', '02_windowing_cost_comparison',
+        names = ['01_computation_and_access_scaling', '02_controlled_windowing_sweep',
                  '03_training_memory_scaling', '04_memory_case_study', '05_fast_memory_capacity_sweep',
                  '06_accuracy_memory_budget', '07_windowed_time_capacity_sweep']
         for name in names:
@@ -1009,7 +1129,9 @@ def main(argv=None):
               f'validated {len(points)} observations; gallery: {output / "index.html"}')
         return
     theory=theoretical_data(meta)
-    selected=selected_data(meta)
+    controlled = controlled_windowing_data(meta)
+    controlled.to_csv(output/'controlled_windowing_sweep.csv', index=False)
+    selected=windowing_tradeoff_data(selected_data(meta), points)
     sweep = capacity_sweep_data(selected, points)
     sweep.to_csv(output/'fast_memory_capacity_sweep.csv', index=False)
     sweep[sweep.capacity_bytes.eq(REFERENCE_PROFILE.reference_capacity_bytes)].to_csv(
@@ -1026,9 +1148,7 @@ def main(argv=None):
     (output/'configurations.json').write_text(json.dumps(meta,indent=2),encoding='utf-8')
     for dataset in args.datasets:
         plot_theory(dataset,meta[dataset],theory[theory.dataset.eq(dataset)],output)
-        dataset_selected = selected[selected.dataset.eq(dataset)]
-        limit = max(1.25, float(dataset_selected[[m+'_ratio' for m in METRICS]].max().max())*1.2)
-        plot_selected(dataset,dataset_selected,limit,output)
+        plot_windowing_sweep(dataset, controlled[controlled.dataset.eq(dataset)], output)
         plot_memory(dataset, theory[theory.dataset.eq(dataset)], output)
         plot_memory_case_study(dataset, memory_cases[memory_cases.dataset.eq(dataset)], output)
         plot_capacity_sweep(dataset, sweep[sweep.dataset.eq(dataset)], output)
@@ -1037,6 +1157,7 @@ def main(argv=None):
         # These obsolete report artifacts are replaced by the capacity sweep.
         for ext in ('pdf', 'svg', 'png'):
             (output/dataset/f'05_time_coefficient_sweep.{ext}').unlink(missing_ok=True)
+            (output/dataset/f'02_windowing_cost_comparison.{ext}').unlink(missing_ok=True)
         print(f'Saved 7 figures for {dataset}',flush=True)
     (output/'time_coefficient_sweep.csv').unlink(missing_ok=True)
     gallery(args.datasets,output)
@@ -1048,8 +1169,24 @@ Run `python -m reporting.create_results_overview`; optional arguments are
 
 1. **Computation and memory-access scaling**: sequence length and network depth.
    Work counts are shown separately; there is no equal-weight time panel.
-2. **Windowed vs full-sequence training cost**: selected-window/hop cost ratios,
-   using each run's recorded window-length profile. The baseline is 1.
+2. **Controlled window-length sweep**: three panels show peak memory, total
+   computation and total memory accesses versus L/T. Every method uses every
+   integer window length L from 1 to T, with non-overlapping windows (hop=L).
+   T is the maximum saved full-sequence length; variable-length datasets retain
+   their complete saved length distribution. All methods must share that input
+   distribution. The same absolute L is applied to each sequence within a dataset.
+   Short final windows are truncated; no time steps are repeated, omitted or added.
+   Work is summed over all windows and averaged over original sequences, using
+   the saved batch size. Memory is the largest window's working set, not a sum.
+   Each method is normalized by its own validated full-sequence costs, reaching
+   1 at L/T=1. Per-window terms already present in the analytical formulas repeat
+   for each window; no extra overhead coefficient is added. Work panels use
+   linear y axes with a common range for the two work panels. These hypothetical configurations have no
+   accuracy estimates. Values, source run IDs, dimensions, length-profile source,
+   window counts and time-step coverage are in controlled_windowing_sweep.csv.
+   The previous selected-configuration cost bars/scatter are replaced. Actual
+   validation-selected comparisons remain in selected_vs_full.csv, chart 06
+   (accuracy/memory), and chart 07 (estimated time versus capacity).
 3. **Training-memory scaling**: peak memory versus sequence length and depth.
 4. **Memory case study**: baseline, 16-step window, two baseline-width hidden
    layers, and two 1024-neuron hidden layers. Peak memory counts one window's
@@ -1095,7 +1232,7 @@ use the length profiles and costs recorded with those experiments. New windowed
 runs record actual lengths, including shorter final windows. Historical runs retain
 their original recorded costs and preprocessing. No training is run by this report.
 The plotted values are saved
-in theoretical_scaling.csv and selected_vs_full.csv.
+in theoretical_scaling.csv, controlled_windowing_sweep.csv and selected_vs_full.csv.
 """, encoding='utf-8')
     print(f'Validated {len(selected)*2} run profiles; gallery: {output / "index.html"}')
 
