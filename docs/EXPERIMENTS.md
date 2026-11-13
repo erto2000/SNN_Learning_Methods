@@ -87,7 +87,7 @@ them. Each dataset has computation and memory-access scaling, a controlled
 window-length sweep, training-memory scaling, and the four-configuration
 memory case study, a full-sequence fast-memory capacity sweep, and an accuracy versus
 memory-budget chart using the actual full-sequence and selected-window runs, plus
-a windowed/full estimated-time capacity sweep. PDF, SVG, PNG,
+a windowed/full cycle-proxy capacity sweep. PDF, SVG, PNG,
 and underlying CSV values are exported.
 
 Use `--datasets har pamap2` or `--output-dir PATH` to select datasets or output.
@@ -143,49 +143,44 @@ now shows computation and memory-access counts separately, without equal-weight
 time panels, and replaces the former coefficient sweep with
 `05_fast_memory_capacity_sweep` for every dataset and all four learners.
 
-The capacity model uses each full-sequence run's saved mean computation/access
-counts and saved peak working set W. With fast capacity K, it assigns fraction
-`f = min(1, K/W)` of logical accesses to fast memory, assuming uniform access
-frequency and fixed placement. The proxy is
-`alpha*C + (f*beta_fast + (1-f)*beta_slow)*M`. A single collapsed Vega-based
-reference profile is fixed: FP32 at 250 MHz, alpha = 1 ns/MAC-equivalent,
-beta_fast = 4/1.9 ns/word (1.9 GB/s), beta_slow = 20 ns/word (200 MB/s).
-The normalized weights are a = 0.475 and r = 9.5. Local L1 is not modeled as a
-separate tier. No overhead or separate staging-transfer cost is added.
+The hierarchy figures now use weighted cycle proxies:
+`alpha=1`, `beta_fast=1`, `beta_slow=1103614/102415` (about 10.78).
+The memory ratio comes from matched 32-bit scalar copies of 100 KiB in
+internal memory versus PSRAM in the pinned source:
+https://github.com/project-x51/esp32-s3-memorycopy/blob/c3a1a5b5bc5372e301ed0f3eb15328857a95777d/README.md
+The measured totals are 102,415 and 1,103,614 cycles; the shared 51,200-access
+denominator cancels. The loop and cache-writeback behavior belong to this
+benchmark scenario. This is not a universal PSRAM access penalty. Alpha=1 is
+an independent simplifying assumption, not a DSP timing measurement.
 
-Only capacity varies, on a logarithmic axis spanning below and above all four
-footprints. Every curve shares the dataset's BPTT all-slow normalization
-reference; each method is not independently normalized. Circles mark the exact
-working-set capacities. Device-specific vertical reference lines are omitted;
-the 1.5 MiB reference values remain available in the CSV exports. These are
-parametric, hardware-informed analytical service costs, not measured runtime or
-cache traffic. For variable-length data, peak memory is deliberately applied to
-the saved mean work under the whole-working-set approximation.
+With saved peak working set W and fast capacity K, `f=min(1,K/W)` and
+`cost=alpha*C + (f*beta_fast+(1-f)*beta_slow)*M`. The slow coefficient is a
+total cost, not an additional penalty; that penalty is beta_slow-beta_fast.
+Uniform access frequency and proportional fixed placement are assumptions.
+The model does not simulate caches, vectorization, or separate read/write
+costs. No additional overhead or staging-transfer term is introduced.
+The numerical values are proxy cycles: one per arithmetic model unit or fast access.
+These weighted counts are distinct from measured processor cycles.
 
-The generator exports `fast_memory_capacity_sweep.csv`,
-`fast_memory_reference_costs.csv`, `memory_hierarchy_coefficients.csv`,
-`memory_hierarchy_profile.json`, and `memory_hierarchy_README.md`, including
-source URLs, coefficient derivations, assumptions, and source run IDs. The old
-`05_time_coefficient_sweep` files for regenerated datasets and the old sweep CSV
-are removed. No experiments or accuracy values are rerun or modified. Run
-comparisons retain the costs and length profiles recorded by each experiment.
-Historical runs retain their original preprocessing and recorded estimates.
+`05_fast_memory_capacity_sweep` varies log capacity with one fixed denominator
+per dataset: full BPTT all-slow cost at the reference ratio. Open circles mark
+each footprint. The grid includes all footprints and the 512 KiB nominal SRAM
+reference, marked by a labeled vertical line in both capacity charts. Larger capacities are
+hypothetical scenarios. Reference rows are exported to fast_memory_reference_costs.csv.
 
-`07_windowed_time_capacity_sweep` adds four curves comparing each method's
-selected-window cost with its own full-sequence cost at the same capacity.
-The horizontal reference is 1: lower values mean windowing reduces estimated
-time. This uses a different normalization from chart 05; ratios do not rank
-absolute training costs across methods. Capacity spans both settings' footprints.
-Total saved work already covers all windows, overlap and partial tails, so it is
-not multiplied by window count again. Each setting's saved peak footprint,
-rather than the sum of its windows' memory, determines its fast-access fraction.
-This uses the same whole-working-set approximation as the full-sequence sweep,
-without per-window beta reweighting. There is no additional coefficient sweep.
+`07_windowed_cost_capacity_sweep` compares selected-window cost with the same
+method's full-sequence cost at each capacity. Below 1 means fewer proxy cycles;
+these within-method ratios do not rank absolute costs across methods. Each
+setting uses its own saved peak footprint and mean total work, including all
+windows, overlap, gaps and actual tails. Work is never multiplied by window
+count again; peak window memory is not summed. Reference rows are in
+windowed_cost_reference_costs.csv, and curves in windowed_cost_capacity_sweep.csv.
 
-`windowed_time_capacity_sweep.csv` exports the ratios, both settings' costs,
-memory fractions, window/hop values, observed accuracies and source run IDs.
-`windowed_time_reference_costs.csv` gives all 40 comparisons at 1.5 MiB. These
-compare validation-selected settings; accuracy equivalence is not assumed.
+memory_hierarchy_profile.json, memory_hierarchy_coefficients.csv and
+memory_hierarchy_README.md record the exact counts, units, assumptions and
+source URLs. Regeneration removes obsolete time-named exports and replaces
+Vega ns/ms values. No experiments or accuracy results are rerun or modified.
+
 All current results use one seed, so small accuracy differences should not be
 treated as statistically established method rankings.
 
@@ -259,3 +254,7 @@ The earlier analytical recalculation of historical runs is a separate local
 migration. Its generated charts and data remain local artifacts. Running the
 standard reporting commands again uses each experiment's recorded costs;
 it does not apply the historical migration or change saved observations.
+
+ESP32 cycle-proxy tables use `esp32_cycle_proxy.csv`. A configuration fits
+nominal total memory when its peak footprint is at most 512 KiB + 8 MiB;
+this is separate from fitting fast SRAM.
