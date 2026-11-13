@@ -686,6 +686,28 @@ def windowed_capacity_sweep_data(selected, points, profile=REFERENCE_PROFILE):
     return pd.concat(frames, ignore_index=True)
 
 
+def esp32_cycle_proxy_data(window_reference, fast_capacity=512*1024,
+                           slow_capacity=8*1024**2):
+    """Export reference cycle proxies and nominal memory-fit flags."""
+    rows=[]
+    for r in window_reference.itertuples():
+        for setting,prefix in [('full_sequence','baseline'),('windowed','selected')]:
+            memory=getattr(r,prefix+'_memory_bytes')
+            rows.append(dict(dataset=r.dataset,learner=r.learner,setting=setting,
+                run_id=getattr(r,prefix+'_run_id'),batch_size=r.batch_size,
+                compute_scalars=getattr(r,prefix+'_compute_scalars'),
+                access_scalars=getattr(r,prefix+'_access_scalars'),
+                memory_bytes=memory,fast_capacity_bytes=fast_capacity,
+                total_capacity_bytes=fast_capacity+slow_capacity,
+                fast_fraction=getattr(r,prefix+'_fast_fraction'),
+                effective_beta=getattr(r,prefix+'_effective_beta'),
+                cycle_proxy=getattr(r,prefix+'_estimated_cost_units'),
+                cycle_proxy_millions=getattr(r,prefix+'_estimated_cost_units')/1e6,
+                fits_fast_memory=memory<=fast_capacity,
+                fits_total_memory=memory<=fast_capacity+slow_capacity))
+    return pd.DataFrame(rows)
+
+
 def _mark_reference_capacity(ax, profile):
     capacity_mib = profile.reference_capacity_bytes/MIB
     ax.axvline(capacity_mib, color='#666666', ls='--', lw=1, zorder=2)
@@ -1101,7 +1123,6 @@ def main(argv=None):
     window_sweep.to_csv(output/'windowed_cost_capacity_sweep.csv', index=False)
     window_sweep[window_sweep.capacity_bytes.eq(REFERENCE_PROFILE.reference_capacity_bytes)].to_csv(
         output/'windowed_cost_reference_costs.csv', index=False)
-    from reporting.esp32_cycle_proxy import esp32_cycle_proxy_data
     esp32_cycle_proxy_data(window_sweep[window_sweep.capacity_bytes.eq(REFERENCE_PROFILE.reference_capacity_bytes)],
         REFERENCE_PROFILE.reference_capacity_bytes, REFERENCE_PROFILE.external_capacity_bytes).to_csv(
         output/'esp32_cycle_proxy.csv', index=False)
