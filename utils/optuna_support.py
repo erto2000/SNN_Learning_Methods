@@ -193,7 +193,7 @@ def run_final_test(base_config, pipeline, *, study, phase, family, experiment,
     return result
 
 
-def export_final_tests(results_dir, out_dir, family):
+def export_final_tests(results_dir, out_dir, family, *, cost_fields=None):
     """Export only the currently selected test runs, never rank by test score."""
     import pandas as pd
     from timeseries.splitting import split_report_fields
@@ -206,7 +206,16 @@ def export_final_tests(results_dir, out_dir, family):
         window = manifest.get('window', cfg.get('WINDOW', {}))
         if not cfg.get('DATA_SPLIT'):
             continue
-        theory = summary.get('memory', {}).get('theory', {})
+        if cost_fields is None or summary['status'] != 'ok':
+            theory = (summary.get('memory', {}).get('theory', {}) if cost_fields is None else {})
+            costs = dict(
+                theory_memory_bytes=theory.get('memory', {}).get('total_bytes'),
+                theory_compute_scalars=theory.get('compute', {}).get('total_scalars'),
+                theory_access_scalars=theory.get('access', {}).get('total_scalars'),
+                theory_time_proxy=theory.get('time_proxy', {}).get('value'),
+            )
+        else:
+            costs = cost_fields(manifest['dataset'], manifest['learner'], cfg, window['L'], window['hop'])
         rows.append(dict(
             **split_report_fields(summary.get('meta', {})),
             dataset=manifest['dataset'], learner=manifest['learner'], experiment=manifest['experiment'],
@@ -215,10 +224,9 @@ def export_final_tests(results_dir, out_dir, family):
             selection_phase=manifest['phase'], validation_score=manifest['validation_score'],
             selection_metric=manifest['metric'], test_sample_acc=final.get('sample_acc'),
             test_window_acc=final.get('window_acc'),
-            theory_memory_bytes=theory.get('memory', {}).get('total_bytes'),
-            theory_compute_scalars=theory.get('compute', {}).get('total_scalars'),
-            theory_access_scalars=theory.get('access', {}).get('total_scalars'),
-            theory_time_proxy=theory.get('time_proxy', {}).get('value'), run_id=manifest['run_id']))
+            **{key: costs[key] for key in ('theory_memory_bytes', 'theory_compute_scalars',
+                                           'theory_access_scalars', 'theory_time_proxy')},
+            run_id=manifest['run_id']))
     destination = Path(out_dir) / 'final_test_results.csv'
     destination.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(destination, index=False)

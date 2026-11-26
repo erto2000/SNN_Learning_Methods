@@ -4,6 +4,27 @@ import torch
 from networks.specs import NetConfig
 
 
+def cost_dimensions(input_features, classes, layer_widths, effective_inputs, has_readout):
+    """Dimensions and shared access counts from Chapter 5."""
+    widths = list(layer_widths)
+    inputs = [effective_inputs, *widths[:-1]] if widths else []
+    weights = [left * width for left, width in zip(inputs, widths)]
+    last_width = widths[-1] if widths else 0
+    readout = classes * last_width if has_readout else 0
+    forward = [w + left + 5 * width for w, left, width in zip(weights, inputs, widths)]
+    gradient = [2 * w + left + width for w, left, width in zip(weights, inputs, widths)]
+    send = sum(w + left + width for w, left, width in zip(weights[1:], inputs[1:], widths[1:]))
+    return {
+        "C": classes, "d0": input_features, "tilde_d0": effective_inputs,
+        "d": widths, "tilde_inputs": inputs, "a": weights,
+        "A": sum(weights), "U": sum(widths), "V": readout, "D": sum(inputs),
+        "forward_access": forward, "gradient_access": gradient, "send_access": send,
+        "class_access": last_width + readout + classes if has_readout else 0,
+        "readout_gradient_access": last_width + classes + 2 * readout if has_readout else 0,
+        "L": len(widths),
+    }
+
+
 class BaseLearner(ABC):
     """
     Minimal, window-agnostic learner base.
@@ -106,43 +127,12 @@ class BaseLearner(ABC):
 
     def _cost_dimensions(self) -> dict:
         fcs = getattr(self.model, "fcs", None)
-        if fcs is None or len(fcs) == 0:
-            return {
-                "C": int(self.meta.get("n_classes", 0)),
-                "d0": int(self.meta.get("input_dim", 0)),
-                "tilde_d0": int(self.meta.get("input_dim", 0)),
-                "d": [], "tilde_inputs": [], "a": [],
-                "A": 0, "U": 0, "V": 0, "F": 0, "P": 0, "Y": 0,
-                "f_l": [], "p_l": [], "L": 0,
-            }
-
-        d = [int(fc.out_features) for fc in fcs]
-        tilde_inputs = [int(fcs[0].in_features)] + d[:-1]
-        a = [din * dout for din, dout in zip(tilde_inputs, d)]
-        C = int(self.meta.get("n_classes", getattr(self.model, "n_classes", 0)))
-        d0 = int(self.meta.get("input_dim", tilde_inputs[0]))
-        V = C * d[-1] if getattr(self.model, "head", None) is not None else 0
-        f_l = [a_l + din + 2 * dout for a_l, din, dout in zip(a, tilde_inputs, d)]
-        p_l = [a_l + din + dout for a_l, din, dout in zip(a, tilde_inputs, d)]
-        Y = 0 if V == 0 else V + d[-1] + C
-
-        return {
-            "C": C,
-            "d0": d0,
-            "tilde_d0": tilde_inputs[0],
-            "d": d,
-            "tilde_inputs": tilde_inputs,
-            "a": a,
-            "A": int(sum(a)),
-            "U": int(sum(d)),
-            "V": int(V),
-            "F": int(sum(f_l)),
-            "P": int(sum(p_l)),
-            "Y": int(Y),
-            "f_l": [int(x) for x in f_l],
-            "p_l": [int(x) for x in p_l],
-            "L": len(d),
-        }
+        widths = [int(fc.out_features) for fc in fcs] if fcs is not None else []
+        effective_inputs = int(fcs[0].in_features) if widths else int(self.meta.get("input_dim", 0))
+        input_features = int(self.meta.get("input_dim", effective_inputs))
+        classes = int(self.meta.get("n_classes", getattr(self.model, "n_classes", 0)))
+        has_readout = bool(widths) and getattr(self.model, "head", None) is not None
+        return cost_dimensions(input_features, classes, widths, effective_inputs, has_readout)
 
     def _cost_components(self, batch: int, time_steps: int, dims: dict) -> dict:
         raise NotImplementedError(f"{type(self).__name__} does not define estimated costs.")
@@ -177,7 +167,7 @@ class BaseLearner(ABC):
 
         return {
             "method": type(self).__name__,
-            "model_version": "algorithmic-window-v3",
+            "model_version": "algorithmic-window-v4",
             "work_scope": "per_batch_of_original_sequences",
             "memory_scope": "peak_sequential_window_working_set",
             "windows_per_sample": num_windows,

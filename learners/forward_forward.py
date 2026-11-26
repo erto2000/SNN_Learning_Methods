@@ -325,37 +325,37 @@ class FFLearner(BaseLearner):
 
     def _cost_components(self, batch: int, time_steps: int, dims: dict) -> dict:
         B, T = int(batch), int(time_steps)
-        A, U = dims["A"], dims["U"]
-        d = dims["d"]
-        a = dims["a"]
-        tilde_inputs = dims["tilde_inputs"]
-        f_l = dims["f_l"]
-        p_l = dims["p_l"]
-        L = dims["L"]
-        d0_eff = dims["tilde_d0"]
+        A, U, D, L = dims["A"], dims["U"], dims["D"], dims["L"]
+        widths, weights, inputs = dims["d"], dims["a"], dims["tilde_inputs"]
+        repeated_forward = sum((L - i) * accesses for i, accesses in enumerate(dims["forward_access"]))
+        repeated_compute = sum((L - i + 1) * (w + width)
+                               for i, (w, width) in enumerate(zip(weights, widths)))
 
-        state_terms = [B * sum(d[:k]) + B * T * d[k] for k in range(L)] if L else [0]
-        intermediate_terms = [B * T * (tilde_inputs[k] + d[k]) for k in range(L)] if L else [0]
-        grad_terms = list(a) if a else [0]
-
-        repeated_forward = sum((L - l + 1) * f_l[l - 1] for l in range(1, L + 1))
-        repeated_compute = sum((L - l + 2) * (a[l - 1] + d[l - 1]) for l in range(1, L + 1))
-
+        # Chapter 5 takes separate maxima for state, intermediates and gradients.
+        state = max((B * sum(widths[:i]) + 2 * B * T * width
+                     for i, width in enumerate(widths)), default=0)
+        intermediate = max((2 * B * T * left + B * (5 * width + 1)
+                            for left, width in zip(inputs, widths)), default=0)
         return {
             "memory": {
-                "input": B * T * d0_eff,
+                "input": B * T * dims["tilde_d0"],
                 "param": A,
-                "state": max(state_terms),
-                "intermediate": max(intermediate_terms),
-                "grad": max(grad_terms),
+                "state": state,
+                "intermediate": intermediate,
+                "grad": max(weights, default=0),
             },
             "compute": {
                 "layerwise_positive_negative": 2 * B * T * repeated_compute,
+                "spike_sums": 2 * B * T * U,
+                "goodness_and_signals": B * (4 * U + L),
+                "weight_update": A,
             },
             "access": {
                 "repeated_forward": 2 * B * T * repeated_forward,
-                "temporal_neuron": 2 * B * T * U,
-                "local_update": 2 * B * T * sum(p_l),
-                "param_read_write": 2 * A,
+                "save_inputs_and_membranes": 2 * B * T * (D + U),
+                "spike_sums": 6 * B * T * U,
+                "goodness_and_signals": B * (6 * U + 2 * L),
+                "local_backward": 2 * B * T * (4 * U + sum(dims["gradient_access"])),
+                "weight_update": 3 * A,
             },
         }

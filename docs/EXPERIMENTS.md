@@ -81,47 +81,59 @@ The current thesis figures and accuracy values describe the archived campaign.
 The standard comparison writes a separate folder for each dataset variant and
 an `all_current_runs` table. The independent Optuna comparison writes trial,
 best-validation, and final-test tables. It keeps MNIST Static and Rate distinct.
-`create_results_overview.py` is the single chart generator for all ten variants.
-It writes figures to `results/results_overview/`; open `index.html` to browse
-them. Each dataset has computation and memory-access scaling, a controlled
-window-length sweep, training-memory scaling, and the four-configuration
-memory case study, a full-sequence fast-memory capacity sweep, and an accuracy versus
-memory-budget chart using the actual full-sequence and selected-window runs, plus
-a windowed/full cycle-proxy capacity sweep. PDF, SVG, PNG,
-and underlying CSV values are exported.
 
-Use `--datasets har pamap2` or `--output-dir PATH` to select datasets or output.
-The generator uses saved metadata and learner cost equations without training.
+```powershell
+python reporting/create_results_overview.py
+```
+
+The script regenerates theoretical figures and CSVs from `experiment_config.py`,
+the datasets, and the current learner formulas. It writes to
+`results/results_overview/`. Open `index.html` to browse the results.
+Accuracy and validation-selected capacity figures are added for datasets with a
+complete set of baseline runs and validation-selected hop records.
+
+The script covers all ten variants. It produces computation and memory-access
+scaling, a controlled window-length sweep, training-memory scaling, a memory
+case study, and a full-sequence fast-memory capacity sweep. The memory case
+study includes the original illustrative 16-step window. When run records are
+available, the script adds the accuracy/memory chart and windowed/full
+cycle-proxy capacity sweep. Figures are exported as PDF, SVG and PNG, with
+underlying values in CSV files.
+
+The overview reads measured accuracy and tested settings directly from run
+summaries and Optuna selection manifests. Reporting and comparison commands
+calculate theoretical costs with the current implementation and preprocessing. For historical runs,
+the current windowing rule can differ from the one used to measure accuracy.
+The accuracy/memory CSV identifies both rules and training split hashes.
 
 `02_controlled_windowing_sweep` replaces the selected-configuration cost
 bars/scatter. Three panels show peak memory, total computation and total memory
-accesses versus relative window length L/T. T is the maximum saved full-sequence
+accesses versus relative window length L/T. T is the maximum preprocessed training sequence
 length. Every method uses every integer L from 1 to T with hop=L, so the policy
-is non-overlapping throughout. Within each dataset the saved input-length
+is non-overlapping throughout. Within each dataset the preprocessed input-length
 distribution, batch size and model dimensions are common to all methods.
-Variable-length datasets retain their full recorded length distribution, with
-the same L applied to every sequence. Short final windows are retained at their
-actual length: no time steps are repeated, omitted or padded into the cost.
+Variable-length datasets use the full training split's length distribution, with
+the same L applied to every sequence. Short final windows count at their actual
+length, and every source timestep counts once.
 Total work sums all windows and is averaged over original sequences, while peak
-memory uses only the largest window's working set. Ratios use each method's own
-validated full-sequence costs; all three ratios are 1 at L=T. Terms already in
-the analytical formulas repeat per window; no overhead coefficient is added.
+memory uses the largest working set of any window. Ratios use each method's own
+calculated full-sequence costs and are 1 at L=T. The per-window overhead is
+defined by the learner formulas.
 The axes are linear, with a common y range for both work panels.
-`controlled_windowing_sweep.csv` exports the curves, baseline run IDs, profile
-source, dimensions, window counts and time-step coverage. These theoretical
-settings have no accuracy estimates. Actual validation-selected settings remain
+`controlled_windowing_sweep.csv` exports the curves, profile source, dimensions,
+window counts and time-step coverage. `configurations.json` records the source
+length histogram. Actual validation-selected settings remain
 in `selected_vs_full.csv` and the separate accuracy/memory and capacity figures.
 
 The accuracy/memory figure uses open circles for full sequences and filled
 diamonds for selected windows, connected by an arrow for each method. Published
 device memory capacities provide reference lines, with source URLs exported to
 `memory_budget_references.csv`. These are capacity ceilings, not measured free
-memory or deployment claims. `--memory-budget-fraction 0.75` allocates 75% of
-each reference capacity to the modelled training working set. All configurations
+memory or deployment claims. To allocate 75% of each reference capacity to the
+modelled training working set, set `MEMORY_BUDGET_FRACTION` to `0.75` in the
+report script. All configurations
 retain their tested batch size, architecture and accuracy. Values and comparisons
 are exported to `accuracy_memory.csv` and `memory_budget_comparison.csv`.
-Use `--accuracy-memory-only` to add these figures while preserving the other
-existing cost-chart exports, including locally recalculated historical charts.
 
 The former `create_compute_access_charts.py`, `create_figure2_by_dataset.py`,
 and `analyze_costs.py` entry points have been consolidated into this script.
@@ -153,7 +165,7 @@ denominator cancels. The loop and cache-writeback behavior belong to this
 benchmark scenario. This is not a universal PSRAM access penalty. Alpha=1 is
 an independent simplifying assumption, not a DSP timing measurement.
 
-With saved peak working set W and fast capacity K, `f=min(1,K/W)` and
+With peak working set W and fast capacity K, `f=min(1,K/W)` and
 `cost=alpha*C + (f*beta_fast+(1-f)*beta_slow)*M`. The slow coefficient is a
 total cost, not an additional penalty; that penalty is beta_slow-beta_fast.
 Uniform access frequency and proportional fixed placement are assumptions.
@@ -168,18 +180,18 @@ each footprint. The grid includes all footprints and the 512 KiB nominal SRAM
 reference, marked by a labeled vertical line in both capacity charts. Larger capacities are
 hypothetical scenarios. Reference rows are exported to fast_memory_reference_costs.csv.
 
-`07_windowed_cost_capacity_sweep` compares selected-window cost with the same
-method's full-sequence cost at each capacity. Below 1 means fewer proxy cycles;
-these within-method ratios do not rank absolute costs across methods. Each
-setting uses its own saved peak footprint and mean total work, including all
+`07_windowed_cost_capacity_sweep` compares windowed cost with the same method's
+full-sequence cost at each capacity. Each method uses its validation-selected
+window length and hop. A ratio below
+1 means fewer proxy cycles for that method. Each
+setting uses its own calculated peak footprint and mean total work, including all
 windows, overlap, gaps and actual tails. Work is never multiplied by window
 count again; peak window memory is not summed. Reference rows are in
 windowed_cost_reference_costs.csv, and curves in windowed_cost_capacity_sweep.csv.
 
 memory_hierarchy_profile.json, memory_hierarchy_coefficients.csv and
 memory_hierarchy_README.md record the exact counts, units, assumptions and
-source URLs. Regeneration removes obsolete time-named exports and replaces
-Vega ns/ms values. No experiments or accuracy results are rerun or modified.
+source URLs. Regenerating reports takes no training or evaluation passes.
 
 All current results use one seed, so small accuracy differences should not be
 treated as statistically established method rankings.
@@ -244,16 +256,10 @@ These estimates count valid algorithmic steps; masked rectangular execution can
 still perform arithmetic for padded positions on the training device.
 
 New runs record actual processed lengths and source_length_counts before
-windowing. Their computation, access, and peak-memory estimates are calculated
-from those lengths during the run. Comparison tables, final-test exports, and
-overview figures read the saved estimates without reconstructing old experiments.
-Baseline scaling charts use the saved peak-cost horizon, rather than the length
-of the first training sample, which can be shorter for variable-length audio.
-
-The earlier analytical recalculation of historical runs is a separate local
-migration. Its generated charts and data remain local artifacts. Running the
-standard reporting commands again uses each experiment's recorded costs;
-it does not apply the historical migration or change saved observations.
+windowing. Their saved estimates document the calculations made during training.
+Reporting derives the length distribution by inspecting the training inputs
+before windowing. It applies the same window spans as the current transform.
+For variable-length audio, the maximum comes from the full training split.
 
 ESP32 cycle-proxy tables use `esp32_cycle_proxy.csv`. A configuration fits
 nominal total memory when its peak footprint is at most 512 KiB + 8 MiB;

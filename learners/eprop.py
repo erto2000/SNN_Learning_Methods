@@ -268,34 +268,40 @@ class EpropLearner(BaseLearner):
 
     def _cost_components(self, batch: int, time_steps: int, dims: dict) -> dict:
         B, T = int(batch), int(time_steps)
-        A, U, V, C = dims["A"], dims["U"], dims["V"], dims["C"]
-        d0_eff = dims["tilde_d0"]
-        d_last = dims["d"][-1] if dims["d"] else 0
-        F, P, Y = dims["F"], dims["P"], dims["Y"]
-
+        A, U, V, C, D = dims["A"], dims["U"], dims["V"], dims["C"], dims["D"]
+        last_width = dims["d"][-1] if dims["d"] else 0
+        first_weights = dims["a"][0] if dims["a"] else 0
         return {
             "memory": {
-                "input": B * T * d0_eff,
+                "input": B * T * dims["tilde_d0"],
                 "param": A + V,
                 "state": B * U,
+                "filtered_inputs": B * D,
                 "eligibility_traces": B * A,
                 "learning_signals": B * U,
-                "final_rate": B * d_last,
+                "final_rate": B * last_width,
                 "output_error": B * C,
                 "grad": A + V,
             },
             "compute": {
-                "forward": B * T * (A + V + U),
+                "forward": B * T * (A + U),
+                "spike_sums": B * T * last_width,
+                "filtered_inputs": B * T * D,
                 "eligibility": B * T * A,
-                "spatial_learning_signal": B * (A + V),
-                "update": B * (A + V),
-                "output_error": B * C,
+                "readout": 3 * B * V,
+                "spatial_learning_signal": B * (A - first_weights),
+                "layer_gradients": B * A,
+                "weight_update": A + V,
             },
             "access": {
-                "forward": B * T * (F + Y),
-                "eligibility": 2 * B * T * A,
-                "spatial_learning_signal": B * (P + Y),
-                "update": B * (P + Y),
-                "param_read_write": 2 * (A + V),
+                "forward": B * T * sum(dims["forward_access"]),
+                "spike_sums": 3 * B * T * last_width,
+                "sensitivities": B * T * U,
+                "filtered_inputs": 3 * B * T * D,
+                "eligibility": B * T * (2 * A + D + U),
+                "readout": B * (2 * dims["class_access"] + dims["readout_gradient_access"]),
+                "spatial_learning_signal": B * dims["send_access"],
+                "layer_gradients": B * (U + 3 * A),
+                "weight_update": 3 * (A + V),
             },
         }

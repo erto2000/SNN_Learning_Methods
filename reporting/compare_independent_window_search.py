@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import pandas as pd
 from timeseries.splitting import split_report_fields
+from reporting.configured_costs import CostCatalog, report_dataset
 
 
 RESULTS_DIR = "results"
@@ -178,17 +179,8 @@ def parse_study_name(study: str) -> Dict[str, Optional[Any]]:
     return out
 
 
-def dataset_label(run_id: str, dataset: str) -> str:
-    """Identify MNIST encodings by the Optuna run prefix, not the source dataset."""
-    if run_id.startswith("mnist_static-"):
-        return "mnist_static"
-    if run_id.startswith("mnist_rate-"):
-        return "mnist_rate"
-    return dataset
-
-
-def load_run_summaries(results_dir: str = RESULTS_DIR) -> pd.DataFrame:
-    from timeseries.splitting import split_report_fields
+def load_run_summaries(results_dir: str = RESULTS_DIR, *, catalog=None) -> pd.DataFrame:
+    catalog = CostCatalog() if catalog is None else catalog
     rows: List[Dict[str, Any]] = []
 
     pattern = os.path.join(results_dir, "runs", "*", "summary.json")
@@ -199,8 +191,6 @@ def load_run_summaries(results_dir: str = RESULTS_DIR) -> pd.DataFrame:
         cfg = s.get("config", {}) or {}
         final = s.get("final", {}) or {}
         win = cfg.get("WINDOW", {}) or {}
-        mem = s.get("memory", {}) or {}
-        theory = mem.get("theory", {}) or {}
         run_id = s.get("run_id", "")
 
         parsed = parse_run_id(run_id)
@@ -221,21 +211,24 @@ def load_run_summaries(results_dir: str = RESULTS_DIR) -> pd.DataFrame:
 
         L = win.get("L", parsed["L_from_id"])
         hop = win.get("hop", parsed["hop_from_id"])
+        if s.get("status") != "ok" or final.get("sample_acc") is None or L is None or hop is None:
+            continue
+
         hop_ratio = win.get("hop_ratio")
-        if hop_ratio is None and L is not None and hop is not None and int(L) > 0:
+        if hop_ratio is None and int(L) > 0:
             hop_ratio = float(hop) / float(L)
 
+        dataset = report_dataset(run_id, cfg["DATASET"])
         rows.append({
+            **catalog.comparison_fields(dataset, cfg["LEARNER"], cfg, int(L), int(hop)),
             **split_report_fields(s.get('meta', {})),
             "run_id": run_id,
-            "dataset": dataset_label(run_id, cfg.get("DATASET")),
+            "dataset": dataset,
             "learner": cfg.get("LEARNER"),
             "epochs": cfg.get("EPOCHS"),
             "status": s.get("status"),
             "sample_acc": final.get("sample_acc"),
             "evaluation_split": "validation",
-            "theory_work_scope": theory.get("work_scope"),
-            "windows_per_sample": theory.get("windows_per_sample"),
             "win_L": L,
             "hop": hop,
             "hop_ratio": hop_ratio,
@@ -243,16 +236,6 @@ def load_run_summaries(results_dir: str = RESULTS_DIR) -> pd.DataFrame:
             "phase": parsed["phase"],
             "search_mode": parsed["search_mode"],
             "trial": parsed["trial"],
-            "fp_bytes": mem.get("fp_bytes"),
-            "static_bytes": mem.get("static_bytes"),
-            "training_bytes_per_batch": mem.get("training_bytes_per_batch"),
-            "memory_batch_size": mem.get("batch_size"),
-            "memory_time_steps": mem.get("time_steps"),
-            "theory_memory_bytes": (theory.get("memory", {}) or {}).get("total_bytes"),
-            "theory_memory_scalars": (theory.get("memory", {}) or {}).get("total_scalars"),
-            "theory_compute_scalars": (theory.get("compute", {}) or {}).get("total_scalars"),
-            "theory_access_scalars": (theory.get("access", {}) or {}).get("total_scalars"),
-            "theory_time_proxy": (theory.get("time_proxy", {}) or {}).get("value"),
             "avg_synaptic_ops": final.get("avg_synaptic_operations"),
             "firing_rate": final.get("firing_rate"),
             "energy_per_sample_pj": final.get("energy_per_sample_pj"),
@@ -1595,9 +1578,12 @@ def print_run_count_summary(df: pd.DataFrame) -> None:
 def main() -> None:
     ensure_dir(OUT_DIR)
     from utils.optuna_support import export_final_tests
-    print(f"Final test table: {export_final_tests(RESULTS_DIR, OUT_DIR, 'independent')}")
+    catalog = CostCatalog()
+    final_tests = export_final_tests(RESULTS_DIR, OUT_DIR, "independent",
+                                    cost_fields=catalog.comparison_fields)
+    print(f"Final test table: {final_tests}")
 
-    df_runs = load_run_summaries(RESULTS_DIR)
+    df_runs = load_run_summaries(RESULTS_DIR, catalog=catalog)
     if df_runs.empty:
         print("No independent window/hop runs found in results/runs/*/summary.json")
         return

@@ -498,18 +498,16 @@ class PepitaLearner(BaseLearner):
         B, T = int(batch), int(time_steps)
         A, U, V, C = dims["A"], dims["U"], dims["V"], dims["C"]
         d0 = dims["d0"]
-        d0_eff = dims["tilde_d0"]
-        F, P, Y = dims["F"], dims["P"], dims["Y"]
+        last_width = dims["d"][-1] if dims["d"] else 0
 
         if self.mode != "accum":
             raise RuntimeError("Estimated RATE-PEPITA costs are defined for mode='accum'.")
 
         return {
             "memory": {
-                "input": B * T * d0_eff,
+                "input": B * T * dims["tilde_d0"],
                 "param": A + V,
                 "state": B * U,
-                # Retain accumulated rates from the original and perturbed phases.
                 "rate_buffer": 2 * B * U,
                 "feedback_matrix": C * d0,
                 "output_error": B * C,
@@ -517,15 +515,18 @@ class PepitaLearner(BaseLearner):
                 "grad": A + V,
             },
             "compute": {
-                "two_forward_phases": 2 * B * T * (A + V + U),
-                "feedback_projection_and_error": B * (C * d0 + C),
-                "update": B * (A + V),
+                "two_forward_phases": 2 * B * T * (A + 2 * U),
+                "scores_and_perturbation": B * (V + C * d0),
+                "apply_perturbation": B * T * d0,
+                "input_sums_and_gradients": B * (T * d0 + A + V),
+                "weight_update": A + V,
             },
             "access": {
-                "two_forward_phases": 2 * B * T * (F + Y),
-                "state_and_rate": 4 * B * T * U,
-                "feedback_projection": B * (C * d0 + C + d0),
-                "update": B * (P + Y),
-                "param_read_write": 2 * (A + V),
+                "two_forward_phases": 2 * B * T * (sum(dims["forward_access"]) + 3 * U),
+                "class_errors_and_perturbation": B * (dims["class_access"] + C * d0 + C + d0),
+                "apply_perturbation": 3 * B * T * d0,
+                "readout_gradients": B * dims["readout_gradient_access"],
+                "layer_gradients": B * (2 * U + T * d0 + (U - last_width) + 2 * A),
+                "weight_update": 3 * (A + V),
             },
         }

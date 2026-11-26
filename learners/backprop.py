@@ -107,28 +107,31 @@ class BackpropLearner(BaseLearner):
     def _cost_components(self, batch: int, time_steps: int, dims: dict) -> dict:
         B, T = int(batch), int(time_steps)
         A, U, V, C = dims["A"], dims["U"], dims["V"], dims["C"]
-        d0_eff = dims["tilde_d0"]
-        F, P, Y = dims["F"], dims["P"], dims["Y"]
-
+        last_width = dims["d"][-1] if dims["d"] else 0
+        first_weights = dims["a"][0] if dims["a"] else 0
         return {
             "memory": {
-                "input": B * T * d0_eff,
+                "input": B * T * dims["tilde_d0"],
                 "param": A + V,
                 "state": B * T * U,
-                "intermediate_hidden": B * T * U,
-                "intermediate_readout": B * T * C,
+                "spike_history": B * T * U,
+                "temporal_errors": B * U,
+                "intermediate_readout": B * (2 * last_width + C),
                 "grad": A + V,
             },
             "compute": {
-                "forward": B * T * (A + V + U),
-                "backward_update": B * T * (A + V + U),
-                "readout_temporal": B * T * C,
+                "forward": B * T * (A + U),
+                "spike_sums": B * T * last_width,
+                "readout": 3 * B * V,
+                "backward": B * T * (U + A + (A - first_weights)),
+                "weight_update": A + V,
             },
             "access": {
-                "forward": B * T * (F + Y),
-                "temporal_hidden": 4 * B * T * U,
-                "temporal_readout": 2 * B * T * C,
-                "backward_update": B * T * (P + Y),
-                "param_read_write": 2 * (A + V),
+                "forward": B * T * sum(dims["forward_access"]),
+                "save_membranes": B * T * U,
+                "spike_sums": 3 * B * T * last_width,
+                "readout": B * (2 * dims["class_access"] + dims["readout_gradient_access"]),
+                "backward": B * T * (4 * U + sum(dims["gradient_access"]) + dims["send_access"]),
+                "weight_update": 3 * (A + V),
             },
         }

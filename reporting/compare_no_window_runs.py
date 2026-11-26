@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from reporting.configured_costs import CostCatalog, report_dataset
 from visualization.flex_compare import run_comparisons
 
 
 BASE_DIR = "results"
 LEARNERS = "bp|ff|eprop|pepita"
 EMIT_PER_EPOCH_CSV = False
+COSTS = CostCatalog()
 
 
 RUN_GROUPS = [
@@ -42,13 +44,11 @@ def _history(info: Dict[str, Any]) -> Dict[str, Any]:
     return _summary(info).get("history") or {}
 
 
-def _memory(info: Dict[str, Any]) -> Dict[str, Any]:
-    return _summary(info).get("memory") or {}
-
-
 def _theory(info: Dict[str, Any]) -> Dict[str, Any]:
-    theory = _memory(info).get("theory") or {}
-    return theory if isinstance(theory, dict) else {}
+    if _summary(info).get("status") != "ok":
+        return {}
+    config = _config(info)
+    return COSTS.evaluate(dataset_label(info), config["LEARNER"], config)
 
 
 def _deep_get(obj: Dict[str, Any], path: str) -> Optional[Any]:
@@ -150,11 +150,7 @@ def learner_label(info: Dict[str, Any]) -> str:
 def dataset_label(info: Dict[str, Any]) -> str:
     """Keep MNIST's temporal encodings distinct in combined tables."""
     run_id = str(_summary(info).get("run_id") or info.get("id") or "")
-    if run_id.startswith("mnist-static-"):
-        return "mnist_static"
-    if run_id.startswith("mnist-rate-"):
-        return "mnist_rate"
-    return str(_cfg_value(info, "DATASET"))
+    return report_dataset(run_id, str(_cfg_value(info, "DATASET")))
 
 
 def optimizer_label(info: Dict[str, Any]) -> str:
@@ -211,12 +207,11 @@ def theory_time_proxy(info: Dict[str, Any]) -> Optional[float]:
 
 
 def training_memory_mb(info: Dict[str, Any]) -> Optional[float]:
-    value = _as_float(_memory(info).get("training_bytes_per_batch"))
-    return None if value is None else value / (1024 ** 2)
+    return theory_memory_mb(info)
 
 
 def static_memory_mb(info: Dict[str, Any]) -> Optional[float]:
-    value = _as_float(_memory(info).get("static_bytes"))
+    value = _as_float(_theory(info).get("static_bytes"))
     return None if value is None else value / (1024 ** 2)
 
 
@@ -253,6 +248,9 @@ CUSTOM_FUNCS = {
     "theory_compute_scalars": theory_compute_scalars,
     "theory_access_scalars": theory_access_scalars,
     "theory_time_proxy": theory_time_proxy,
+    "theory_model_version": lambda info: _theory(info).get("model_version"),
+    "theory_work_scope": lambda info: _theory(info).get("work_scope"),
+    "windows_per_sample": lambda info: _theory(info).get("windows_per_sample"),
     "training_memory_mb": training_memory_mb,
     "static_memory_mb": static_memory_mb,
     "time_eval_t1": time_eval_t1,
@@ -295,9 +293,9 @@ def leaderboard_columns():
         {"name": "evaluation_split", "value": "meta.evaluation_split"},
         {"name": "validation_samples", "value": "meta.num_validation_samples"},
         {"name": "test_samples", "value": "meta.num_test_samples"},
-        {"name": "theory_model_version", "value": "memory.theory.model_version"},
-        {"name": "theory_work_scope", "value": "memory.theory.work_scope"},
-        {"name": "windows_per_sample", "value": "memory.theory.windows_per_sample"},
+        {"name": "theory_model_version", "func": "theory_model_version"},
+        {"name": "theory_work_scope", "func": "theory_work_scope"},
+        {"name": "windows_per_sample", "func": "windows_per_sample"},
         {"name": "final_sample_acc", "value": "final.sample_acc"},
         {"name": "max_sample_acc", "func": "max_sample_acc"},
         {"name": "max_train_acc", "func": "max_train_acc"},
@@ -338,9 +336,9 @@ def per_epoch_columns():
         {"name": "evaluation_split", "value": "meta.evaluation_split"},
         {"name": "validation_samples", "value": "meta.num_validation_samples"},
         {"name": "test_samples", "value": "meta.num_test_samples"},
-        {"name": "theory_model_version", "value": "memory.theory.model_version"},
-        {"name": "theory_work_scope", "value": "memory.theory.work_scope"},
-        {"name": "windows_per_sample", "value": "memory.theory.windows_per_sample"},
+        {"name": "theory_model_version", "func": "theory_model_version"},
+        {"name": "theory_work_scope", "func": "theory_work_scope"},
+        {"name": "windows_per_sample", "func": "windows_per_sample"},
         {"name": "final_sample_acc", "value": "final.sample_acc"},
     ]
 
