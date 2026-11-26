@@ -50,3 +50,6 @@ env/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local Codex attachments
+/.codex-attachments/
